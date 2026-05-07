@@ -28,7 +28,10 @@ export function clearOauthSession() {
 }
 
 export function loadHistory() {
-  return readJson(HISTORY_KEY, []);
+  const history = readJson(HISTORY_KEY, []);
+  return Array.isArray(history)
+    ? history.filter((entry) => entry?.state === "pending" || Boolean(entry?.feedback))
+    : [];
 }
 
 export function appendHistory(entry) {

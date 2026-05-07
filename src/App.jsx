@@ -32,7 +32,7 @@ export default function App() {
   const [mode, setMode] = useState(() => (loadManualList() ? "manual" : "mal"));
   const [malList, setMalList] = useState([]);
   const [recommendation, setRecommendation] = useState(null);
-  const [currentHistoryId, setCurrentHistoryId] = useState(null);
+  const [currentDraftEntry, setCurrentDraftEntry] = useState(null);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const handledCallback = useRef(false);
@@ -125,8 +125,7 @@ export default function App() {
       };
 
       setRecommendation(rec);
-      setCurrentHistoryId(entry.id);
-      setHistory(appendHistory(entry));
+      setCurrentDraftEntry(entry);
       setStatus("");
       setView(VIEW.REVEAL);
     } catch (considerError) {
@@ -137,7 +136,7 @@ export default function App() {
   }
 
   function handleFeedback(feedback) {
-    if (!currentHistoryId) return;
+    if (!currentDraftEntry) return;
 
     const patch =
       feedback === "pending"
@@ -147,7 +146,9 @@ export default function App() {
             state: "rated",
             note: feedback === "good" ? "Lean further this way" : "I missed the mark"
           };
-    setHistory(updateHistoryEntry(currentHistoryId, patch));
+    const nextHistory = appendHistory({ ...currentDraftEntry, ...patch });
+    setHistory(nextHistory);
+    setCurrentDraftEntry(null);
     setView(VIEW.HISTORY);
   }
 
@@ -178,7 +179,7 @@ export default function App() {
     setTokens(null);
     setMalList([]);
     setRecommendation(null);
-    setCurrentHistoryId(null);
+    setCurrentDraftEntry(null);
     setView(VIEW.LANDING);
   }
 
