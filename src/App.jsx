@@ -1,0 +1,836 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { askEn } from "./openrouter.js";
+import { beginMalOauth, finishMalOauth } from "./oauth.js";
+import { fetchAnimeList } from "./mal.js";
+import {
+  appendHistory,
+  clearTokens,
+  loadHistory,
+  loadTokens,
+  updateHistoryEntry
+} from "./storage.js";
+
+const VIEW = {
+  LANDING: "landing",
+  MOOD: "mood",
+  THINKING: "thinking",
+  REVEAL: "reveal",
+  FEEDBACK: "feedback",
+  HISTORY: "history"
+};
+
+export default function App() {
+  const [view, setView] = useState(VIEW.LANDING);
+  const [tokens, setTokens] = useState(() => loadTokens());
+  const [history, setHistory] = useState(() => loadHistory());
+  const [mood, setMood] = useState("");
+  const [malList, setMalList] = useState([]);
+  const [recommendation, setRecommendation] = useState(null);
+  const [currentHistoryId, setCurrentHistoryId] = useState(null);
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+  const handledCallback = useRef(false);
+
+  useEffect(() => {
+    if (window.location.pathname !== "/callback" || handledCallback.current) return;
+
+    handledCallback.current = true;
+    setStatus("Receiving the thread from MyAnimeList");
+    finishMalOauth(window.location.href)
+      .then((nextTokens) => {
+        setTokens(nextTokens);
+        setView(VIEW.MOOD);
+        setStatus("");
+      })
+      .catch((oauthError) => {
+        setError(oauthError.message);
+        setStatus("");
+        setView(VIEW.LANDING);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (tokens?.access_token && view === VIEW.LANDING) {
+      setView(VIEW.MOOD);
+    }
+  }, [tokens, view]);
+
+  async function handleConnect() {
+    setError("");
+    try {
+      beginMalOauth();
+    } catch (connectError) {
+      setError(connectError.message);
+    }
+  }
+
+  async function handleConsider(nextMood) {
+    if (!tokens?.access_token) {
+      setView(VIEW.LANDING);
+      return;
+    }
+
+    setError("");
+    setRecommendation(null);
+    setStatus("Reading your history");
+    setView(VIEW.THINKING);
+
+    try {
+      const list = await fetchAnimeList(tokens.access_token);
+      setMalList(list);
+      setStatus("Listening to tonight");
+
+      const rec = await askEn({
+        mood: nextMood,
+        malList: list,
+        feedbackHistory: history
+      });
+
+      const entry = {
+        id: crypto.randomUUID(),
+        date: new Date().toISOString(),
+        mood: nextMood || "Surprise me",
+        recommendation: rec,
+        note: "",
+        feedback: ""
+      };
+
+      setRecommendation(rec);
+      setCurrentHistoryId(entry.id);
+      setHistory(appendHistory(entry));
+      setStatus("");
+      setView(VIEW.REVEAL);
+    } catch (considerError) {
+      setError(considerError.message);
+      setStatus("");
+      setView(VIEW.MOOD);
+    }
+  }
+
+  function handleFeedback(feedback) {
+    if (!currentHistoryId) return;
+
+    const note =
+      feedback === "good" ? "Lean further this way" : "I missed the mark";
+    setHistory(updateHistoryEntry(currentHistoryId, { feedback, note }));
+    setView(VIEW.HISTORY);
+  }
+
+  function handleDisconnect() {
+    clearTokens();
+    setTokens(null);
+    setMalList([]);
+    setRecommendation(null);
+    setCurrentHistoryId(null);
+    setView(VIEW.LANDING);
+  }
+
+  const nav = {
+    goto: setView,
+    connect: handleConnect,
+    consider: handleConsider,
+    feedback: handleFeedback,
+    disconnect: handleDisconnect
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", position: "relative" }}>
+      {error ? <ErrorRibbon message={error} /> : null}
+      {view === VIEW.LANDING && <ScreenLanding nav={nav} status={status} />}
+      {view === VIEW.MOOD && <ScreenMood nav={nav} mood={mood} setMood={setMood} />}
+      {view === VIEW.THINKING && (
+        <ScreenThinking
+          status={status}
+          mood={mood}
+          watchedCount={malList.length}
+        />
+      )}
+      {view === VIEW.REVEAL && recommendation && (
+        <ScreenReveal nav={nav} pick={recommendation} />
+      )}
+      {view === VIEW.FEEDBACK && recommendation && (
+        <ScreenFeedback nav={nav} pick={recommendation} />
+      )}
+      {view === VIEW.HISTORY && <ScreenHistory nav={nav} history={history} />}
+    </div>
+  );
+}
+
+function ErrorRibbon({ message }) {
+  return (
+    <div
+      className="meta"
+      style={{
+        position: "fixed",
+        top: 72,
+        left: "50%",
+        transform: "translateX(-50%)",
+        zIndex: 20,
+        maxWidth: 520,
+        width: "calc(100% - 32px)",
+        padding: "14px 18px",
+        border: "1px solid var(--hairline-strong)",
+        background: "rgba(13,12,11,0.92)",
+        color: "var(--bone-2)",
+        textAlign: "center"
+      }}
+    >
+      {message}
+    </div>
+  );
+}
+
+function Wordmark({ subtle }) {
+  return (
+    <div className="wordmark" style={{ opacity: subtle ? 0.85 : 1 }}>
+      <span className="kanji">縁</span>
+      <span style={{ fontStyle: "italic", fontSize: 20, letterSpacing: "0.04em" }}>
+        En
+      </span>
+    </div>
+  );
+}
+
+function Chrome({ step, total, right }) {
+  return (
+    <div className="app-chrome">
+      <Wordmark />
+      <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
+        {step != null && (
+          <span className="meta" style={{ letterSpacing: "0.18em" }}>
+            {String(step).padStart(2, "0")}{" "}
+            <span style={{ opacity: 0.5 }}>
+              / {String(total).padStart(2, "0")}
+            </span>
+          </span>
+        )}
+        {right}
+      </div>
+    </div>
+  );
+}
+
+function KV({ label = "key visual", w = 280, h = 400, style }) {
+  return (
+    <div className="kv-placeholder" style={{ width: w, height: h, ...style }}>
+      <span className="kv-label">{label}</span>
+    </div>
+  );
+}
+
+function ScreenLanding({ nav, status }) {
+  return (
+    <div className="app-frame">
+      <Chrome />
+      <div className="app-stage">
+        <div className="column column-narrow" style={{ textAlign: "center" }}>
+          <div className="eyebrow fade-up">An anime sommelier</div>
+
+          <h1
+            className="serif-display fade-up delay-1"
+            style={{
+              fontSize: 76,
+              margin: "36px 0 28px",
+              lineHeight: 1.02,
+              fontWeight: 300
+            }}
+          >
+            One anime.
+            <br />
+            <span style={{ fontStyle: "italic", color: "var(--bone-2)" }}>
+              Chosen for tonight.
+            </span>
+          </h1>
+
+          <p
+            className="fade-up delay-2"
+            style={{
+              fontSize: 18,
+              lineHeight: 1.6,
+              color: "var(--bone-2)",
+              maxWidth: 440,
+              margin: "0 auto 64px",
+              fontWeight: 300
+            }}
+          >
+            En reads your watch history, listens to your mood, and gives you a
+            single recommendation.
+            <br />
+            <br />
+            <span style={{ color: "var(--bone-3)" }}>Not a list. Never a list.</span>
+          </p>
+
+          <div className="fade-up delay-3">
+            <button className="btn-link" onClick={nav.connect}>
+              Connect MyAnimeList
+            </button>
+          </div>
+
+          {status ? (
+            <p className="meta fade-up delay-4" style={{ marginTop: 36 }}>
+              {status}
+            </p>
+          ) : null}
+
+          <div className="fade-up delay-4" style={{ marginTop: 80 }}>
+            <hr className="hairline-soft" style={{ width: 60, margin: "0 auto 18px" }} />
+            <p className="meta" style={{ fontSize: 11, letterSpacing: "0.18em" }}>
+              縁 · the thread of fate that connects two people
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ScreenMood({ nav, mood, setMood }) {
+  const ref = useRef(null);
+  const hints = useMemo(
+    () => [
+      "something quiet",
+      "rain on a Tuesday",
+      "long, slow, devastating",
+      "isekai but smarter",
+      "i need to feel something"
+    ],
+    []
+  );
+  const [hintIdx, setHintIdx] = useState(0);
+
+  useEffect(() => {
+    const t = setTimeout(() => ref.current?.focus(), 600);
+    return () => clearTimeout(t);
+  }, []);
+
+  useEffect(() => {
+    const id = setInterval(() => setHintIdx((i) => (i + 1) % hints.length), 3200);
+    return () => clearInterval(id);
+  }, [hints]);
+
+  return (
+    <div className="app-frame">
+      <Chrome step={1} total={3} />
+      <div className="app-stage">
+        <div className="column" style={{ textAlign: "center" }}>
+          <div className="eyebrow fade-up">Tonight</div>
+          <h2
+            className="serif-display fade-up delay-1"
+            style={{ fontSize: 44, margin: "32px 0 14px", fontWeight: 300 }}
+          >
+            How do you feel?
+          </h2>
+          <p
+            className="fade-up delay-2"
+            style={{
+              color: "var(--bone-3)",
+              fontSize: 15,
+              marginBottom: 80,
+              fontStyle: "italic"
+            }}
+          >
+            A word, a sentence, or nothing at all.
+          </p>
+
+          <div
+            className="fade-up delay-3"
+            style={{ position: "relative", maxWidth: 560, margin: "0 auto" }}
+          >
+            <textarea
+              ref={ref}
+              value={mood}
+              onChange={(e) => setMood(e.target.value)}
+              rows={2}
+              className="serif-display"
+              style={{
+                width: "100%",
+                fontSize: 28,
+                textAlign: "center",
+                lineHeight: 1.4,
+                color: "var(--bone)",
+                resize: "none",
+                fontWeight: 300
+              }}
+            />
+            <hr className="hairline" style={{ marginTop: 8 }} />
+            {!mood && (
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  display: "flex",
+                  alignItems: "flex-start",
+                  justifyContent: "center",
+                  pointerEvents: "none",
+                  paddingTop: 6
+                }}
+              >
+                <span
+                  key={hintIdx}
+                  className="serif-display fade-in"
+                  style={{
+                    fontSize: 28,
+                    color: "var(--bone-4)",
+                    fontStyle: "italic",
+                    fontWeight: 300
+                  }}
+                >
+                  {hints[hintIdx]}
+                </span>
+              </div>
+            )}
+          </div>
+
+          <div className="fade-up delay-4" style={{ marginTop: 80 }}>
+            <button
+              className="btn-link"
+              onClick={() => nav.consider(mood)}
+              style={{
+                opacity: mood.length ? 1 : 0.4,
+                pointerEvents: mood.length ? "auto" : "none",
+                transition: "opacity 0.4s ease"
+              }}
+            >
+              Let En consider
+            </button>
+            <div style={{ marginTop: 24 }}>
+              <button className="btn-quiet" onClick={() => nav.consider("")}>
+                or — surprise me
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ScreenThinking({ status, mood, watchedCount }) {
+  const [phase, setPhase] = useState(0);
+  const lines = useMemo(
+    () => [
+      "Reading your history",
+      watchedCount ? `${formatCount(watchedCount)} titles` : "Your list is opening",
+      mood ? "Listening to tonight" : "Letting tonight choose itself",
+      status || "Considering"
+    ],
+    [mood, status, watchedCount]
+  );
+
+  useEffect(() => {
+    const timers = [];
+    lines.forEach((_, i) => {
+      timers.push(setTimeout(() => setPhase((p) => Math.max(p, i + 1)), 800 + i * 1100));
+    });
+    return () => timers.forEach(clearTimeout);
+  }, [lines]);
+
+  return (
+    <div className="app-frame">
+      <Chrome step={2} total={3} />
+      <div className="app-stage">
+        <div className="column" style={{ textAlign: "center" }}>
+          <div className="breathe" style={{ marginBottom: 64 }}>
+            <span className="dot" style={{ width: 8, height: 8 }}></span>
+          </div>
+
+          <div style={{ minHeight: 140 }}>
+            {lines.slice(0, phase).map((line, i) => (
+              <div
+                key={`${line}-${i}`}
+                className="serif-display fade-up"
+                style={{
+                  fontSize: 22,
+                  fontWeight: 300,
+                  color: i === phase - 1 ? "var(--bone-2)" : "var(--bone-4)",
+                  fontStyle: "italic",
+                  margin: "14px 0",
+                  transition: "color 1s ease"
+                }}
+              >
+                {line}
+                {i === phase - 1 && "…"}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ScreenReveal({ nav, pick }) {
+  return (
+    <div className="app-frame reveal-a-frame">
+      <div className="reveal-a-top">
+        <Wordmark />
+        <span className="meta" style={{ letterSpacing: "0.2em" }}>03 / 03</span>
+      </div>
+
+      <div className="reveal-scroll-stage">
+        <div className="reveal-scroll ink-bloom">
+          <div
+            className="reveal-scroll__vertical jp ink-bloom delay-1"
+          >
+            {pick.title_jp} ・ {formatJapaneseDate(new Date())}
+          </div>
+
+          <div className="reveal-scroll__center ink-bloom delay-2">
+            <KV label="key visual" w={240} h={340} />
+            <p
+              className="meta"
+              style={{
+                marginTop: 12,
+                fontSize: 10.5,
+                letterSpacing: "0.22em"
+              }}
+            >
+              {formatAnimeMeta(pick)}
+            </p>
+          </div>
+
+          <div className="reveal-scroll__copy ink-bloom delay-3">
+            <div className="eyebrow shu">
+              ・ for you, tonight
+            </div>
+            <h1
+              className="serif-display reveal-scroll__title"
+            >
+              {pick.title}
+            </h1>
+
+            <hr
+              className="hairline"
+              style={{ width: 56, margin: "0 0 28px" }}
+            />
+
+            <p
+              className="reveal-scroll__reason"
+              style={{
+                color: "var(--bone-2)",
+                fontWeight: 300
+              }}
+            >
+              {stripMarkdown(pick.reason)}
+            </p>
+
+            <div
+              style={{ marginTop: 36 }}
+            >
+              <button className="btn-link" onClick={() => nav.goto(VIEW.FEEDBACK)}>
+                Begin
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className="reveal-scroll__seal meta jp">縁</div>
+      </div>
+    </div>
+  );
+}
+
+function ScreenFeedback({ nav, pick }) {
+  const [chosen, setChosen] = useState(null);
+
+  function choose(value) {
+    setChosen(value);
+    setTimeout(() => nav.feedback(value), 1100);
+  }
+
+  return (
+    <div className="app-frame">
+      <Chrome />
+      <div className="app-stage">
+        <div className="column" style={{ textAlign: "center", maxWidth: 560 }}>
+          <div className="eyebrow fade-up">After watching</div>
+
+          <h2
+            className="serif-display fade-up delay-1"
+            style={{
+              fontSize: 36,
+              margin: "28px 0 8px",
+              fontWeight: 300,
+              fontStyle: "italic"
+            }}
+          >
+            {pick.title}
+          </h2>
+          <p className="meta fade-up delay-1" style={{ marginBottom: 80 }}>
+            How was it?
+          </p>
+
+          <div
+            className="fade-up delay-2"
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 0,
+              borderTop: "1px solid var(--hairline-strong)",
+              borderBottom: "1px solid var(--hairline-strong)"
+            }}
+          >
+            {[
+              { k: "good", label: "It was good", sub: "Lean further this way" },
+              { k: "meh", label: "Meh", sub: "I missed the mark" }
+            ].map((opt) => (
+              <button
+                key={opt.k}
+                onClick={() => choose(opt.k)}
+                style={{
+                  padding: "32px 24px",
+                  textAlign: "left",
+                  borderTop: opt.k === "meh" ? "1px solid var(--hairline)" : "none",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  transition: "background 0.3s, padding 0.3s",
+                  background: chosen === opt.k ? "rgba(184,83,63,0.06)" : "transparent"
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "rgba(235,230,220,0.03)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background =
+                    chosen === opt.k ? "rgba(184,83,63,0.06)" : "transparent";
+                }}
+              >
+                <div>
+                  <div
+                    className="serif-display"
+                    style={{ fontSize: 26, fontWeight: 300, fontStyle: "italic" }}
+                  >
+                    {opt.label}
+                  </div>
+                  <div className="meta" style={{ marginTop: 6, fontStyle: "normal" }}>
+                    {opt.sub}
+                  </div>
+                </div>
+                <span
+                  style={{
+                    color: chosen === opt.k ? "var(--shu)" : "var(--bone-4)",
+                    fontFamily: "var(--serif)",
+                    fontSize: 22
+                  }}
+                >
+                  {chosen === opt.k ? "・" : "→"}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          {chosen && (
+            <p
+              className="fade-in"
+              style={{
+                marginTop: 40,
+                color: "var(--bone-3)",
+                fontStyle: "italic",
+                fontSize: 15
+              }}
+            >
+              {chosen === "good" ? "Noted. En will remember." : "Noted. En will recalibrate."}
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ScreenHistory({ nav, history }) {
+  return (
+    <div className="app-frame">
+      <Chrome
+        right={
+          <button className="btn-quiet" onClick={() => nav.goto(VIEW.MOOD)}>
+            new recommendation →
+          </button>
+        }
+      />
+      <div className="app-stage" style={{ alignItems: "flex-start", paddingTop: 80 }}>
+        <div className="column" style={{ maxWidth: 680 }}>
+          <div className="eyebrow fade-up">A reading log</div>
+          <h2
+            className="serif-display fade-up delay-1"
+            style={{ fontSize: 48, margin: "24px 0 8px", fontWeight: 300 }}
+          >
+            What En has chosen
+          </h2>
+          <p
+            className="fade-up delay-2"
+            style={{ color: "var(--bone-3)", fontStyle: "italic", marginBottom: 80 }}
+          >
+            {history.length
+              ? `${history.length} recommendation${history.length === 1 ? "" : "s"}`
+              : "No recommendations yet"}
+          </p>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 56 }}>
+            {history.map((entry, i) => (
+              <article
+                key={entry.id}
+                className="fade-up"
+                style={{
+                  animationDelay: `${0.3 + i * 0.18}s`,
+                  display: "grid",
+                  gridTemplateColumns: "110px 1fr",
+                  gap: 32,
+                  paddingBottom: 56,
+                  borderBottom: i < history.length - 1 ? "1px solid var(--hairline)" : "none"
+                }}
+              >
+                <div>
+                  <div className="meta" style={{ fontSize: 10.5, letterSpacing: "0.18em" }}>
+                    {formatDate(entry.date)}
+                  </div>
+                  <div
+                    className="meta"
+                    style={{
+                      marginTop: 12,
+                      fontSize: 10.5,
+                      letterSpacing: "0.22em",
+                      color: entry.feedback === "good" ? "var(--shu)" : "var(--bone-4)"
+                    }}
+                  >
+                    {entry.feedback === "good" ? "・ good" : entry.feedback === "meh" ? "— meh" : ""}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="jp" style={{ fontSize: 14, color: "var(--bone-3)", marginBottom: 4 }}>
+                    {entry.recommendation.title_jp}
+                  </div>
+                  <h3
+                    className="serif-display"
+                    style={{ fontSize: 28, margin: 0, fontWeight: 300, fontStyle: "italic" }}
+                  >
+                    {entry.recommendation.title}
+                  </h3>
+                  <p
+                    style={{
+                      marginTop: 14,
+                      color: "var(--bone-2)",
+                      fontSize: 16,
+                      lineHeight: 1.6,
+                      fontWeight: 300,
+                      maxWidth: 460
+                    }}
+                  >
+                    <span
+                      className="meta"
+                      style={{
+                        fontSize: 10,
+                        marginRight: 10,
+                        verticalAlign: "middle",
+                        letterSpacing: "0.2em"
+                      }}
+                    >
+                      EN ·
+                    </span>
+                    <em style={{ fontStyle: "italic" }}>
+                      {stripMarkdown(entry.recommendation.reason)}
+                    </em>
+                  </p>
+                  {entry.note && (
+                    <p
+                      style={{
+                        marginTop: 18,
+                        fontFamily: "var(--serif)",
+                        fontSize: 15,
+                        fontStyle: "italic",
+                        color: "var(--bone-3)",
+                        paddingLeft: 18,
+                        borderLeft: "1px solid var(--shu)",
+                        opacity: 0.85
+                      }}
+                    >
+                      <span
+                        className="meta"
+                        style={{
+                          fontSize: 9.5,
+                          letterSpacing: "0.22em",
+                          marginRight: 8,
+                          color: "var(--shu)"
+                        }}
+                      >
+                        YOU
+                      </span>
+                      {entry.note}
+                    </p>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+
+          <div style={{ textAlign: "center", marginTop: 80, paddingBottom: 80 }}>
+            <p
+              className="meta"
+              style={{ fontStyle: "italic", fontFamily: "var(--serif)", fontSize: 14 }}
+            >
+              — and that is all, for now.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function formatCount(count) {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(count);
+}
+
+function formatAnimeMeta(pick) {
+  const parts = [pick.year];
+
+  if (pick.episodes === 1) {
+    parts.push("film");
+  } else if (pick.episodes) {
+    parts.push(`${pick.episodes} episodes`);
+  }
+
+  if (pick.genre) {
+    parts.push(pick.genre);
+  }
+
+  return parts.filter(Boolean).join(" · ");
+}
+
+function formatJapaneseDate(date) {
+  const numerals = ["〇", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+  const year = String(date.getFullYear())
+    .split("")
+    .map((digit) => numerals[Number(digit)])
+    .join("");
+  return `${year}年${toJapaneseNumber(date.getMonth() + 1)}月${toJapaneseNumber(date.getDate())}日`;
+}
+
+function toJapaneseNumber(value) {
+  const numerals = ["〇", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+  if (value <= 10) {
+    return value === 10 ? "十" : numerals[value];
+  }
+  if (value < 20) {
+    return `十${value % 10 ? numerals[value % 10] : ""}`;
+  }
+  const tens = Math.floor(value / 10);
+  const ones = value % 10;
+  return `${numerals[tens]}十${ones ? numerals[ones] : ""}`;
+}
+
+function stripMarkdown(value) {
+  return String(value || "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/[*_~`>#]/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function formatDate(date) {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    weekday: "long"
+  }).format(new Date(date));
+}
