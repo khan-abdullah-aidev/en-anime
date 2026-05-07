@@ -200,12 +200,25 @@ export default function App() {
       {error ? <ErrorRibbon message={error} /> : null}
       {view === VIEW.LANDING && <ScreenLanding nav={nav} status={status} />}
       {view === VIEW.MANUAL && (
-        <ScreenManual nav={nav} manualList={manualList} setManualList={setManualList} />
+        <ScreenManual
+          onLog={nav.log}
+          onSubmit={handleManualSubmit}
+          manualList={manualList}
+          setManualList={setManualList}
+        />
       )}
       {view === VIEW.PENDING && (
         <ScreenPending nav={nav} pending={findPending(history)} />
       )}
-      {view === VIEW.MOOD && <ScreenMood nav={nav} mood={mood} setMood={setMood} />}
+      {view === VIEW.MOOD && (
+        <ScreenMood
+          onLog={nav.log}
+          onConsider={() => handleConsider(mood)}
+          onSurprise={() => handleConsider("")}
+          mood={mood}
+          setMood={setMood}
+        />
+      )}
       {view === VIEW.THINKING && (
         <ScreenThinking
           status={status}
@@ -361,7 +374,7 @@ function ScreenLanding({ nav, status }) {
   );
 }
 
-function ScreenManual({ nav, manualList, setManualList }) {
+function ScreenManual({ onLog, onSubmit, manualList, setManualList }) {
   const ref = useRef(null);
 
   useEffect(() => {
@@ -371,7 +384,7 @@ function ScreenManual({ nav, manualList, setManualList }) {
 
   return (
     <div className="app-frame">
-      <Chrome onLog={nav.log} />
+      <Chrome onLog={onLog} />
       <div className="app-stage">
         <div className="column" style={{ textAlign: "center" }}>
           <div className="eyebrow fade-up">Instead of a library</div>
@@ -420,7 +433,7 @@ function ScreenManual({ nav, manualList, setManualList }) {
           <div className="fade-up delay-4" style={{ marginTop: 80 }}>
             <button
               className="btn-link"
-              onClick={() => nav.manualSubmit(manualList)}
+              onClick={() => onSubmit(manualList)}
               style={{
                 opacity: manualList.trim().length ? 1 : 0.4,
                 pointerEvents: manualList.trim().length ? "auto" : "none",
@@ -476,7 +489,7 @@ function ScreenPending({ nav, pending }) {
   );
 }
 
-function ScreenMood({ nav, mood, setMood }) {
+function ScreenMood({ onLog, onConsider, onSurprise, mood, setMood }) {
   const ref = useRef(null);
   const hints = useMemo(
     () => [
@@ -502,7 +515,7 @@ function ScreenMood({ nav, mood, setMood }) {
 
   return (
     <div className="app-frame">
-      <Chrome step={1} total={3} onLog={nav.log} />
+      <Chrome step={1} total={3} onLog={onLog} />
       <div className="app-stage">
         <div className="column" style={{ textAlign: "center" }}>
           <div className="eyebrow fade-up">Tonight</div>
@@ -576,7 +589,7 @@ function ScreenMood({ nav, mood, setMood }) {
           <div className="fade-up delay-4" style={{ marginTop: 80 }}>
             <button
               className="btn-link"
-              onClick={() => nav.consider(mood)}
+              onClick={onConsider}
               style={{
                 opacity: mood.length ? 1 : 0.4,
                 pointerEvents: mood.length ? "auto" : "none",
@@ -586,7 +599,7 @@ function ScreenMood({ nav, mood, setMood }) {
               Let En consider
             </button>
             <div style={{ marginTop: 24 }}>
-              <button className="btn-quiet" onClick={() => nav.consider("")}>
+              <button className="btn-quiet" onClick={onSurprise}>
                 or — surprise me
               </button>
             </div>
