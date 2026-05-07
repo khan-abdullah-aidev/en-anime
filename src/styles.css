@@ -51,6 +51,7 @@ body::before {
 
 button { font-family: inherit; color: inherit; background: none; border: none; padding: 0; cursor: pointer; }
 input, textarea { font-family: inherit; color: inherit; background: none; border: none; outline: none; }
+textarea::placeholder { color: var(--bone-4); font-style: italic; opacity: 1; }
 
 /* ——— Type utilities ——— */
 .eyebrow {
@@ -135,6 +136,18 @@ input, textarea { font-family: inherit; color: inherit; background: none; border
   transition: color 0.3s ease;
 }
 .btn-quiet:hover { color: var(--bone); }
+
+.choice-links {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.choice-links__active {
+  color: var(--shu);
+  border-bottom-color: var(--shu);
+}
 
 /* ——— Layout ——— */
 .app-frame {

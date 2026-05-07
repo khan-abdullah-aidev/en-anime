@@ -1,6 +1,7 @@
 const TOKEN_KEY = "en.malTokens";
 const HISTORY_KEY = "en.recommendationHistory";
 const OAUTH_KEY = "en.oauth";
+const MANUAL_LIST_KEY = "en.manualList";
 
 export function loadTokens() {
   return readJson(TOKEN_KEY, null);
@@ -42,6 +43,18 @@ export function updateHistoryEntry(id, patch) {
   );
   localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
   return next;
+}
+
+export function loadManualList() {
+  return localStorage.getItem(MANUAL_LIST_KEY) || "";
+}
+
+export function saveManualList(value) {
+  localStorage.setItem(MANUAL_LIST_KEY, value);
+}
+
+export function clearManualList() {
+  localStorage.removeItem(MANUAL_LIST_KEY);
 }
 
 function readJson(key, fallback) {

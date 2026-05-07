@@ -5,13 +5,17 @@ import { fetchAnimeList } from "./mal.js";
 import {
   appendHistory,
   clearTokens,
+  loadManualList,
   loadHistory,
   loadTokens,
+  saveManualList,
   updateHistoryEntry
 } from "./storage.js";
 
 const VIEW = {
   LANDING: "landing",
+  MANUAL: "manual",
+  PENDING: "pending",
   MOOD: "mood",
   THINKING: "thinking",
   REVEAL: "reveal",
@@ -24,6 +28,8 @@ export default function App() {
   const [tokens, setTokens] = useState(() => loadTokens());
   const [history, setHistory] = useState(() => loadHistory());
   const [mood, setMood] = useState("");
+  const [manualList, setManualList] = useState(() => loadManualList());
+  const [mode, setMode] = useState(() => (loadManualList() ? "manual" : "mal"));
   const [malList, setMalList] = useState([]);
   const [recommendation, setRecommendation] = useState(null);
   const [currentHistoryId, setCurrentHistoryId] = useState(null);
@@ -39,7 +45,8 @@ export default function App() {
     finishMalOauth(window.location.href)
       .then((nextTokens) => {
         setTokens(nextTokens);
-        setView(VIEW.MOOD);
+        setMode("mal");
+        goToMoodOrPending(loadHistory());
         setStatus("");
       })
       .catch((oauthError) => {
@@ -51,7 +58,8 @@ export default function App() {
 
   useEffect(() => {
     if (tokens?.access_token && view === VIEW.LANDING) {
-      setView(VIEW.MOOD);
+      setMode("mal");
+      goToMoodOrPending(history);
     }
   }, [tokens, view]);
 
@@ -64,20 +72,40 @@ export default function App() {
     }
   }
 
+  function handleManualStart() {
+    setError("");
+    setMode("manual");
+    setView(VIEW.MANUAL);
+  }
+
+  function handleManualSubmit(value) {
+    const nextValue = value.trim();
+    setManualList(nextValue);
+    saveManualList(nextValue);
+    setMode("manual");
+    goToMoodOrPending(history);
+  }
+
+  function goToMoodOrPending(nextHistory = history) {
+    const pending = findPending(nextHistory);
+    setView(pending ? VIEW.PENDING : VIEW.MOOD);
+  }
+
   async function handleConsider(nextMood) {
-    if (!tokens?.access_token) {
+    if (mode !== "manual" && !tokens?.access_token) {
       setView(VIEW.LANDING);
       return;
     }
 
     setError("");
     setRecommendation(null);
-    setStatus("Reading your history");
+    setStatus(mode === "manual" ? "Reading what you told En" : "Reading your history");
     setView(VIEW.THINKING);
 
     try {
-      const list = await fetchAnimeList(tokens.access_token);
-      setMalList(list);
+      const list =
+        mode === "manual" ? manualList : await fetchAnimeList(tokens.access_token);
+      setMalList(Array.isArray(list) ? list : []);
       setStatus("Listening to tonight");
 
       const rec = await askEn({
@@ -92,7 +120,8 @@ export default function App() {
         mood: nextMood || "Surprise me",
         recommendation: rec,
         note: "",
-        feedback: ""
+        feedback: "",
+        state: "unrated"
       };
 
       setRecommendation(rec);
@@ -110,10 +139,38 @@ export default function App() {
   function handleFeedback(feedback) {
     if (!currentHistoryId) return;
 
-    const note =
-      feedback === "good" ? "Lean further this way" : "I missed the mark";
-    setHistory(updateHistoryEntry(currentHistoryId, { feedback, note }));
+    const patch =
+      feedback === "pending"
+        ? { feedback: "", state: "pending", note: "waiting in the watchlist" }
+        : {
+            feedback,
+            state: "rated",
+            note: feedback === "good" ? "Lean further this way" : "I missed the mark"
+          };
+    setHistory(updateHistoryEntry(currentHistoryId, patch));
     setView(VIEW.HISTORY);
+  }
+
+  function handlePendingAnswer(answer) {
+    const pending = findPending(history);
+    if (!pending) {
+      setView(VIEW.MOOD);
+      return;
+    }
+
+    if (answer === "not-yet") {
+      setView(VIEW.MOOD);
+      return;
+    }
+
+    const patch = {
+      feedback: answer,
+      state: "rated",
+      note: answer === "good" ? "Lean further this way" : "I missed the mark"
+    };
+    const nextHistory = updateHistoryEntry(pending.id, patch);
+    setHistory(nextHistory);
+    setView(VIEW.MOOD);
   }
 
   function handleDisconnect() {
@@ -127,9 +184,14 @@ export default function App() {
 
   const nav = {
     goto: setView,
+    log: () => setView(VIEW.HISTORY),
+    newRecommendation: () => goToMoodOrPending(history),
     connect: handleConnect,
+    manualStart: handleManualStart,
+    manualSubmit: handleManualSubmit,
     consider: handleConsider,
     feedback: handleFeedback,
+    pendingAnswer: handlePendingAnswer,
     disconnect: handleDisconnect
   };
 
@@ -137,12 +199,19 @@ export default function App() {
     <div style={{ minHeight: "100vh", position: "relative" }}>
       {error ? <ErrorRibbon message={error} /> : null}
       {view === VIEW.LANDING && <ScreenLanding nav={nav} status={status} />}
+      {view === VIEW.MANUAL && (
+        <ScreenManual nav={nav} manualList={manualList} setManualList={setManualList} />
+      )}
+      {view === VIEW.PENDING && (
+        <ScreenPending nav={nav} pending={findPending(history)} />
+      )}
       {view === VIEW.MOOD && <ScreenMood nav={nav} mood={mood} setMood={setMood} />}
       {view === VIEW.THINKING && (
         <ScreenThinking
           status={status}
           mood={mood}
-          watchedCount={malList.length}
+          watchedCount={mode === "manual" ? manualList : malList.length}
+          mode={mode}
         />
       )}
       {view === VIEW.REVEAL && recommendation && (
@@ -191,7 +260,7 @@ function Wordmark({ subtle }) {
   );
 }
 
-function Chrome({ step, total, right }) {
+function Chrome({ step, total, right, onLog }) {
   return (
     <div className="app-chrome">
       <Wordmark />
@@ -205,6 +274,9 @@ function Chrome({ step, total, right }) {
           </span>
         )}
         {right}
+        <button className="btn-quiet" onClick={onLog}>
+          LOG
+        </button>
       </div>
     </div>
   );
@@ -221,7 +293,7 @@ function KV({ label = "key visual", w = 280, h = 400, style }) {
 function ScreenLanding({ nav, status }) {
   return (
     <div className="app-frame">
-      <Chrome />
+      <Chrome onLog={nav.log} />
       <div className="app-stage">
         <div className="column column-narrow" style={{ textAlign: "center" }}>
           <div className="eyebrow fade-up">An anime sommelier</div>
@@ -264,6 +336,11 @@ function ScreenLanding({ nav, status }) {
             <button className="btn-link" onClick={nav.connect}>
               Connect MyAnimeList
             </button>
+            <div style={{ marginTop: 24 }}>
+              <button className="btn-link" onClick={nav.manualStart}>
+                I'll tell En myself
+              </button>
+            </div>
           </div>
 
           {status ? (
@@ -277,6 +354,121 @@ function ScreenLanding({ nav, status }) {
             <p className="meta" style={{ fontSize: 11, letterSpacing: "0.18em" }}>
               縁 · the thread of fate that connects two people
             </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ScreenManual({ nav, manualList, setManualList }) {
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => ref.current?.focus(), 600);
+    return () => clearTimeout(t);
+  }, []);
+
+  return (
+    <div className="app-frame">
+      <Chrome onLog={nav.log} />
+      <div className="app-stage">
+        <div className="column" style={{ textAlign: "center" }}>
+          <div className="eyebrow fade-up">Instead of a library</div>
+          <h2
+            className="serif-display fade-up delay-1"
+            style={{ fontSize: 44, margin: "32px 0 14px", fontWeight: 300 }}
+          >
+            What have you watched?
+          </h2>
+          <p
+            className="fade-up delay-2"
+            style={{
+              color: "var(--bone-3)",
+              fontSize: 15,
+              marginBottom: 80,
+              fontStyle: "italic"
+            }}
+          >
+            Just anime you've seen and loved.
+          </p>
+
+          <div
+            className="fade-up delay-3"
+            style={{ position: "relative", maxWidth: 620, margin: "0 auto" }}
+          >
+            <textarea
+              ref={ref}
+              value={manualList}
+              onChange={(e) => setManualList(e.target.value)}
+              rows={3}
+              className="serif-display"
+              placeholder="Death Note, Your Name, Vinland Saga..."
+              style={{
+                width: "100%",
+                fontSize: 28,
+                textAlign: "center",
+                lineHeight: 1.4,
+                color: "var(--bone)",
+                resize: "none",
+                fontWeight: 300
+              }}
+            />
+            <hr className="hairline" style={{ marginTop: 8 }} />
+          </div>
+
+          <div className="fade-up delay-4" style={{ marginTop: 80 }}>
+            <button
+              className="btn-link"
+              onClick={() => nav.manualSubmit(manualList)}
+              style={{
+                opacity: manualList.trim().length ? 1 : 0.4,
+                pointerEvents: manualList.trim().length ? "auto" : "none",
+                transition: "opacity 0.4s ease"
+              }}
+            >
+              Continue
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ScreenPending({ nav, pending }) {
+  if (!pending) {
+    return null;
+  }
+
+  return (
+    <div className="app-frame">
+      <Chrome onLog={nav.log} />
+      <div className="app-stage">
+        <div className="column" style={{ textAlign: "center", maxWidth: 560 }}>
+          <div className="eyebrow fade-up">Before tonight</div>
+          <h2
+            className="serif-display fade-up delay-1"
+            style={{
+              fontSize: 44,
+              margin: "28px 0 14px",
+              fontWeight: 300,
+              fontStyle: "italic"
+            }}
+          >
+            Did you watch {pending.recommendation.title}?
+          </h2>
+
+          <div className="choice-links fade-up delay-2" style={{ marginTop: 76 }}>
+            <button className="btn-link" onClick={() => nav.pendingAnswer("good")}>
+              It was good
+            </button>
+            <button className="btn-link" onClick={() => nav.pendingAnswer("meh")}>
+              Meh
+            </button>
+            <button className="btn-link" onClick={() => nav.pendingAnswer("not-yet")}>
+              Not yet
+            </button>
           </div>
         </div>
       </div>
@@ -310,7 +502,7 @@ function ScreenMood({ nav, mood, setMood }) {
 
   return (
     <div className="app-frame">
-      <Chrome step={1} total={3} />
+      <Chrome step={1} total={3} onLog={nav.log} />
       <div className="app-stage">
         <div className="column" style={{ textAlign: "center" }}>
           <div className="eyebrow fade-up">Tonight</div>
@@ -405,16 +597,23 @@ function ScreenMood({ nav, mood, setMood }) {
   );
 }
 
-function ScreenThinking({ status, mood, watchedCount }) {
+function ScreenThinking({ status, mood, watchedCount, mode }) {
   const [phase, setPhase] = useState(0);
   const lines = useMemo(
-    () => [
-      "Reading your history",
-      watchedCount ? `${formatCount(watchedCount)} titles` : "Your list is opening",
-      mood ? "Listening to tonight" : "Letting tonight choose itself",
-      status || "Considering"
-    ],
-    [mood, status, watchedCount]
+    () =>
+      mode === "manual"
+        ? [
+            "Reading what you told En",
+            mood ? "Listening to tonight" : "Letting tonight choose itself",
+            "Considering"
+          ]
+        : [
+            "Reading your history",
+            watchedCount ? `${formatCount(watchedCount)} titles` : "Your list is opening",
+            mood ? "Listening to tonight" : "Letting tonight choose itself",
+            status || "Considering"
+          ],
+    [mode, mood, status, watchedCount]
   );
 
   useEffect(() => {
@@ -427,7 +626,7 @@ function ScreenThinking({ status, mood, watchedCount }) {
 
   return (
     <div className="app-frame">
-      <Chrome step={2} total={3} />
+      <Chrome step={2} total={3} onLog={nav.log} />
       <div className="app-stage">
         <div className="column" style={{ textAlign: "center" }}>
           <div className="breathe" style={{ marginBottom: 64 }}>
@@ -464,7 +663,12 @@ function ScreenReveal({ nav, pick }) {
     <div className="app-frame reveal-a-frame">
       <div className="reveal-a-top">
         <Wordmark />
-        <span className="meta" style={{ letterSpacing: "0.2em" }}>03 / 03</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
+          <span className="meta" style={{ letterSpacing: "0.2em" }}>03 / 03</span>
+          <button className="btn-quiet" onClick={nav.log}>
+            LOG
+          </button>
+        </div>
       </div>
 
       <div className="reveal-scroll-stage">
@@ -539,7 +743,7 @@ function ScreenFeedback({ nav, pick }) {
 
   return (
     <div className="app-frame">
-      <Chrome />
+      <Chrome onLog={nav.log} />
       <div className="app-stage">
         <div className="column" style={{ textAlign: "center", maxWidth: 560 }}>
           <div className="eyebrow fade-up">After watching</div>
@@ -559,61 +763,18 @@ function ScreenFeedback({ nav, pick }) {
             How was it?
           </p>
 
-          <div
-            className="fade-up delay-2"
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: 0,
-              borderTop: "1px solid var(--hairline-strong)",
-              borderBottom: "1px solid var(--hairline-strong)"
-            }}
-          >
+          <div className="choice-links fade-up delay-2">
             {[
-              { k: "good", label: "It was good", sub: "Lean further this way" },
-              { k: "meh", label: "Meh", sub: "I missed the mark" }
+              { k: "good", label: "It was good" },
+              { k: "meh", label: "Meh" },
+              { k: "pending", label: "Add to watchlist" }
             ].map((opt) => (
               <button
                 key={opt.k}
                 onClick={() => choose(opt.k)}
-                style={{
-                  padding: "32px 24px",
-                  textAlign: "left",
-                  borderTop: opt.k === "meh" ? "1px solid var(--hairline)" : "none",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  transition: "background 0.3s, padding 0.3s",
-                  background: chosen === opt.k ? "rgba(184,83,63,0.06)" : "transparent"
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "rgba(235,230,220,0.03)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background =
-                    chosen === opt.k ? "rgba(184,83,63,0.06)" : "transparent";
-                }}
+                className={chosen === opt.k ? "btn-link choice-links__active" : "btn-link"}
               >
-                <div>
-                  <div
-                    className="serif-display"
-                    style={{ fontSize: 26, fontWeight: 300, fontStyle: "italic" }}
-                  >
-                    {opt.label}
-                  </div>
-                  <div className="meta" style={{ marginTop: 6, fontStyle: "normal" }}>
-                    {opt.sub}
-                  </div>
-                </div>
-                <span
-                  style={{
-                    color: chosen === opt.k ? "var(--shu)" : "var(--bone-4)",
-                    fontFamily: "var(--serif)",
-                    fontSize: 22
-                  }}
-                >
-                  {chosen === opt.k ? "・" : "→"}
-                </span>
+                {opt.label}
               </button>
             ))}
           </div>
@@ -628,7 +789,11 @@ function ScreenFeedback({ nav, pick }) {
                 fontSize: 15
               }}
             >
-              {chosen === "good" ? "Noted. En will remember." : "Noted. En will recalibrate."}
+              {chosen === "pending"
+                ? "Saved. En will ask later."
+                : chosen === "good"
+                  ? "Noted. En will remember."
+                  : "Noted. En will recalibrate."}
             </p>
           )}
         </div>
@@ -642,10 +807,11 @@ function ScreenHistory({ nav, history }) {
     <div className="app-frame">
       <Chrome
         right={
-          <button className="btn-quiet" onClick={() => nav.goto(VIEW.MOOD)}>
+          <button className="btn-quiet" onClick={nav.newRecommendation}>
             new recommendation →
           </button>
         }
+        onLog={nav.log}
       />
       <div className="app-stage" style={{ alignItems: "flex-start", paddingTop: 80 }}>
         <div className="column" style={{ maxWidth: 680 }}>
@@ -689,10 +855,18 @@ function ScreenHistory({ nav, history }) {
                       marginTop: 12,
                       fontSize: 10.5,
                       letterSpacing: "0.22em",
-                      color: entry.feedback === "good" ? "var(--shu)" : "var(--bone-4)"
+                      color: entry.feedback === "good" || entry.state === "pending"
+                        ? "var(--shu)"
+                        : "var(--bone-4)"
                     }}
                   >
-                    {entry.feedback === "good" ? "・ good" : entry.feedback === "meh" ? "— meh" : ""}
+                    {entry.state === "pending"
+                      ? "○ pending"
+                      : entry.feedback === "good"
+                        ? "・ good"
+                        : entry.feedback === "meh"
+                          ? "— meh"
+                          : ""}
                   </div>
                 </div>
 
@@ -779,6 +953,10 @@ function ScreenHistory({ nav, history }) {
 
 function formatCount(count) {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(count);
+}
+
+function findPending(history) {
+  return history.find((entry) => entry.state === "pending");
 }
 
 function formatAnimeMeta(pick) {
