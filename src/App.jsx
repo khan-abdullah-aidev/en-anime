@@ -221,6 +221,7 @@ export default function App() {
       )}
       {view === VIEW.THINKING && (
         <ScreenThinking
+          onLog={nav.log}
           status={status}
           mood={mood}
           watchedCount={mode === "manual" ? manualList : malList.length}
@@ -610,7 +611,7 @@ function ScreenMood({ onLog, onConsider, onSurprise, mood, setMood }) {
   );
 }
 
-function ScreenThinking({ status, mood, watchedCount, mode }) {
+function ScreenThinking({ onLog, status, mood, watchedCount, mode }) {
   const [phase, setPhase] = useState(0);
   const lines = useMemo(
     () =>
@@ -639,7 +640,7 @@ function ScreenThinking({ status, mood, watchedCount, mode }) {
 
   return (
     <div className="app-frame">
-      <Chrome step={2} total={3} onLog={nav.log} />
+      <Chrome step={2} total={3} onLog={onLog} />
       <div className="app-stage">
         <div className="column" style={{ textAlign: "center" }}>
           <div className="breathe" style={{ marginBottom: 64 }}>
