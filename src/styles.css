@@ -51,6 +51,7 @@ body::before {
 
 button { font-family: inherit; color: inherit; background: none; border: none; padding: 0; cursor: pointer; }
 input, textarea { font-family: inherit; color: inherit; background: none; border: none; outline: none; }
+input::placeholder,
 textarea::placeholder { color: var(--bone-4); font-style: italic; opacity: 1; }
 
 /* ——— Type utilities ——— */
@@ -149,6 +150,20 @@ textarea::placeholder { color: var(--bone-4); font-style: italic; opacity: 1; }
   border-bottom-color: var(--shu);
 }
 
+.meh-note-input {
+  border-bottom: 1px solid var(--hairline-strong);
+  color: var(--bone);
+  font-family: var(--serif);
+  font-size: 22px;
+  font-style: italic;
+  font-weight: 300;
+  line-height: 1.4;
+  max-width: 360px;
+  padding: 10px 0;
+  text-align: center;
+  width: 100%;
+}
+
 /* ——— Layout ——— */
 .app-frame {
   position: relative;
@@ -228,6 +243,12 @@ textarea::placeholder { color: var(--bone-4); font-style: italic; opacity: 1; }
   letter-spacing: 0.2em;
   color: var(--bone-4);
   text-transform: uppercase;
+}
+.kv-placeholder img {
+  display: block;
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
 }
 
 /* Screen container — for use inside flow shell */

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#0d0c0b"/>
+  <filter id="n">
+    <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" stitchTiles="stitch"/>
+    <feColorMatrix values="0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.16 0"/>
+  </filter>
+  <rect width="1200" height="630" filter="url(#n)" opacity="0.18"/>
+  <line x1="132" y1="88" x2="132" y2="542" stroke="rgba(235,230,220,0.2)" stroke-width="1"/>
+  <text x="102" y="104" fill="rgba(235,230,220,0.55)" font-family="'Noto Serif JP', serif" font-size="32" writing-mode="vertical-rl" letter-spacing="10">縁 ・ 今夜</text>
+  <rect x="460" y="132" width="250" height="348" fill="#15130f" stroke="rgba(235,230,220,0.2)"/>
+  <path d="M460 132h250v348H460z" fill="url(#g)" opacity="0.5"/>
+  <defs>
+    <pattern id="g" width="18" height="18" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <line x1="0" y1="0" x2="0" y2="18" stroke="#b8533f" stroke-opacity="0.16" stroke-width="2"/>
+    </pattern>
+  </defs>
+  <text x="585" y="312" fill="rgba(235,230,220,0.32)" font-family="monospace" font-size="13" letter-spacing="4" text-anchor="middle">KEY VISUAL</text>
+  <text x="760" y="195" fill="#b8533f" font-family="Inter, sans-serif" font-size="16" letter-spacing="6">・ FOR YOU, TONIGHT</text>
+  <text x="760" y="282" fill="#ebe6dc" font-family="'Cormorant Garamond', Georgia, serif" font-size="78" font-style="italic">En</text>
+  <line x1="760" y1="322" x2="830" y2="322" stroke="rgba(235,230,220,0.2)" stroke-width="1"/>
+  <text x="760" y="382" fill="rgba(235,230,220,0.78)" font-family="'Cormorant Garamond', Georgia, serif" font-size="30" font-style="italic">One anime. Chosen for tonight.</text>
+  <text x="760" y="432" fill="rgba(235,230,220,0.55)" font-family="Inter, sans-serif" font-size="15" letter-spacing="5">NOT A LIST. NEVER A LIST.</text>
+</svg>

@@ -92,13 +92,69 @@ function localApi(env) {
           );
         }
       });
+
+      server.middlewares.use("/api/anime-image", async (req, res, next) => {
+        if (req.method === "OPTIONS") {
+          writeJson(res, 204, "", "GET, OPTIONS");
+          return;
+        }
+
+        if (req.method !== "GET") {
+          writeJson(res, 405, { error: "Method not allowed" }, "GET, OPTIONS");
+          return;
+        }
+
+        try {
+          const url = new URL(req.url || "", "http://localhost");
+          const title = url.searchParams.get("q") || "";
+          if (!title.trim()) {
+            writeJson(res, 400, { error: "Missing anime title" }, "GET, OPTIONS");
+            return;
+          }
+
+          const headers = req.headers.authorization
+            ? { Authorization: req.headers.authorization }
+            : { "X-MAL-CLIENT-ID": env.MAL_CLIENT_ID };
+
+          const params = new URLSearchParams({
+            q: title,
+            limit: "1",
+            fields: "main_picture"
+          });
+
+          const malResponse = await fetch(`${MAL_LIST_URL.replace("/users/@me/animelist", "/anime")}?${params.toString()}`, {
+            headers
+          });
+          const payload = await malResponse.json();
+
+          if (!malResponse.ok) {
+            writeJson(
+              res,
+              malResponse.status,
+              { error: payload.message || payload.error || "Could not fetch anime image" },
+              "GET, OPTIONS"
+            );
+            return;
+          }
+
+          const node = payload.data?.[0]?.node || {};
+          writeJson(
+            res,
+            200,
+            { image_url: node.main_picture?.large || node.main_picture?.medium || "" },
+            "GET, OPTIONS"
+          );
+        } catch (error) {
+          next(error);
+        }
+      });
     }
   };
 }
 
 async function fetchAnimeList(authorization) {
   const params = new URLSearchParams({
-    fields: "id,title,mean,num_episodes,start_season,genres,list_status",
+    fields: "id,title,mean,num_episodes,start_season,genres,main_picture,list_status",
     limit: "1000",
     nsfw: "true",
     sort: "list_score"
@@ -141,6 +197,8 @@ function normalizeAnime(item) {
     year: season?.year ?? null,
     season: season?.season ?? null,
     genres: (node.genres || []).map((genre) => genre.name),
+    image_url: node.main_picture?.large || node.main_picture?.medium || "",
+    updated_at: item.list_status?.updated_at || null,
     my_list_status: item.list_status || null
   };
 }

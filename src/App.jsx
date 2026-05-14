@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { askEn } from "./openrouter.js";
 import { beginMalOauth, finishMalOauth } from "./oauth.js";
-import { fetchAnimeList } from "./mal.js";
+import { fetchAnimeImage, fetchAnimeList } from "./mal.js";
 import {
   appendHistory,
   clearTokens,
@@ -87,12 +87,17 @@ export default function App() {
   }
 
   function goToMoodOrPending(nextHistory = history) {
+    if (!hasRecommendationInput()) {
+      setView(VIEW.LANDING);
+      return;
+    }
+
     const pending = findPending(nextHistory);
     setView(pending ? VIEW.PENDING : VIEW.MOOD);
   }
 
   async function handleConsider(nextMood) {
-    if (mode !== "manual" && !tokens?.access_token) {
+    if (!hasRecommendationInput() || (mode !== "manual" && !tokens?.access_token)) {
       setView(VIEW.LANDING);
       return;
     }
@@ -113,18 +118,23 @@ export default function App() {
         malList: list,
         feedbackHistory: history
       });
+      const imageUrl = await fetchAnimeImage(
+        rec.title,
+        mode === "manual" ? "" : tokens.access_token
+      );
+      const recommendationWithImage = { ...rec, image_url: imageUrl };
 
       const entry = {
         id: crypto.randomUUID(),
         date: new Date().toISOString(),
         mood: nextMood || "Surprise me",
-        recommendation: rec,
+        recommendation: recommendationWithImage,
         note: "",
         feedback: "",
         state: "unrated"
       };
 
-      setRecommendation(rec);
+      setRecommendation(recommendationWithImage);
       setCurrentDraftEntry(entry);
       setStatus("");
       setView(VIEW.REVEAL);
@@ -135,16 +145,17 @@ export default function App() {
     }
   }
 
-  function handleFeedback(feedback) {
+  function handleFeedback(feedback, feedbackNote = "") {
     if (!currentDraftEntry) return;
 
     const patch =
       feedback === "pending"
-        ? { feedback: "", state: "pending", note: "waiting in the watchlist" }
+        ? { feedback: "", feedback_note: "", state: "pending", note: "waiting in the watchlist" }
         : {
             feedback,
             state: "rated",
-            note: feedback === "good" ? "Lean further this way" : "I missed the mark"
+            feedback_note: feedbackNote.trim(),
+            note: makeUserReflection(feedback, feedbackNote)
           };
     const nextHistory = appendHistory({ ...currentDraftEntry, ...patch });
     setHistory(nextHistory);
@@ -167,7 +178,8 @@ export default function App() {
     const patch = {
       feedback: answer,
       state: "rated",
-      note: answer === "good" ? "Lean further this way" : "I missed the mark"
+      feedback_note: "",
+      note: makeUserReflection(answer, "")
     };
     const nextHistory = updateHistoryEntry(pending.id, patch);
     setHistory(nextHistory);
@@ -297,10 +309,10 @@ function Chrome({ step, total, right, onLog }) {
   );
 }
 
-function KV({ label = "key visual", w = 280, h = 400, style }) {
+function KV({ label = "key visual", src = "", w = 280, h = 400, style }) {
   return (
     <div className="kv-placeholder" style={{ width: w, height: h, ...style }}>
-      <span className="kv-label">{label}</span>
+      {src ? <img src={src} alt="" /> : <span className="kv-label">{label}</span>}
     </div>
   );
 }
@@ -695,7 +707,7 @@ function ScreenReveal({ nav, pick }) {
           </div>
 
           <div className="reveal-scroll__center ink-bloom delay-2">
-            <KV label="key visual" w={240} h={340} />
+            <KV label="key visual" src={pick.image_url} w={240} h={340} />
             <p
               className="meta"
               style={{
@@ -750,10 +762,13 @@ function ScreenReveal({ nav, pick }) {
 
 function ScreenFeedback({ nav, pick }) {
   const [chosen, setChosen] = useState(null);
+  const [mehNote, setMehNote] = useState("");
 
   function choose(value) {
     setChosen(value);
-    setTimeout(() => nav.feedback(value), 1100);
+    if (value !== "meh") {
+      setTimeout(() => nav.feedback(value), 650);
+    }
   }
 
   return (
@@ -808,8 +823,27 @@ function ScreenFeedback({ nav, pick }) {
                 ? "Saved. En will ask later."
                 : chosen === "good"
                   ? "Noted. En will remember."
-                  : "Noted. En will recalibrate."}
+                  : "Tell En what missed, or leave it blank."}
             </p>
+          )}
+
+          {chosen === "meh" && (
+            <div className="fade-in" style={{ marginTop: 28 }}>
+              <input
+                value={mehNote}
+                onChange={(event) => setMehNote(event.target.value)}
+                placeholder="what didn't land?"
+                className="meh-note-input"
+              />
+              <div className="choice-links" style={{ marginTop: 24, gap: 16 }}>
+                <button className="btn-link" onClick={() => nav.feedback("meh", mehNote)}>
+                  Save
+                </button>
+                <button className="btn-quiet" onClick={() => nav.feedback("meh", "")}>
+                  skip
+                </button>
+              </div>
+            </div>
           )}
         </div>
       </div>
@@ -911,16 +945,17 @@ function ScreenHistory({ nav, history }) {
                         fontSize: 10,
                         marginRight: 10,
                         verticalAlign: "middle",
-                        letterSpacing: "0.2em"
+                        letterSpacing: "0.2em",
+                        color: "var(--shu)"
                       }}
                     >
                       EN ·
                     </span>
                     <em style={{ fontStyle: "italic" }}>
-                      {stripMarkdown(entry.recommendation.reason)}
+                      {stripMarkdown(entry.recommendation.log_line || entry.recommendation.reason)}
                     </em>
                   </p>
-                  {entry.note && (
+                  {entry.state === "rated" && entry.note && (
                     <p
                       style={{
                         marginTop: 18,
@@ -942,7 +977,7 @@ function ScreenHistory({ nav, history }) {
                           color: "var(--shu)"
                         }}
                       >
-                        YOU
+                        you ·
                       </span>
                       {entry.note}
                     </p>
@@ -972,6 +1007,25 @@ function formatCount(count) {
 
 function findPending(history) {
   return history.find((entry) => entry.state === "pending");
+}
+
+function makeUserReflection(feedback, note) {
+  const cleaned = stripMarkdown(note).trim().toLowerCase();
+  if (cleaned) {
+    return cleaned.endsWith(".") ? cleaned : `${cleaned}.`;
+  }
+
+  if (feedback === "good") {
+    const options = ["stayed with me.", "en was right.", "needed that one."];
+    return options[Math.floor(Math.random() * options.length)];
+  }
+
+  const mehOptions = ["didn't quite meet me.", "not tonight.", "missed the feeling."];
+  return mehOptions[Math.floor(Math.random() * mehOptions.length)];
+}
+
+function hasRecommendationInput() {
+  return Boolean(loadTokens()?.access_token || loadManualList().trim());
 }
 
 function formatAnimeMeta(pick) {
