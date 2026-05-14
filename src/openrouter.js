@@ -37,6 +37,16 @@ export async function askEn({ mood, malList, exclusionTitles = [], feedbackHisto
     throw new Error("VITE_OPENROUTER_API_KEY is missing.");
   }
 
+  const userPayload = {
+    mood: mood || "Surprise me",
+    malList,
+    exclusionTitles,
+    feedbackHistory
+  };
+
+  console.log("[En debug] exact LLM user payload", userPayload);
+  console.log("[En debug] full hard exclusion list", exclusionTitles);
+
   const response = await fetch(OPENROUTER_URL, {
     method: "POST",
     headers: {
@@ -53,12 +63,7 @@ export async function askEn({ mood, malList, exclusionTitles = [], feedbackHisto
         { role: "system", content: SYSTEM_PROMPT },
         {
           role: "user",
-          content: JSON.stringify({
-            mood: mood || "Surprise me",
-            malList,
-            exclusionTitles,
-            feedbackHistory
-          })
+          content: JSON.stringify(userPayload)
         }
       ]
     })
@@ -96,7 +101,10 @@ export async function askEn({ mood, malList, exclusionTitles = [], feedbackHisto
     }
   }
 
-  return parseRecommendation(content);
+  const recommendation = parseRecommendation(content);
+  console.log("[En debug] LLM raw response text", content);
+  console.log("[En debug] LLM parsed recommendation", recommendation);
+  return recommendation;
 }
 
 function parseRecommendation(content) {

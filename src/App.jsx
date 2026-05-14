@@ -112,13 +112,31 @@ export default function App() {
         mode === "manual" ? manualList : await fetchAnimeList(tokens.access_token);
       setMalList(Array.isArray(list) ? list : []);
       setStatus("Listening to tonight");
+      const exclusionTitles = Array.isArray(list) ? buildHardExclusionTitles(list) : [];
+
+      if (Array.isArray(list)) {
+        console.log("[En debug] MAL list item count", list.length);
+        console.log("[En debug] MAL status counts", countStatuses(list));
+        console.log("[En debug] completed/watching hard exclusion count", exclusionTitles.length);
+        console.log("[En debug] completed/watching hard exclusion list", exclusionTitles);
+      }
 
       const rec = await askEn({
         mood: nextMood,
         malList: list,
-        exclusionTitles: Array.isArray(list) ? buildHardExclusionTitles(list) : [],
+        exclusionTitles,
         feedbackHistory: history
       });
+      const excludedMatch = findExcludedRecommendationMatch(rec, exclusionTitles);
+      console.log("[En debug] returned recommendation vs exclusion match", {
+        recommendation: rec,
+        excludedMatch
+      });
+      if (excludedMatch) {
+        throw new Error(
+          `En returned an excluded MAL title (${excludedMatch}). Check the console for the full exclusion payload.`
+        );
+      }
       const imageUrl = await fetchAnimeImage(
         rec.title,
         mode === "manual" ? "" : tokens.access_token
@@ -1031,12 +1049,58 @@ function hasRecommendationInput() {
 
 function buildHardExclusionTitles(list) {
   const excludedStatuses = new Set(["completed", "watching"]);
-  const titles = list
-    .filter((anime) => excludedStatuses.has(anime.my_list_status?.status))
-    .map((anime) => anime.title)
-    .filter(Boolean);
+  const titles = list.flatMap((anime) => {
+    if (!excludedStatuses.has(anime.my_list_status?.status)) {
+      return [];
+    }
+
+    const alternatives = anime.alternative_titles || {};
+    return [
+      anime.title,
+      alternatives.en,
+      alternatives.ja,
+      ...(alternatives.synonyms || [])
+    ].filter(Boolean);
+  });
 
   return [...new Set(titles)];
+}
+
+function countStatuses(list) {
+  return list.reduce((counts, anime) => {
+    const status = anime.my_list_status?.status || "missing";
+    counts[status] = (counts[status] || 0) + 1;
+    return counts;
+  }, {});
+}
+
+function findExcludedRecommendationMatch(recommendation, exclusionTitles) {
+  const exclusions = new Map(
+    exclusionTitles.map((title) => [normalizeTitleForCompare(title), title])
+  );
+  const candidates = [
+    recommendation.title,
+    recommendation.title_jp
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    const normalized = normalizeTitleForCompare(candidate);
+    if (exclusions.has(normalized)) {
+      return exclusions.get(normalized);
+    }
+  }
+
+  return "";
+}
+
+function normalizeTitleForCompare(title) {
+  return String(title || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/&/g, "and")
+    .replace(/\b(the|a|an)\b/g, "")
+    .replace(/[^a-z0-9\u3040-\u30ff\u3400-\u9fff]+/g, "");
 }
 
 function formatAnimeMeta(pick) {

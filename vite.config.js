@@ -154,7 +154,7 @@ function localApi(env) {
 
 async function fetchAnimeList(authorization) {
   const params = new URLSearchParams({
-    fields: "id,title,mean,num_episodes,start_season,genres,main_picture,list_status",
+    fields: "id,title,mean,num_episodes,start_season,genres,main_picture,alternative_titles,list_status",
     limit: "1000",
     nsfw: "true",
     sort: "list_score"
@@ -204,6 +204,7 @@ function normalizeAnime(item) {
     season: season?.season ?? null,
     genres: (node.genres || []).map((genre) => genre.name),
     image_url: node.main_picture?.large || node.main_picture?.medium || "",
+    alternative_titles: node.alternative_titles || null,
     updated_at: item.list_status?.updated_at || null,
     my_list_status: item.list_status || null
   };
