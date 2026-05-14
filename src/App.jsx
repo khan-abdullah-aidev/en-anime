@@ -116,6 +116,7 @@ export default function App() {
       const rec = await askEn({
         mood: nextMood,
         malList: list,
+        exclusionTitles: Array.isArray(list) ? buildHardExclusionTitles(list) : [],
         feedbackHistory: history
       });
       const imageUrl = await fetchAnimeImage(
@@ -1026,6 +1027,16 @@ function makeUserReflection(feedback, note) {
 
 function hasRecommendationInput() {
   return Boolean(loadTokens()?.access_token || loadManualList().trim());
+}
+
+function buildHardExclusionTitles(list) {
+  const excludedStatuses = new Set(["completed", "watching"]);
+  const titles = list
+    .filter((anime) => excludedStatuses.has(anime.my_list_status?.status))
+    .map((anime) => anime.title)
+    .filter(Boolean);
+
+  return [...new Set(titles)];
 }
 
 function formatAnimeMeta(pick) {

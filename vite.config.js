@@ -162,8 +162,14 @@ async function fetchAnimeList(authorization) {
 
   const entries = [];
   let nextUrl = `${MAL_LIST_URL}?${params.toString()}`;
+  let pageCount = 0;
 
   while (nextUrl) {
+    pageCount += 1;
+    if (pageCount > 100) {
+      throw new Error("MAL pagination exceeded the expected page limit.");
+    }
+
     const response = await fetch(nextUrl, {
       headers: { Authorization: authorization }
     });

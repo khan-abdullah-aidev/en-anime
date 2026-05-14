@@ -10,6 +10,7 @@ If malList is an array, it is sorted from most recently updated to oldest. Weigh
 Pay special attention to recently completed, dropped, abandoned, and low-scored shows. Reference specific anime titles from the user's history by name whenever possible.
 If malList is raw text, treat it as the user's stated watched/loved anime and avoid recommending those titles.
 Use feedbackHistory as a taste signal, especially Meh notes and pending items.
+exclusionTitles is a hard ban list. Never recommend any title in exclusionTitles under any circumstances. Treat matching case-insensitively and avoid obvious punctuation/colon variants.
 
 Reasoning requirements:
 - reason must be 2-4 sentences maximum. Never an essay.
@@ -30,7 +31,7 @@ The JSON shape must be exactly:
   "log_line": "string"
 }`;
 
-export async function askEn({ mood, malList, feedbackHistory, onDelta }) {
+export async function askEn({ mood, malList, exclusionTitles = [], feedbackHistory, onDelta }) {
   const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
   if (!apiKey) {
     throw new Error("VITE_OPENROUTER_API_KEY is missing.");
@@ -55,6 +56,7 @@ export async function askEn({ mood, malList, feedbackHistory, onDelta }) {
           content: JSON.stringify({
             mood: mood || "Surprise me",
             malList,
+            exclusionTitles,
             feedbackHistory
           })
         }
