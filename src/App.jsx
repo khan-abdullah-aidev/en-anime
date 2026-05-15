@@ -33,6 +33,7 @@ export default function App() {
   const [malList, setMalList] = useState([]);
   const [recommendation, setRecommendation] = useState(null);
   const [currentDraftEntry, setCurrentDraftEntry] = useState(null);
+  const [pendingReviewIds, setPendingReviewIds] = useState([]);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const handledCallback = useRef(false);
@@ -92,8 +93,9 @@ export default function App() {
       return;
     }
 
-    const pending = findPending(nextHistory);
-    setView(pending ? VIEW.PENDING : VIEW.MOOD);
+    const pendingIds = findPendingEntries(nextHistory).map((entry) => entry.id);
+    setPendingReviewIds(pendingIds);
+    setView(pendingIds.length ? VIEW.PENDING : VIEW.MOOD);
   }
 
   async function handleConsider(nextMood) {
@@ -183,14 +185,21 @@ export default function App() {
   }
 
   function handlePendingAnswer(answer) {
-    const pending = findPending(history);
+    const reviewIds = pendingReviewIds.length
+      ? pendingReviewIds
+      : findPendingEntries(history).map((entry) => entry.id);
+    const pending = findCurrentPending(history, reviewIds);
     if (!pending) {
+      setPendingReviewIds([]);
       setView(VIEW.MOOD);
       return;
     }
 
+    const remainingPendingIds = reviewIds.filter((id) => id !== pending.id);
+
     if (answer === "not-yet") {
-      setView(VIEW.MOOD);
+      setPendingReviewIds(remainingPendingIds);
+      setView(remainingPendingIds.length ? VIEW.PENDING : VIEW.MOOD);
       return;
     }
 
@@ -202,7 +211,11 @@ export default function App() {
     };
     const nextHistory = updateHistoryEntry(pending.id, patch);
     setHistory(nextHistory);
-    setView(VIEW.MOOD);
+    const nextPendingIds = remainingPendingIds.filter((id) =>
+      nextHistory.some((entry) => entry.id === id && entry.state === "pending")
+    );
+    setPendingReviewIds(nextPendingIds);
+    setView(nextPendingIds.length ? VIEW.PENDING : VIEW.MOOD);
   }
 
   function handleDisconnect() {
@@ -240,7 +253,7 @@ export default function App() {
         />
       )}
       {view === VIEW.PENDING && (
-        <ScreenPending nav={nav} pending={findPending(history)} />
+        <ScreenPending nav={nav} pending={findCurrentPending(history, pendingReviewIds)} />
       )}
       {view === VIEW.MOOD && (
         <ScreenMood
@@ -1024,8 +1037,29 @@ function formatCount(count) {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(count);
 }
 
-function findPending(history) {
-  return history.find((entry) => entry.state === "pending");
+function findCurrentPending(history, pendingReviewIds) {
+  const pendingById = new Map(
+    history
+      .filter((entry) => entry.state === "pending")
+      .map((entry) => [entry.id, entry])
+  );
+  return pendingReviewIds.map((id) => pendingById.get(id)).find(Boolean) || findPendingEntries(history)[0];
+}
+
+function findPendingEntries(history) {
+  return history
+    .map((entry, index) => ({ entry, index }))
+    .filter(({ entry }) => entry.state === "pending")
+    .sort((a, b) => {
+      const timeA = Date.parse(a.entry.date);
+      const timeB = Date.parse(b.entry.date);
+
+      if (Number.isNaN(timeA) && Number.isNaN(timeB)) return b.index - a.index;
+      if (Number.isNaN(timeA)) return 1;
+      if (Number.isNaN(timeB)) return -1;
+      return timeA - timeB;
+    })
+    .map(({ entry }) => entry);
 }
 
 function makeUserReflection(feedback, note) {
