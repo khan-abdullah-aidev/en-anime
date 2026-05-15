@@ -1,6 +1,5 @@
-This favicon was generated using the following font:
+This favicon uses the C seal option from En — logo.pdf.
 
-- Font Title: Leckerli One
-- Font Author: undefined
-- Font Source: https://fonts.gstatic.com/s/leckerlione/v21/V8mCoQH8VCsNttEnxnGQ-1itLZxcBtItFw.ttf
-- Font License: undefined)
+Source:
+- En — logo.pdf
+- Option C · Seal
