@@ -1,5 +1,5 @@
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_MODEL = "deepseek/deepseek-v4-flash:free";
+const DEFAULT_MODEL = "nousresearch/hermes-3-llama-3.1-405b:free";
 const DEFAULT_FALLBACK_MODELS = [
   "qwen/qwen3.6-plus:free",
   "openrouter/owl-alpha",
