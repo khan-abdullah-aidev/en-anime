@@ -1,5 +1,10 @@
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL = "deepseek/deepseek-v4-flash:free";
+const DEFAULT_MODEL = "deepseek/deepseek-v4-flash:free";
+const DEFAULT_FALLBACK_MODELS = [
+  "qwen/qwen3.6-plus:free",
+  "openrouter/owl-alpha",
+  "deepseek/deepseek-chat-v3.1:free"
+];
 
 const SYSTEM_PROMPT = `You are En, a quiet anime recommendation engine.
 Return strict JSON only. Do not return markdown, commentary, prose outside JSON, or code fences.
@@ -52,6 +57,7 @@ export async function askEn({ mood, malList, exclusionTitles = [], feedbackHisto
   console.log("[En debug] exact LLM user payload", userPayload);
   console.log("[En debug] full hard exclusion list", exclusionTitles);
 
+  const models = getOpenRouterModels();
   const response = await fetch(OPENROUTER_URL, {
     method: "POST",
     headers: {
@@ -61,7 +67,11 @@ export async function askEn({ mood, malList, exclusionTitles = [], feedbackHisto
       "X-Title": "En"
     },
     body: JSON.stringify({
-      model: MODEL,
+      model: models[0],
+      models: models.slice(1),
+      provider: {
+        allow_fallbacks: true
+      },
       stream: true,
       temperature: 0.85,
       messages: [
@@ -76,7 +86,7 @@ export async function askEn({ mood, malList, exclusionTitles = [], feedbackHisto
 
   if (!response.ok || !response.body) {
     const text = await response.text();
-    throw new Error(text || "OpenRouter request failed.");
+    throw new Error(formatOpenRouterError(text, response.status));
   }
 
   const reader = response.body.getReader();
@@ -98,6 +108,10 @@ export async function askEn({ mood, malList, exclusionTitles = [], feedbackHisto
       if (!data || data === "[DONE]") continue;
 
       const event = JSON.parse(data);
+      if (event.error) {
+        throw new Error(formatOpenRouterEventError(event.error));
+      }
+
       const delta = event.choices?.[0]?.delta?.content || "";
       if (delta) {
         content += delta;
@@ -110,6 +124,46 @@ export async function askEn({ mood, malList, exclusionTitles = [], feedbackHisto
   console.log("[En debug] LLM raw response text", content);
   console.log("[En debug] LLM parsed recommendation", recommendation);
   return recommendation;
+}
+
+function getOpenRouterModels() {
+  const primaryModel = import.meta.env.VITE_OPENROUTER_MODEL || DEFAULT_MODEL;
+  const configuredFallbacks = parseModelList(import.meta.env.VITE_OPENROUTER_FALLBACK_MODELS);
+  return unique([primaryModel, ...configuredFallbacks, ...DEFAULT_FALLBACK_MODELS]);
+}
+
+function parseModelList(value) {
+  return value
+    ? value
+        .split(",")
+        .map((model) => model.trim())
+        .filter(Boolean)
+    : [];
+}
+
+function unique(values) {
+  return [...new Set(values)];
+}
+
+function formatOpenRouterError(text, status) {
+  try {
+    const payload = JSON.parse(text);
+    return formatOpenRouterEventError(payload.error || payload, status);
+  } catch {
+    return text || "OpenRouter request failed.";
+  }
+}
+
+function formatOpenRouterEventError(error, status) {
+  const code = Number(error?.code || error?.status || status);
+  const message = error?.message || "OpenRouter request failed.";
+  const raw = error?.metadata?.raw || "";
+
+  if (code === 429 || String(raw).includes("rate-limited")) {
+    return "En's recommendation model is rate-limited right now. I tried the backup models too. Please try again in a minute.";
+  }
+
+  return message;
 }
 
 function parseRecommendation(content) {
