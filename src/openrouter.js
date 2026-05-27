@@ -42,13 +42,17 @@ export async function askEn({ mood, malList, exclusionTitles = [], feedbackHisto
     throw new Error("VITE_GROQ_API_KEY is missing.");
   }
 
+  const tasteMalList = Array.isArray(malList) ? getRecentMalEntries(malList, 50) : malList;
   const userPayload = {
     mood: mood || "Surprise me",
-    malList,
+    malList: tasteMalList,
     exclusionTitles,
     feedbackHistory
   };
 
+  if (Array.isArray(malList)) {
+    console.log("[En debug] MAL taste prompt item count", tasteMalList.length);
+  }
   console.log("[En debug] exact LLM user payload", userPayload);
   console.log("[En debug] full hard exclusion list", exclusionTitles);
 
@@ -112,6 +116,21 @@ export async function askEn({ mood, malList, exclusionTitles = [], feedbackHisto
   console.log("[En debug] LLM raw response text", content);
   console.log("[En debug] LLM parsed recommendation", recommendation);
   return recommendation;
+}
+
+function getRecentMalEntries(list, limit) {
+  return [...list]
+    .sort((a, b) => getMalUpdatedTime(b) - getMalUpdatedTime(a))
+    .slice(0, limit);
+}
+
+function getMalUpdatedTime(entry) {
+  return Date.parse(
+    entry.last_updated ||
+      entry.updated_at ||
+      entry.my_list_status?.updated_at ||
+      ""
+  ) || 0;
 }
 
 function formatGroqError(text) {
