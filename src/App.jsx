@@ -4,7 +4,9 @@ import { beginMalOauth, finishMalOauth } from "./oauth.js";
 import { fetchAnimeImage, fetchAnimeList } from "./mal.js";
 import {
   appendHistory,
+  clearRecommendationLog,
   clearTokens,
+  deleteHistoryEntry,
   loadRecommendationMemoryCache,
   loadManualList,
   loadHistory,
@@ -20,6 +22,7 @@ import {
   buildCandidatePool,
   buildRecommendationMemory,
   deterministicRecommendation,
+  findBlockedEvidenceTitle,
   findCandidateByRecommendation,
   isMemoryExcludedTitle
 } from "./recommendationEngine.js";
@@ -265,6 +268,24 @@ export default function App() {
     setView(nextPendingIds.length ? VIEW.PENDING : VIEW.MOOD);
   }
 
+  function handleDeleteHistoryEntry(id) {
+    const nextHistory = deleteHistoryEntry(id);
+    setHistory(nextHistory);
+    setPendingReviewIds((ids) => ids.filter((pendingId) => pendingId !== id));
+  }
+
+  function handleClearHistory() {
+    if (history.length && !window.confirm("Clear En's recommendation log and local recommendation memory?")) {
+      return;
+    }
+
+    const nextHistory = clearRecommendationLog();
+    setHistory(nextHistory);
+    setPendingReviewIds([]);
+    setRecommendation(null);
+    setCurrentDraftEntry(null);
+  }
+
   function handleDisconnect() {
     clearTokens();
     setTokens(null);
@@ -284,6 +305,8 @@ export default function App() {
     consider: handleConsider,
     feedback: handleFeedback,
     pendingAnswer: handlePendingAnswer,
+    deleteHistoryEntry: handleDeleteHistoryEntry,
+    clearHistory: handleClearHistory,
     disconnect: handleDisconnect
   };
 
@@ -931,6 +954,8 @@ function ScreenFeedback({ nav, pick }) {
 }
 
 function ScreenHistory({ nav, history }) {
+  const [editing, setEditing] = useState(false);
+
   return (
     <div className="app-frame">
       <Chrome
@@ -958,6 +983,35 @@ function ScreenHistory({ nav, history }) {
               ? `${history.length} recommendation${history.length === 1 ? "" : "s"}`
               : "No recommendations yet"}
           </p>
+
+          <div
+            className="fade-up delay-2"
+            style={{
+              display: "flex",
+              gap: 22,
+              marginTop: -48,
+              marginBottom: 72,
+              flexWrap: "wrap"
+            }}
+          >
+            <button
+              className="btn-quiet"
+              onClick={() => setEditing((value) => !value)}
+              disabled={!history.length}
+            >
+              {editing ? "done" : "edit log"}
+            </button>
+            <button
+              className="btn-quiet"
+              onClick={() => {
+                nav.clearHistory();
+                setEditing(false);
+              }}
+              disabled={!history.length}
+            >
+              refresh log
+            </button>
+          </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 56 }}>
             {history.map((entry, i) => (
@@ -1060,6 +1114,15 @@ function ScreenHistory({ nav, history }) {
                       </span>
                       {entry.note}
                     </p>
+                  )}
+                  {editing && (
+                    <button
+                      className="btn-quiet"
+                      onClick={() => nav.deleteHistoryEntry(entry.id)}
+                      style={{ marginTop: 22 }}
+                    >
+                      delete
+                    </button>
                   )}
                 </div>
               </article>
@@ -1191,6 +1254,17 @@ function validateRecommendation(recommendation, candidateList, memory) {
 
   if (isMemoryExcludedTitle(recommendation.title, memory) || isMemoryExcludedTitle(recommendation.title_jp, memory)) {
     return { ok: false, error: "title already exists in recommendation memory" };
+  }
+
+  const blockedEvidenceTitle = findBlockedEvidenceTitle(
+    `${recommendation.reason} ${recommendation.log_line}`,
+    memory
+  );
+  if (blockedEvidenceTitle) {
+    return {
+      ok: false,
+      error: `reason referenced watchlisted or pending title: ${blockedEvidenceTitle}`
+    };
   }
 
   return { ok: true, candidate };

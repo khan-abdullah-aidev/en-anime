@@ -50,6 +50,25 @@ export function updateHistoryEntry(id, patch) {
   return next;
 }
 
+export function deleteHistoryEntry(id) {
+  const entry = loadHistory().find((item) => item.id === id);
+  const next = loadHistory().filter((item) => item.id !== id);
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
+
+  if (entry?.recommendation) {
+    removeRecommendationFromMemory(entry.recommendation);
+  }
+
+  return next;
+}
+
+export function clearRecommendationLog() {
+  localStorage.setItem(HISTORY_KEY, JSON.stringify([]));
+  localStorage.removeItem(TASTE_PROFILE_KEY);
+  localStorage.removeItem(RECOMMENDATION_MEMORY_KEY);
+  return [];
+}
+
 export function loadTasteProfileCache() {
   return readJson(TASTE_PROFILE_KEY, null);
 }
@@ -88,6 +107,23 @@ export function recordRecommendedAnime(recommendation, bucket = "recommended") {
   return next;
 }
 
+export function removeRecommendationFromMemory(recommendation) {
+  const memory = loadRecommendationMemoryCache();
+  const blocked = new Set([
+    recommendation?.title,
+    recommendation?.title_jp
+  ].filter(Boolean).map(normalizeTitle));
+
+  const next = Object.fromEntries(
+    Object.entries(memory).map(([bucket, titles]) => [
+      bucket,
+      (Array.isArray(titles) ? titles : []).filter((title) => !blocked.has(normalizeTitle(title)))
+    ])
+  );
+  saveRecommendationMemoryCache(next);
+  return next;
+}
+
 export function loadManualList() {
   return localStorage.getItem(MANUAL_LIST_KEY) || "";
 }
@@ -111,4 +147,14 @@ function readJson(key, fallback) {
 
 function mergeUnique(current = [], additions = []) {
   return [...new Set([...(Array.isArray(current) ? current : []), ...additions])];
+}
+
+function normalizeTitle(title) {
+  return String(title || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/&/g, "and")
+    .replace(/\b(the|a|an)\b/g, "")
+    .replace(/[^a-z0-9\u3040-\u30ff\u3400-\u9fff]+/g, "");
 }

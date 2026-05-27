@@ -28,19 +28,20 @@ const TROPE_HINTS = [
 
 export function buildTasteProfile({ malList, feedbackHistory = [], previousProfile = null }) {
   const entries = Array.isArray(malList) ? malList : [];
+  const watchedEntries = entries.filter(isWatchedTasteEntry);
   const catalogByTitle = buildCatalogIndex();
-  const scoredEntries = entries.filter((entry) => Number(entry.my_list_status?.score) > 0);
+  const scoredEntries = watchedEntries.filter((entry) => Number(entry.my_list_status?.score) > 0);
   const averageScore = scoredEntries.length
     ? round(scoredEntries.reduce((sum, entry) => sum + Number(entry.my_list_status.score), 0) / scoredEntries.length)
     : previousProfile?.scoreTendencies?.averageScore || null;
 
-  const likedEntries = entries.filter((entry) => Number(entry.my_list_status?.score) >= 8);
-  const dislikedEntries = entries.filter((entry) => {
+  const likedEntries = watchedEntries.filter((entry) => Number(entry.my_list_status?.score) >= 8);
+  const dislikedEntries = watchedEntries.filter((entry) => {
     const status = entry.my_list_status?.status;
     const score = Number(entry.my_list_status?.score || 0);
     return status === "dropped" || (score > 0 && score <= 5);
   });
-  const recentEntries = [...entries]
+  const recentEntries = [...watchedEntries]
     .sort((a, b) => getMalUpdatedTime(b) - getMalUpdatedTime(a))
     .slice(0, 15);
 
@@ -71,7 +72,7 @@ export function buildTasteProfile({ malList, feedbackHistory = [], previousProfi
     darknessTolerance: inferDarknessTolerance(positiveCatalog, negativeCatalog, previousProfile),
     dislikedTropes: inferDislikedTropes(negativeCatalog, feedbackText, previousProfile),
     recentEmotionalShifts: inferRecentEmotionalShifts(recentEntries, catalogByTitle),
-    rewatchBehavior: inferRewatchBehavior(entries, previousProfile),
+    rewatchBehavior: inferRewatchBehavior(watchedEntries, previousProfile),
     scoreTendencies: {
       averageScore,
       highScoreThreshold: averageScore && averageScore >= 8 ? 9 : 8,
@@ -83,7 +84,7 @@ export function buildTasteProfile({ malList, feedbackHistory = [], previousProfi
 }
 
 export function summarizeRecentPatterns(malList, feedbackHistory = []) {
-  const entries = Array.isArray(malList) ? malList : [];
+  const entries = Array.isArray(malList) ? malList.filter(isWatchedTasteEntry) : [];
   const catalogByTitle = buildCatalogIndex();
   const recentCatalog = [...entries]
     .sort((a, b) => getMalUpdatedTime(b) - getMalUpdatedTime(a))
@@ -104,6 +105,11 @@ export function summarizeRecentPatterns(malList, feedbackHistory = []) {
     pendingCount,
     recentRejections: mehTitles
   };
+}
+
+function isWatchedTasteEntry(entry) {
+  const status = entry?.my_list_status?.status;
+  return status !== "plan_to_watch" && status !== "watching";
 }
 
 export function compactFeedbackHistory(history = [], limit = 12) {

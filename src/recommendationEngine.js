@@ -103,8 +103,22 @@ export function buildExcludedTitlesFromMemory(memory) {
     ...memory.recommended,
     ...memory.completed,
     ...memory.rejected,
+    ...memory.watchlisted,
     ...memory.pending
   ]);
+}
+
+export function findBlockedEvidenceTitle(text, memory) {
+  const normalizedText = normalizeTitleForCompare(text);
+  const blockedTitles = uniqueTitles([
+    ...(memory?.watchlisted || []),
+    ...(memory?.pending || [])
+  ]);
+
+  return blockedTitles.find((title) => {
+    const key = normalizeTitleForCompare(title);
+    return key && normalizedText.includes(key);
+  }) || "";
 }
 
 function normalizeMemory(memory = {}) {
