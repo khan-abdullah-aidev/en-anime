@@ -5,12 +5,29 @@ import { fetchAnimeImage, fetchAnimeList } from "./mal.js";
 import {
   appendHistory,
   clearTokens,
+  loadRecommendationMemoryCache,
   loadManualList,
   loadHistory,
+  loadTasteProfileCache,
   loadTokens,
+  recordRecommendedAnime,
   saveManualList,
+  saveRecommendationMemoryCache,
+  saveTasteProfileCache,
   updateHistoryEntry
 } from "./storage.js";
+import {
+  buildCandidatePool,
+  buildRecommendationMemory,
+  deterministicRecommendation,
+  findCandidateByRecommendation,
+  isMemoryExcludedTitle
+} from "./recommendationEngine.js";
+import {
+  buildTasteProfile,
+  compactFeedbackHistory,
+  summarizeRecentPatterns
+} from "./tasteProfile.js";
 
 const VIEW = {
   LANDING: "landing",
@@ -116,29 +133,51 @@ export default function App() {
         mode === "manual" ? manualList : await fetchAnimeList(tokens.access_token);
       setMalList(Array.isArray(list) ? list : []);
       setStatus("Listening to tonight");
-      const malExclusionTitles = Array.isArray(list) ? buildHardExclusionTitles(list) : [];
-      const localExclusionTitles = buildLocalExclusionTitles(history);
-      const exclusionTitles = [...new Set([...malExclusionTitles, ...localExclusionTitles])];
+      const previousTasteProfile = loadTasteProfileCache();
+      const tasteProfile = buildTasteProfile({
+        malList: list,
+        feedbackHistory: history,
+        previousProfile: previousTasteProfile
+      });
+      saveTasteProfileCache(tasteProfile);
+
+      const recommendationMemory = buildRecommendationMemory({
+        malList: list,
+        history,
+        existingMemory: loadRecommendationMemoryCache()
+      });
+      saveRecommendationMemoryCache(recommendationMemory);
+
+      const recentPatterns = summarizeRecentPatterns(list, history);
+      const feedbackSignals = compactFeedbackHistory(history);
+      const candidateList = buildCandidatePool({
+        mood: nextMood,
+        tasteProfile,
+        recentPatterns,
+        memory: recommendationMemory
+      });
 
       if (Array.isArray(list)) {
         console.log("[En debug] MAL list item count", list.length);
         console.log("[En debug] MAL status counts", countStatuses(list));
-        console.log("[En debug] MAL hard exclusion count", malExclusionTitles.length);
-        console.log("[En debug] local recommendation hard exclusion count", localExclusionTitles.length);
-        console.log("[En debug] combined hard exclusion list", exclusionTitles);
+        console.log("[En debug] persistent memory counts", countMemory(recommendationMemory));
+        console.log("[En debug] candidate count", candidateList.length);
       }
 
       const rec = await askForAllowedRecommendation({
         mood: nextMood,
-        malList: list,
-        exclusionTitles,
-        feedbackHistory: history
+        tasteProfile,
+        recentPatterns,
+        feedbackHistory: feedbackSignals,
+        candidateList,
+        memory: recommendationMemory
       });
       const imageUrl = await fetchAnimeImage(
         rec.title,
         mode === "manual" ? "" : tokens.access_token
       );
       const recommendationWithImage = { ...rec, image_url: imageUrl };
+      recordRecommendedAnime(recommendationWithImage, "recommended");
 
       const entry = {
         id: crypto.randomUUID(),
@@ -174,6 +213,14 @@ export default function App() {
             note: makeUserReflection(feedback, feedbackNote)
           };
     const nextHistory = appendHistory({ ...currentDraftEntry, ...patch });
+    if (feedback === "pending") {
+      recordRecommendedAnime(currentDraftEntry.recommendation, "pending");
+      recordRecommendedAnime(currentDraftEntry.recommendation, "watchlisted");
+    } else if (feedback === "good") {
+      recordRecommendedAnime(currentDraftEntry.recommendation, "completed");
+    } else if (feedback === "meh") {
+      recordRecommendedAnime(currentDraftEntry.recommendation, "rejected");
+    }
     setHistory(nextHistory);
     setCurrentDraftEntry(null);
     setView(VIEW.HISTORY);
@@ -205,6 +252,11 @@ export default function App() {
       note: makeUserReflection(answer, "")
     };
     const nextHistory = updateHistoryEntry(pending.id, patch);
+    if (answer === "good") {
+      recordRecommendedAnime(pending.recommendation, "completed");
+    } else if (answer === "meh") {
+      recordRecommendedAnime(pending.recommendation, "rejected");
+    }
     setHistory(nextHistory);
     const nextPendingIds = remainingPendingIds.filter((id) =>
       nextHistory.some((entry) => entry.id === id && entry.state === "pending")
@@ -1076,68 +1128,45 @@ function hasRecommendationInput() {
   return Boolean(loadTokens()?.access_token || loadManualList().trim());
 }
 
-async function askForAllowedRecommendation({ mood, malList, exclusionTitles, feedbackHistory }) {
-  let lastExcludedMatch = "";
-  let dynamicExclusionTitles = exclusionTitles;
+async function askForAllowedRecommendation({
+  mood,
+  tasteProfile,
+  recentPatterns,
+  feedbackHistory,
+  candidateList,
+  memory
+}) {
+  let lastValidationError = "";
 
   for (let attempt = 1; attempt <= MAX_RECOMMENDATION_ATTEMPTS; attempt += 1) {
-    const recommendation = await askEn({
-      mood,
-      malList,
-      exclusionTitles: dynamicExclusionTitles,
-      feedbackHistory
-    });
-    const excludedMatch = findExcludedRecommendationMatch(recommendation, dynamicExclusionTitles);
-    console.log("[En debug] returned recommendation vs exclusion match", {
-      attempt,
-      recommendation,
-      excludedMatch
-    });
+    try {
+      const recommendation = await askEn({
+        mood,
+        tasteProfile,
+        recentPatterns,
+        feedbackHistory,
+        candidateList
+      });
+      const validation = validateRecommendation(recommendation, candidateList, memory);
+      console.log("[En debug] returned recommendation validation", {
+        attempt,
+        recommendation,
+        validation
+      });
 
-    if (!excludedMatch) {
-      return recommendation;
+      if (validation.ok) {
+        return mergeCandidateMeta(recommendation, validation.candidate);
+      }
+
+      lastValidationError = validation.error;
+    } catch (error) {
+      lastValidationError = error.message;
+      console.warn("[En debug] recommendation attempt failed", { attempt, error });
     }
-
-    lastExcludedMatch = excludedMatch;
-    dynamicExclusionTitles = [
-      ...new Set([
-        ...dynamicExclusionTitles,
-        excludedMatch,
-        recommendation.title,
-        recommendation.title_jp
-      ].filter(Boolean))
-    ];
   }
 
-  throw new Error(
-    `En kept returning titles already in your list (${lastExcludedMatch}). Try again in a moment.`
-  );
-}
-
-function buildHardExclusionTitles(list) {
-  const titles = list.flatMap((anime) => {
-    const alternatives = anime.alternative_titles || {};
-    return [
-      anime.title,
-      alternatives.en,
-      alternatives.ja,
-      ...(alternatives.synonyms || [])
-    ].filter(Boolean);
-  });
-
-  return [...new Set(titles)];
-}
-
-function buildLocalExclusionTitles(history) {
-  const titles = history.flatMap((entry) => {
-    const recommendation = entry.recommendation || {};
-    return [
-      recommendation.title,
-      recommendation.title_jp
-    ].filter(Boolean);
-  });
-
-  return [...new Set(titles)];
+  console.warn("[En debug] falling back to deterministic ranking", lastValidationError);
+  return deterministicRecommendation(candidateList);
 }
 
 function countStatuses(list) {
@@ -1148,33 +1177,40 @@ function countStatuses(list) {
   }, {});
 }
 
-function findExcludedRecommendationMatch(recommendation, exclusionTitles) {
-  const exclusions = new Map(
-    exclusionTitles.map((title) => [normalizeTitleForCompare(title), title])
-  );
-  const candidates = [
-    recommendation.title,
-    recommendation.title_jp
-  ].filter(Boolean);
-
-  for (const candidate of candidates) {
-    const normalized = normalizeTitleForCompare(candidate);
-    if (exclusions.has(normalized)) {
-      return exclusions.get(normalized);
-    }
+function validateRecommendation(recommendation, candidateList, memory) {
+  const required = ["title", "title_jp", "year", "episodes", "genre", "reason", "log_line"];
+  const missing = required.find((key) => recommendation?.[key] === undefined || recommendation?.[key] === null || recommendation?.[key] === "");
+  if (missing) {
+    return { ok: false, error: `missing ${missing}` };
   }
 
-  return "";
+  const candidate = findCandidateByRecommendation(recommendation, candidateList);
+  if (!candidate) {
+    return { ok: false, error: "title not in candidateList" };
+  }
+
+  if (isMemoryExcludedTitle(recommendation.title, memory) || isMemoryExcludedTitle(recommendation.title_jp, memory)) {
+    return { ok: false, error: "title already exists in recommendation memory" };
+  }
+
+  return { ok: true, candidate };
 }
 
-function normalizeTitleForCompare(title) {
-  return String(title || "")
-    .toLowerCase()
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/&/g, "and")
-    .replace(/\b(the|a|an)\b/g, "")
-    .replace(/[^a-z0-9\u3040-\u30ff\u3400-\u9fff]+/g, "");
+function mergeCandidateMeta(recommendation, candidate) {
+  return {
+    ...recommendation,
+    title: candidate.title,
+    title_jp: candidate.title_jp || recommendation.title_jp || candidate.title,
+    year: candidate.year,
+    episodes: candidate.episodes,
+    genre: candidate.genre
+  };
+}
+
+function countMemory(memory) {
+  return Object.fromEntries(
+    Object.entries(memory).map(([bucket, titles]) => [bucket, titles.length])
+  );
 }
 
 function formatAnimeMeta(pick) {

@@ -1,5 +1,4 @@
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const MODEL = "llama-3.3-70b-versatile";
+import { generateJsonWithProvider } from "./llmProviders.js";
 
 const SYSTEM_PROMPT = `You are En, a quiet anime recommendation engine.
 Return strict JSON only. Do not return markdown, commentary, prose outside JSON, or code fences.
@@ -36,115 +35,33 @@ The JSON shape must be exactly:
   "log_line": "string"
 }`;
 
-export async function askEn({ mood, malList, exclusionTitles = [], feedbackHistory, onDelta }) {
-  const apiKey = import.meta.env.VITE_GROQ_API_KEY;
-  if (!apiKey) {
-    throw new Error("VITE_GROQ_API_KEY is missing.");
-  }
-
-  const tasteMalList = Array.isArray(malList) ? getRecentMalEntries(malList, 50) : malList;
+export async function askEn({
+  mood,
+  tasteProfile,
+  recentPatterns,
+  feedbackHistory,
+  candidateList,
+  onDelta
+}) {
   const userPayload = {
     mood: mood || "Surprise me",
-    malList: tasteMalList,
-    exclusionTitles,
-    feedbackHistory
+    tasteProfile,
+    recentPatterns,
+    feedbackHistory,
+    candidateList
   };
 
-  if (Array.isArray(malList)) {
-    console.log("[En debug] MAL taste prompt item count", tasteMalList.length);
-  }
   console.log("[En debug] exact LLM user payload", userPayload);
-  console.log("[En debug] full hard exclusion list", exclusionTitles);
-
-  const response = await fetch(GROQ_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      response_format: { type: "json_object" },
-      stream: true,
-      temperature: 0.85,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        {
-          role: "user",
-          content: JSON.stringify(userPayload)
-        }
-      ]
-    })
+  const content = await generateJsonWithProvider({
+    systemPrompt: SYSTEM_PROMPT,
+    userPayload
   });
-
-  if (!response.ok || !response.body) {
-    const text = await response.text();
-    throw new Error(formatGroqError(text));
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let content = "";
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-
-    for (const line of lines) {
-      if (!line.startsWith("data:")) continue;
-      const data = line.slice(5).trim();
-      if (!data || data === "[DONE]") continue;
-
-      const event = JSON.parse(data);
-      if (event.error) {
-        throw new Error(formatGroqEventError(event.error));
-      }
-
-      const delta = event.choices?.[0]?.delta?.content || "";
-      if (delta) {
-        content += delta;
-        onDelta?.(content);
-      }
-    }
-  }
+  onDelta?.(content);
 
   const recommendation = parseRecommendation(content);
   console.log("[En debug] LLM raw response text", content);
   console.log("[En debug] LLM parsed recommendation", recommendation);
   return recommendation;
-}
-
-function getRecentMalEntries(list, limit) {
-  return [...list]
-    .sort((a, b) => getMalUpdatedTime(b) - getMalUpdatedTime(a))
-    .slice(0, limit);
-}
-
-function getMalUpdatedTime(entry) {
-  return Date.parse(
-    entry.last_updated ||
-      entry.updated_at ||
-      entry.my_list_status?.updated_at ||
-      ""
-  ) || 0;
-}
-
-function formatGroqError(text) {
-  try {
-    const payload = JSON.parse(text);
-    return formatGroqEventError(payload.error || payload);
-  } catch {
-    return text || "Groq request failed.";
-  }
-}
-
-function formatGroqEventError(error) {
-  return error?.message || "Groq request failed.";
 }
 
 function parseRecommendation(content) {
@@ -157,6 +74,19 @@ function parseRecommendation(content) {
     if (parsed[key] === undefined || parsed[key] === null || parsed[key] === "") {
       throw new Error(`En returned JSON without ${key}.`);
     }
+  }
+
+  for (const key of ["title", "title_jp", "genre", "reason", "log_line"]) {
+    if (typeof parsed[key] !== "string") {
+      throw new Error(`En returned JSON with invalid ${key}.`);
+    }
+  }
+
+  for (const key of ["year", "episodes"]) {
+    if (!Number.isFinite(Number(parsed[key]))) {
+      throw new Error(`En returned JSON with invalid ${key}.`);
+    }
+    parsed[key] = Number(parsed[key]);
   }
 
   return parsed;

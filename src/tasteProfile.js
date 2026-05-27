@@ -1,0 +1,216 @@
+import { ANIME_CATALOG } from "./animeCatalog.js";
+import { animeTitleKeys, normalizeTitleForCompare, uniqueTitles } from "./titleUtils.js";
+
+const DEFAULT_PROFILE = {
+  favoriteGenres: [],
+  emotionalThemes: [],
+  pacingPreference: "steady",
+  darknessTolerance: 3,
+  dislikedTropes: [],
+  recentEmotionalShifts: [],
+  rewatchBehavior: "unknown",
+  scoreTendencies: {
+    averageScore: null,
+    highScoreThreshold: 8,
+    lowScoreThreshold: 5,
+    generousScorer: false
+  },
+  updatedAt: ""
+};
+
+const TROPE_HINTS = [
+  ["isekai", ["isekai", "another world", "overpowered"]],
+  ["harem", ["harem"]],
+  ["grim violence", ["too dark", "violent", "gore", "brutal"]],
+  ["slow burn", ["too slow", "boring", "dragged"]],
+  ["school comedy", ["school", "comedy"]]
+];
+
+export function buildTasteProfile({ malList, feedbackHistory = [], previousProfile = null }) {
+  const entries = Array.isArray(malList) ? malList : [];
+  const catalogByTitle = buildCatalogIndex();
+  const scoredEntries = entries.filter((entry) => Number(entry.my_list_status?.score) > 0);
+  const averageScore = scoredEntries.length
+    ? round(scoredEntries.reduce((sum, entry) => sum + Number(entry.my_list_status.score), 0) / scoredEntries.length)
+    : previousProfile?.scoreTendencies?.averageScore || null;
+
+  const likedEntries = entries.filter((entry) => Number(entry.my_list_status?.score) >= 8);
+  const dislikedEntries = entries.filter((entry) => {
+    const status = entry.my_list_status?.status;
+    const score = Number(entry.my_list_status?.score || 0);
+    return status === "dropped" || (score > 0 && score <= 5);
+  });
+  const recentEntries = [...entries]
+    .sort((a, b) => getMalUpdatedTime(b) - getMalUpdatedTime(a))
+    .slice(0, 15);
+
+  const positiveCatalog = [
+    ...likedEntries.map((entry) => findCatalogAnime(entry, catalogByTitle)).filter(Boolean),
+    ...feedbackHistory
+      .filter((entry) => entry.feedback === "good" || entry.state === "pending")
+      .map((entry) => findCatalogAnime(entry.recommendation, catalogByTitle))
+      .filter(Boolean)
+  ];
+  const negativeCatalog = [
+    ...dislikedEntries.map((entry) => findCatalogAnime(entry, catalogByTitle)).filter(Boolean),
+    ...feedbackHistory
+      .filter((entry) => entry.feedback === "meh")
+      .map((entry) => findCatalogAnime(entry.recommendation, catalogByTitle))
+      .filter(Boolean)
+  ];
+
+  const feedbackText = feedbackHistory
+    .map((entry) => `${entry.feedback || entry.state || ""} ${entry.feedback_note || ""} ${entry.note || ""}`)
+    .join(" ")
+    .toLowerCase();
+
+  return {
+    favoriteGenres: topValues(countValues(positiveCatalog.flatMap((anime) => anime.genres)), 8),
+    emotionalThemes: topValues(countValues(positiveCatalog.flatMap((anime) => anime.themes)), 10),
+    pacingPreference: topValues(countValues(positiveCatalog.map((anime) => anime.pacing)), 1)[0] || previousProfile?.pacingPreference || DEFAULT_PROFILE.pacingPreference,
+    darknessTolerance: inferDarknessTolerance(positiveCatalog, negativeCatalog, previousProfile),
+    dislikedTropes: inferDislikedTropes(negativeCatalog, feedbackText, previousProfile),
+    recentEmotionalShifts: inferRecentEmotionalShifts(recentEntries, catalogByTitle),
+    rewatchBehavior: inferRewatchBehavior(entries, previousProfile),
+    scoreTendencies: {
+      averageScore,
+      highScoreThreshold: averageScore && averageScore >= 8 ? 9 : 8,
+      lowScoreThreshold: averageScore && averageScore <= 6 ? 4 : 5,
+      generousScorer: Boolean(averageScore && averageScore >= 7.8)
+    },
+    updatedAt: new Date().toISOString()
+  };
+}
+
+export function summarizeRecentPatterns(malList, feedbackHistory = []) {
+  const entries = Array.isArray(malList) ? malList : [];
+  const catalogByTitle = buildCatalogIndex();
+  const recentCatalog = [...entries]
+    .sort((a, b) => getMalUpdatedTime(b) - getMalUpdatedTime(a))
+    .slice(0, 12)
+    .map((entry) => findCatalogAnime(entry, catalogByTitle))
+    .filter(Boolean);
+  const pendingCount = feedbackHistory.filter((entry) => entry.state === "pending").length;
+  const mehTitles = feedbackHistory
+    .filter((entry) => entry.feedback === "meh")
+    .slice(0, 5)
+    .map((entry) => entry.recommendation?.title)
+    .filter(Boolean);
+
+  return {
+    recentGenres: topValues(countValues(recentCatalog.flatMap((anime) => anime.genres)), 6),
+    recentThemes: topValues(countValues(recentCatalog.flatMap((anime) => anime.themes)), 8),
+    recentPacing: topValues(countValues(recentCatalog.map((anime) => anime.pacing)), 3),
+    pendingCount,
+    recentRejections: mehTitles
+  };
+}
+
+export function compactFeedbackHistory(history = [], limit = 12) {
+  return history.slice(0, limit).map((entry) => ({
+    title: entry.recommendation?.title || "",
+    feedback: entry.feedback || entry.state || "",
+    note: entry.feedback_note || entry.note || "",
+    mood: entry.mood || ""
+  }));
+}
+
+function buildCatalogIndex() {
+  const index = new Map();
+  for (const anime of ANIME_CATALOG) {
+    for (const key of animeTitleKeys(anime)) {
+      index.set(key, anime);
+    }
+  }
+  return index;
+}
+
+function findCatalogAnime(entry, index) {
+  for (const key of animeTitleKeys(entry)) {
+    if (index.has(key)) return index.get(key);
+  }
+  return null;
+}
+
+function inferDarknessTolerance(positiveCatalog, negativeCatalog, previousProfile) {
+  const positiveAverage = average(positiveCatalog.map((anime) => anime.darkness));
+  const negativeHighDark = negativeCatalog.some((anime) => anime.darkness >= 4);
+  if (positiveAverage !== null) {
+    return clamp(Math.round(negativeHighDark ? positiveAverage - 1 : positiveAverage), 0, 5);
+  }
+  return previousProfile?.darknessTolerance ?? DEFAULT_PROFILE.darknessTolerance;
+}
+
+function inferDislikedTropes(negativeCatalog, feedbackText, previousProfile) {
+  const catalogSignals = [
+    ...negativeCatalog.flatMap((anime) => anime.genres || []),
+    ...negativeCatalog.flatMap((anime) => anime.themes || [])
+  ];
+  const textSignals = TROPE_HINTS
+    .filter(([, hints]) => hints.some((hint) => feedbackText.includes(hint)))
+    .map(([trope]) => trope);
+
+  return uniqueTitles([
+    ...(previousProfile?.dislikedTropes || []),
+    ...topValues(countValues(catalogSignals), 5),
+    ...textSignals
+  ]).slice(0, 8);
+}
+
+function inferRecentEmotionalShifts(recentEntries, catalogByTitle) {
+  const themes = recentEntries
+    .map((entry) => findCatalogAnime(entry, catalogByTitle))
+    .filter(Boolean)
+    .flatMap((anime) => anime.themes || []);
+  return topValues(countValues(themes), 6);
+}
+
+function inferRewatchBehavior(entries, previousProfile) {
+  const totalRewatches = entries.reduce(
+    (sum, entry) => sum + Number(entry.my_list_status?.num_times_rewatched || 0),
+    0
+  );
+  if (totalRewatches >= 5) return "frequent";
+  if (totalRewatches > 0) return "occasional";
+  return previousProfile?.rewatchBehavior || DEFAULT_PROFILE.rewatchBehavior;
+}
+
+function countValues(values) {
+  return values.filter(Boolean).reduce((counts, value) => {
+    const key = normalizeTitleForCompare(value);
+    counts.set(key, {
+      label: value,
+      count: (counts.get(key)?.count || 0) + 1
+    });
+    return counts;
+  }, new Map());
+}
+
+function topValues(counts, limit) {
+  return [...counts.values()]
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))
+    .slice(0, limit)
+    .map((entry) => entry.label);
+}
+
+function getMalUpdatedTime(entry) {
+  return Date.parse(
+    entry?.last_updated ||
+      entry?.updated_at ||
+      entry?.my_list_status?.updated_at ||
+      ""
+  ) || 0;
+}
+
+function average(values) {
+  const nums = values.filter((value) => Number.isFinite(value));
+  return nums.length ? nums.reduce((sum, value) => sum + value, 0) / nums.length : null;
+}
+
+function round(value) {
+  return Math.round(value * 10) / 10;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}

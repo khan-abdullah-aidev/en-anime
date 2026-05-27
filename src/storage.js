@@ -2,6 +2,8 @@ const TOKEN_KEY = "en.malTokens";
 const HISTORY_KEY = "en.recommendationHistory";
 const OAUTH_KEY = "en.oauth";
 const MANUAL_LIST_KEY = "en.manualList";
+const TASTE_PROFILE_KEY = "en.tasteProfile";
+const RECOMMENDATION_MEMORY_KEY = "en.recommendationMemory";
 
 export function loadTokens() {
   return readJson(TOKEN_KEY, null);
@@ -48,6 +50,44 @@ export function updateHistoryEntry(id, patch) {
   return next;
 }
 
+export function loadTasteProfileCache() {
+  return readJson(TASTE_PROFILE_KEY, null);
+}
+
+export function saveTasteProfileCache(profile) {
+  localStorage.setItem(TASTE_PROFILE_KEY, JSON.stringify(profile));
+}
+
+export function loadRecommendationMemoryCache() {
+  return readJson(RECOMMENDATION_MEMORY_KEY, {
+    recommended: [],
+    completed: [],
+    rejected: [],
+    watchlisted: [],
+    pending: []
+  });
+}
+
+export function saveRecommendationMemoryCache(memory) {
+  localStorage.setItem(RECOMMENDATION_MEMORY_KEY, JSON.stringify(memory));
+}
+
+export function recordRecommendedAnime(recommendation, bucket = "recommended") {
+  const memory = loadRecommendationMemoryCache();
+  const titles = [
+    recommendation?.title,
+    recommendation?.title_jp
+  ].filter(Boolean);
+  const targetBucket = memory[bucket] ? bucket : "recommended";
+
+  const next = {
+    ...memory,
+    [targetBucket]: mergeUnique(memory[targetBucket], titles)
+  };
+  saveRecommendationMemoryCache(next);
+  return next;
+}
+
 export function loadManualList() {
   return localStorage.getItem(MANUAL_LIST_KEY) || "";
 }
@@ -67,4 +107,8 @@ function readJson(key, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function mergeUnique(current = [], additions = []) {
+  return [...new Set([...(Array.isArray(current) ? current : []), ...additions])];
 }
