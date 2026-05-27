@@ -23,6 +23,8 @@ const VIEW = {
   HISTORY: "history"
 };
 
+const MAX_RECOMMENDATION_ATTEMPTS = 3;
+
 export default function App() {
   const [view, setView] = useState(VIEW.LANDING);
   const [tokens, setTokens] = useState(() => loadTokens());
@@ -126,22 +128,12 @@ export default function App() {
         console.log("[En debug] combined hard exclusion list", exclusionTitles);
       }
 
-      const rec = await askEn({
+      const rec = await askForAllowedRecommendation({
         mood: nextMood,
         malList: list,
         exclusionTitles,
         feedbackHistory: history
       });
-      const excludedMatch = findExcludedRecommendationMatch(rec, exclusionTitles);
-      console.log("[En debug] returned recommendation vs exclusion match", {
-        recommendation: rec,
-        excludedMatch
-      });
-      if (excludedMatch) {
-        throw new Error(
-          `En returned an excluded MAL title (${excludedMatch}). Check the console for the full exclusion payload.`
-        );
-      }
       const imageUrl = await fetchAnimeImage(
         rec.title,
         mode === "manual" ? "" : tokens.access_token
@@ -1082,6 +1074,44 @@ function makeUserReflection(feedback, note) {
 
 function hasRecommendationInput() {
   return Boolean(loadTokens()?.access_token || loadManualList().trim());
+}
+
+async function askForAllowedRecommendation({ mood, malList, exclusionTitles, feedbackHistory }) {
+  let lastExcludedMatch = "";
+  let dynamicExclusionTitles = exclusionTitles;
+
+  for (let attempt = 1; attempt <= MAX_RECOMMENDATION_ATTEMPTS; attempt += 1) {
+    const recommendation = await askEn({
+      mood,
+      malList,
+      exclusionTitles: dynamicExclusionTitles,
+      feedbackHistory
+    });
+    const excludedMatch = findExcludedRecommendationMatch(recommendation, dynamicExclusionTitles);
+    console.log("[En debug] returned recommendation vs exclusion match", {
+      attempt,
+      recommendation,
+      excludedMatch
+    });
+
+    if (!excludedMatch) {
+      return recommendation;
+    }
+
+    lastExcludedMatch = excludedMatch;
+    dynamicExclusionTitles = [
+      ...new Set([
+        ...dynamicExclusionTitles,
+        excludedMatch,
+        recommendation.title,
+        recommendation.title_jp
+      ].filter(Boolean))
+    ];
+  }
+
+  throw new Error(
+    `En kept returning titles already in your list (${lastExcludedMatch}). Try again in a moment.`
+  );
 }
 
 function buildHardExclusionTitles(list) {
