@@ -121,7 +121,7 @@ export default function App() {
       if (Array.isArray(list)) {
         console.log("[En debug] MAL list item count", list.length);
         console.log("[En debug] MAL status counts", countStatuses(list));
-        console.log("[En debug] completed/watching hard exclusion count", malExclusionTitles.length);
+        console.log("[En debug] MAL hard exclusion count", malExclusionTitles.length);
         console.log("[En debug] local recommendation hard exclusion count", localExclusionTitles.length);
         console.log("[En debug] combined hard exclusion list", exclusionTitles);
       }
@@ -1085,12 +1085,7 @@ function hasRecommendationInput() {
 }
 
 function buildHardExclusionTitles(list) {
-  const excludedStatuses = new Set(["completed", "watching"]);
   const titles = list.flatMap((anime) => {
-    if (!excludedStatuses.has(anime.my_list_status?.status)) {
-      return [];
-    }
-
     const alternatives = anime.alternative_titles || {};
     return [
       anime.title,
