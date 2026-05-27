@@ -1,10 +1,5 @@
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_MODEL = "nousresearch/hermes-3-llama-3.1-405b:free";
-const DEFAULT_FALLBACK_MODELS = [
-  "qwen/qwen3.6-plus:free",
-  "openrouter/owl-alpha",
-  "deepseek/deepseek-chat-v3.1:free"
-];
+const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+const MODEL = "llama-3.3-70b-versatile";
 
 const SYSTEM_PROMPT = `You are En, a quiet anime recommendation engine.
 Return strict JSON only. Do not return markdown, commentary, prose outside JSON, or code fences.
@@ -42,9 +37,9 @@ The JSON shape must be exactly:
 }`;
 
 export async function askEn({ mood, malList, exclusionTitles = [], feedbackHistory, onDelta }) {
-  const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
+  const apiKey = import.meta.env.VITE_GROQ_API_KEY;
   if (!apiKey) {
-    throw new Error("VITE_OPENROUTER_API_KEY is missing.");
+    throw new Error("VITE_GROQ_API_KEY is missing.");
   }
 
   const userPayload = {
@@ -57,21 +52,14 @@ export async function askEn({ mood, malList, exclusionTitles = [], feedbackHisto
   console.log("[En debug] exact LLM user payload", userPayload);
   console.log("[En debug] full hard exclusion list", exclusionTitles);
 
-  const models = getOpenRouterModels();
-  const response = await fetch(OPENROUTER_URL, {
+  const response = await fetch(GROQ_URL, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": window.location.origin,
-      "X-Title": "En"
+      "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      model: models[0],
-      models: models.slice(1),
-      provider: {
-        allow_fallbacks: true
-      },
+      model: MODEL,
       stream: true,
       temperature: 0.85,
       messages: [
@@ -86,7 +74,7 @@ export async function askEn({ mood, malList, exclusionTitles = [], feedbackHisto
 
   if (!response.ok || !response.body) {
     const text = await response.text();
-    throw new Error(formatOpenRouterError(text, response.status));
+    throw new Error(formatGroqError(text));
   }
 
   const reader = response.body.getReader();
@@ -109,7 +97,7 @@ export async function askEn({ mood, malList, exclusionTitles = [], feedbackHisto
 
       const event = JSON.parse(data);
       if (event.error) {
-        throw new Error(formatOpenRouterEventError(event.error));
+        throw new Error(formatGroqEventError(event.error));
       }
 
       const delta = event.choices?.[0]?.delta?.content || "";
@@ -126,44 +114,17 @@ export async function askEn({ mood, malList, exclusionTitles = [], feedbackHisto
   return recommendation;
 }
 
-function getOpenRouterModels() {
-  const primaryModel = import.meta.env.VITE_OPENROUTER_MODEL || DEFAULT_MODEL;
-  const configuredFallbacks = parseModelList(import.meta.env.VITE_OPENROUTER_FALLBACK_MODELS);
-  return unique([primaryModel, ...configuredFallbacks, ...DEFAULT_FALLBACK_MODELS]);
-}
-
-function parseModelList(value) {
-  return value
-    ? value
-        .split(",")
-        .map((model) => model.trim())
-        .filter(Boolean)
-    : [];
-}
-
-function unique(values) {
-  return [...new Set(values)];
-}
-
-function formatOpenRouterError(text, status) {
+function formatGroqError(text) {
   try {
     const payload = JSON.parse(text);
-    return formatOpenRouterEventError(payload.error || payload, status);
+    return formatGroqEventError(payload.error || payload);
   } catch {
-    return text || "OpenRouter request failed.";
+    return text || "Groq request failed.";
   }
 }
 
-function formatOpenRouterEventError(error, status) {
-  const code = Number(error?.code || error?.status || status);
-  const message = error?.message || "OpenRouter request failed.";
-  const raw = error?.metadata?.raw || "";
-
-  if (code === 429 || String(raw).includes("rate-limited")) {
-    return "En's recommendation model is rate-limited right now. I tried the backup models too. Please try again in a minute.";
-  }
-
-  return message;
+function formatGroqEventError(error) {
+  return error?.message || "Groq request failed.";
 }
 
 function parseRecommendation(content) {
