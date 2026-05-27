@@ -1,24 +1,29 @@
 const MAL_LIST_URL = "https://api.myanimelist.net/v2/users/@me/animelist";
 
-export async function handler(event) {
-  if (event.httpMethod === "OPTIONS") {
-    return response(204, "");
+export default async function handler(req, res) {
+  setCorsHeaders(res, "GET, OPTIONS");
+
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
   }
 
-  if (event.httpMethod !== "GET") {
-    return response(405, { error: "Method not allowed" });
+  if (req.method !== "GET") {
+    writeJson(res, 405, { error: "Method not allowed" });
+    return;
   }
 
-  const authorization = event.headers.authorization || event.headers.Authorization;
+  const authorization = req.headers.authorization;
   if (!authorization?.startsWith("Bearer ")) {
-    return response(401, { error: "Missing MAL bearer token" });
+    writeJson(res, 401, { error: "Missing MAL bearer token" });
+    return;
   }
 
   try {
     const list = await fetchAnimeList(authorization);
-    return response(200, { data: list });
+    writeJson(res, 200, { data: list });
   } catch (error) {
-    return response(error.statusCode || 500, {
+    writeJson(res, error.statusCode || 500, {
       error: error.message || "Could not read your MAL list."
     });
   }
@@ -82,19 +87,12 @@ function normalizeAnime(item) {
   };
 }
 
-function response(statusCode, body) {
-  return {
-    statusCode,
-    headers: corsHeaders(typeof body === "string" ? "text/plain" : "application/json"),
-    body: typeof body === "string" ? body : JSON.stringify(body)
-  };
+function writeJson(res, statusCode, body) {
+  res.status(statusCode).json(body);
 }
 
-function corsHeaders(contentType) {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Methods": "GET, OPTIONS",
-    "Content-Type": contentType
-  };
+function setCorsHeaders(res, methods) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Methods", methods);
 }
