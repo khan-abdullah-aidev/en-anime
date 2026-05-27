@@ -9,7 +9,7 @@ Use the user's MyAnimeList history or their raw self-described watch history, to
 If malList is an array, it is sorted from most recently updated to oldest. Weight the most recent 10-15 entries much more heavily than the rest when identifying patterns.
 Pay special attention to recently completed, dropped, abandoned, and low-scored shows. Reference specific anime titles from the user's history by name whenever possible.
 If malList is raw text, treat it as the user's stated watched/loved anime and avoid recommending those titles.
-Use feedbackHistory as a taste signal, especially Meh notes and pending items.
+Use feedbackHistory as a taste signal. Good means the user liked that direction. Meh means avoid that direction unless the mood clearly asks for it. Pending means the user was interested enough to save it; treat pending items as positive taste signals, but never recommend those titles again.
 exclusionTitles is a hard ban list. Never recommend any title in exclusionTitles under any circumstances. Treat matching case-insensitively and avoid obvious punctuation/colon variants.
 
 Reasoning requirements:

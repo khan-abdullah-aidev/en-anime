@@ -114,13 +114,16 @@ export default function App() {
         mode === "manual" ? manualList : await fetchAnimeList(tokens.access_token);
       setMalList(Array.isArray(list) ? list : []);
       setStatus("Listening to tonight");
-      const exclusionTitles = Array.isArray(list) ? buildHardExclusionTitles(list) : [];
+      const malExclusionTitles = Array.isArray(list) ? buildHardExclusionTitles(list) : [];
+      const localExclusionTitles = buildLocalExclusionTitles(history);
+      const exclusionTitles = [...new Set([...malExclusionTitles, ...localExclusionTitles])];
 
       if (Array.isArray(list)) {
         console.log("[En debug] MAL list item count", list.length);
         console.log("[En debug] MAL status counts", countStatuses(list));
-        console.log("[En debug] completed/watching hard exclusion count", exclusionTitles.length);
-        console.log("[En debug] completed/watching hard exclusion list", exclusionTitles);
+        console.log("[En debug] completed/watching hard exclusion count", malExclusionTitles.length);
+        console.log("[En debug] local recommendation hard exclusion count", localExclusionTitles.length);
+        console.log("[En debug] combined hard exclusion list", exclusionTitles);
       }
 
       const rec = await askEn({
@@ -1094,6 +1097,18 @@ function buildHardExclusionTitles(list) {
       alternatives.en,
       alternatives.ja,
       ...(alternatives.synonyms || [])
+    ].filter(Boolean);
+  });
+
+  return [...new Set(titles)];
+}
+
+function buildLocalExclusionTitles(history) {
+  const titles = history.flatMap((entry) => {
+    const recommendation = entry.recommendation || {};
+    return [
+      recommendation.title,
+      recommendation.title_jp
     ].filter(Boolean);
   });
 
