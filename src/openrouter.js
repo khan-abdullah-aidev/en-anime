@@ -1,5 +1,5 @@
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const MODEL = "meta-llama/llama-4-scout-17b-16e-instruct";
+const MODEL = "llama-3.3-70b-versatile";
 
 const SYSTEM_PROMPT = `You are En, a quiet anime recommendation engine.
 Return strict JSON only. Do not return markdown, commentary, prose outside JSON, or code fences.
