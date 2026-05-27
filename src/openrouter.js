@@ -64,6 +64,7 @@ export async function askEn({ mood, malList, exclusionTitles = [], feedbackHisto
     },
     body: JSON.stringify({
       model: MODEL,
+      response_format: { type: "json_object" },
       stream: true,
       temperature: 0.85,
       messages: [
@@ -150,6 +151,7 @@ function parseRecommendation(content) {
   const trimmed = content.trim();
   const jsonText = trimmed.match(/\{[\s\S]*\}/)?.[0] || trimmed;
   const parsed = JSON.parse(jsonText);
+  parsed.title_jp ||= parsed.title;
 
   for (const key of ["title", "title_jp", "year", "episodes", "genre", "reason", "log_line"]) {
     if (parsed[key] === undefined || parsed[key] === null || parsed[key] === "") {
