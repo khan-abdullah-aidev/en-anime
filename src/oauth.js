@@ -77,6 +77,35 @@ export async function finishMalOauth(callbackUrl) {
   return payload;
 }
 
+export async function refreshMalOauth(currentTokens) {
+  if (!currentTokens?.refresh_token) {
+    throw new Error("Your MyAnimeList session expired. Please connect again.");
+  }
+
+  const response = await fetch("/api/token-refresh", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      refreshToken: currentTokens.refresh_token
+    })
+  });
+
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error_description || payload.error || "Token refresh failed.");
+  }
+
+  const nextTokens = {
+    ...currentTokens,
+    ...payload,
+    refresh_token: payload.refresh_token || currentTokens.refresh_token
+  };
+  saveTokens(nextTokens);
+  return nextTokens;
+}
+
 function randomString(length) {
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
   const bytes = crypto.getRandomValues(new Uint8Array(length));

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { askEn } from "./openrouter.js";
-import { beginMalOauth, finishMalOauth } from "./oauth.js";
-import { fetchAnimeImage, fetchAnimeList } from "./mal.js";
+import { beginMalOauth, finishMalOauth, refreshMalOauth } from "./oauth.js";
+import { MalAuthError, fetchAnimeImage, fetchAnimeList, isMalAuthError } from "./mal.js";
 import {
   appendHistory,
   clearRecommendationLog,
@@ -133,7 +133,7 @@ export default function App() {
 
     try {
       const list =
-        mode === "manual" ? manualList : await fetchAnimeList(tokens.access_token);
+        mode === "manual" ? manualList : await fetchAnimeListWithRefresh();
       setMalList(Array.isArray(list) ? list : []);
       setStatus("Listening to tonight");
       const previousTasteProfile = loadTasteProfileCache();
@@ -197,10 +197,45 @@ export default function App() {
       setStatus("");
       setView(VIEW.REVEAL);
     } catch (considerError) {
-      setError(considerError.message);
+      if (isMalAuthError(considerError)) {
+        clearExpiredMalSession();
+        setError("Your MyAnimeList session expired. Please connect again.");
+      } else {
+        setError(considerError.message);
+      }
       setStatus("");
-      setView(VIEW.MOOD);
+      setView(isMalAuthError(considerError) ? VIEW.LANDING : VIEW.MOOD);
     }
+  }
+
+  async function fetchAnimeListWithRefresh() {
+    try {
+      return await fetchAnimeList(tokens.access_token);
+    } catch (listError) {
+      if (!isMalAuthError(listError)) {
+        throw listError;
+      }
+
+      try {
+        setStatus("Refreshing MyAnimeList connection");
+        const nextTokens = await refreshMalOauth(tokens);
+        setTokens(nextTokens);
+        return await fetchAnimeList(nextTokens.access_token);
+      } catch (refreshError) {
+        throw isMalAuthError(refreshError)
+          ? refreshError
+          : new MalAuthError("Your MyAnimeList session expired. Please connect again.");
+      }
+    }
+  }
+
+  function clearExpiredMalSession() {
+    clearTokens();
+    setTokens(null);
+    setMode(manualList.trim() ? "manual" : "mal");
+    setMalList([]);
+    setRecommendation(null);
+    setCurrentDraftEntry(null);
   }
 
   function handleFeedback(feedback, feedbackNote = "") {

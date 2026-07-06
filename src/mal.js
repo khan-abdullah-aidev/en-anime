@@ -7,10 +7,25 @@ export async function fetchAnimeList(accessToken) {
 
   const payload = await response.json();
   if (!response.ok) {
+    if (response.status === 401 && isAuthError(payload)) {
+      throw new MalAuthError("Your MyAnimeList session expired. Reconnecting should fix it.");
+    }
+
     throw new Error(payload.message || payload.error || "Could not read your MAL list.");
   }
 
   return sortByRecent(payload.data || []);
+}
+
+export class MalAuthError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "MalAuthError";
+  }
+}
+
+export function isMalAuthError(error) {
+  return error instanceof MalAuthError || error?.name === "MalAuthError";
 }
 
 export async function fetchAnimeImage(title, accessToken) {
@@ -38,4 +53,9 @@ function sortByRecent(list) {
     const bTime = Date.parse(b.updated_at || b.my_list_status?.updated_at || "") || 0;
     return bTime - aTime;
   });
+}
+
+function isAuthError(payload) {
+  const value = `${payload?.error || ""} ${payload?.message || ""}`.toLowerCase();
+  return value.includes("invalid_token") || value.includes("token");
 }
