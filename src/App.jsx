@@ -764,22 +764,15 @@ function ScreenMood({ onLog, onConsider, onSurprise, mood, setMood }) {
 
 function ScreenThinking({ onLog, status, mood, watchedCount, mode }) {
   const [phase, setPhase] = useState(0);
-  const lines = useMemo(
-    () =>
-      mode === "manual"
-        ? [
-            "Reading what you told En",
-            mood ? "Listening to tonight" : "Letting tonight choose itself",
-            "Considering"
-          ]
-        : [
-            "Reading your history",
-            watchedCount ? `${formatCount(watchedCount)} titles` : "Your list is opening",
-            mood ? "Listening to tonight" : "Letting tonight choose itself",
-            status || "Considering"
-          ],
-    [mode, mood, status, watchedCount]
-  );
+  const lines = useMemo(() => {
+    const sourceLine = mode === "manual" ? "Reading what you told En" : "Reading your history";
+    const listLine = watchedCount ? `${formatCount(watchedCount)} titles` : "Your list is opening";
+    const moodLine = mood ? "Listening to tonight" : "Letting tonight choose itself";
+    const baseLines = mode === "manual" ? [sourceLine, moodLine] : [sourceLine, listLine, moodLine];
+    const finalLine = status && !baseLines.includes(status) ? status : "Considering";
+
+    return [...baseLines, finalLine];
+  }, [mode, mood, status, watchedCount]);
 
   useEffect(() => {
     const timers = [];
