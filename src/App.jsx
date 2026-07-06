@@ -177,9 +177,10 @@ export default function App() {
       });
       const imageUrl = await fetchAnimeImage(
         rec.title,
-        mode === "manual" ? "" : tokens.access_token
+        mode === "manual" ? "" : tokens.access_token,
+        [rec.title_jp, rec.title_en]
       );
-      const recommendationWithImage = { ...rec, image_url: imageUrl };
+      const recommendationWithImage = { ...rec, image_url: imageUrl || rec.image_url || "" };
       recordRecommendedAnime(recommendationWithImage, "recommended");
 
       const entry = {
@@ -1312,7 +1313,8 @@ function mergeCandidateMeta(recommendation, candidate) {
     title_jp: candidate.title_jp || recommendation.title_jp || candidate.title,
     year: candidate.year,
     episodes: candidate.episodes,
-    genre: candidate.genre
+    genre: candidate.genre,
+    image_url: candidate.image_url || recommendation.image_url || ""
   };
 }
 

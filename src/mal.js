@@ -28,10 +28,15 @@ export function isMalAuthError(error) {
   return error instanceof MalAuthError || error?.name === "MalAuthError";
 }
 
-export async function fetchAnimeImage(title, accessToken) {
+export async function fetchAnimeImage(title, accessToken, aliases = []) {
   if (!title) return "";
 
-  const response = await fetch(`/api/anime-image?q=${encodeURIComponent(title)}`, {
+  const params = new URLSearchParams({ q: title });
+  for (const alias of aliases.filter(Boolean)) {
+    params.append("alias", alias);
+  }
+
+  const response = await fetch(`/api/anime-image?${params.toString()}`, {
     headers: accessToken
       ? {
           Authorization: `Bearer ${accessToken}`
