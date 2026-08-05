@@ -64,6 +64,103 @@ export async function askEn({
   return recommendation;
 }
 
+const VERDICT_SYSTEM_PROMPT = `You are En, a quiet anime recommendation engine.
+Return strict JSON only. Do not return markdown, commentary, prose outside JSON, or code fences.
+
+The user is naming one or more anime titles they are considering watching tonight (queriedTitles). Give a verdict on the single best one, or veto all of them.
+
+Use the user's MyAnimeList history or their raw self-described watch history, their taste profile, recent patterns, and feedback history to judge fit.
+If malList is an array, it is sorted from most recently updated to oldest. Weight the most recent 10-15 entries much more heavily than the rest when identifying patterns.
+Pay special attention to recently completed, dropped, abandoned, and low-scored shows.
+Use feedbackHistory as a taste signal. Good means the user liked that direction. Meh means avoid that direction unless the mood clearly asks for it. Pending means the user was interested enough to save it; treat pending items as positive taste signals.
+exclusionTitles is a hard ban list. Never let "title" land on any title in exclusionTitles under any circumstances. Treat matching case-insensitively and avoid obvious punctuation/colon variants.
+
+Decide:
+- If exactly one of queriedTitles genuinely fits their taste and recent pattern right now: verdict is "yes". "title" is that same title in canonical form, and "queried_title" is that title as the user meant it.
+- If none of queriedTitles fit, or the strongest one is a clear mismatch right now (tone, pacing, darkness, franchise fatigue, repeats something they just watched or dropped): verdict is "no". "title" must be a DIFFERENT anime, pulled from candidateList, that fits better instead. "queried_title" is the queried title En is vetoing (the strongest or most-considered one, if several were given).
+- If multiple queriedTitles were given and one is clearly the best of the set, treat it as a comparison: verdict "yes" for that one, and reason should explain why it beats the others by name.
+
+Reasoning requirements:
+- reason must be 2-4 short sentences maximum.
+- Write like someone who notices things but does not announce that they notice.
+- No metaphors.
+- Short sentences.
+- If a sentence sounds like writing, cut it in half.
+- Target tone: Hemingway, not Fitzgerald.
+- Never use words like: journey, resonate, tapestry, yearning, delve, profound, captivating, narrative.
+- Never be generic. Never say "since you like action, here's another action anime."
+- If verdict is "no", name the specific reason it doesn't fit right now, then pivot straight into why "title" fits instead. Do not soften the "no."
+- If verdict is "yes", the reason should still sound like a private observation, not encouragement.
+- log_line must be a separate single quiet line distilled from the same observation, not a summary. It should stand alone.
+
+The JSON shape must be exactly:
+{
+  "verdict": "yes" | "no",
+  "queried_title": "string",
+  "title": "string",
+  "title_jp": "string",
+  "year": number,
+  "episodes": number,
+  "genre": "string",
+  "reason": "string",
+  "log_line": "string"
+}`;
+
+export async function askEnVerdict({
+  queriedTitles,
+  tasteProfile,
+  recentPatterns,
+  feedbackHistory,
+  candidateList,
+  onDelta
+}) {
+  const userPayload = {
+    queriedTitles,
+    tasteProfile,
+    recentPatterns,
+    feedbackHistory,
+    candidateList
+  };
+
+  console.log("[En debug] exact verdict LLM user payload", userPayload);
+  const content = await generateJsonWithProvider({
+    systemPrompt: VERDICT_SYSTEM_PROMPT,
+    userPayload
+  });
+  onDelta?.(content);
+
+  const verdict = parseVerdict(content);
+  console.log("[En debug] verdict LLM raw response text", content);
+  console.log("[En debug] verdict LLM parsed", verdict);
+  return verdict;
+}
+
+function parseVerdict(content) {
+  const trimmed = content.trim();
+  const jsonText = trimmed.match(/\{[\s\S]*\}/)?.[0] || trimmed;
+  const parsed = JSON.parse(jsonText);
+  parsed.title_jp ||= parsed.title;
+
+  if (parsed.verdict !== "yes" && parsed.verdict !== "no") {
+    throw new Error("En returned an invalid verdict value.");
+  }
+
+  for (const key of ["queried_title", "title", "title_jp", "genre", "reason", "log_line"]) {
+    if (typeof parsed[key] !== "string" || !parsed[key]) {
+      throw new Error(`En returned JSON with invalid ${key}.`);
+    }
+  }
+
+  for (const key of ["year", "episodes"]) {
+    if (!Number.isFinite(Number(parsed[key]))) {
+      throw new Error(`En returned JSON with invalid ${key}.`);
+    }
+    parsed[key] = Number(parsed[key]);
+  }
+
+  return parsed;
+}
+
 function parseRecommendation(content) {
   const trimmed = content.trim();
   const jsonText = trimmed.match(/\{[\s\S]*\}/)?.[0] || trimmed;

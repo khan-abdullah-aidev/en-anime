@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { askEn } from "./openrouter.js";
+import { askEn, askEnVerdict } from "./openrouter.js";
 import { beginMalOauth, finishMalOauth, refreshMalOauth } from "./oauth.js";
 import { MalAuthError, fetchAnimeImage, fetchAnimeList, isMalAuthError } from "./mal.js";
 import {
@@ -31,12 +31,14 @@ import {
   compactFeedbackHistory,
   summarizeRecentPatterns
 } from "./tasteProfile.js";
+import { normalizeTitleForCompare } from "./titleUtils.js";
 
 const VIEW = {
   LANDING: "landing",
   MANUAL: "manual",
   PENDING: "pending",
   MOOD: "mood",
+  SHORTLIST: "shortlist",
   THINKING: "thinking",
   REVEAL: "reveal",
   FEEDBACK: "feedback",
@@ -50,6 +52,7 @@ export default function App() {
   const [tokens, setTokens] = useState(() => loadTokens());
   const [history, setHistory] = useState(() => loadHistory());
   const [mood, setMood] = useState("");
+  const [shortlist, setShortlist] = useState("");
   const [manualList, setManualList] = useState(() => loadManualList());
   const [mode, setMode] = useState(() => (loadManualList() ? "manual" : "mal"));
   const [malList, setMalList] = useState([]);
@@ -209,6 +212,98 @@ export default function App() {
     }
   }
 
+  function handleShortlistStart() {
+    setError("");
+    setView(VIEW.SHORTLIST);
+  }
+
+  async function handleVerdict(rawText) {
+    const text = rawText.trim();
+    if (!text || !hasRecommendationInput() || (mode !== "manual" && !tokens?.access_token)) {
+      setView(VIEW.LANDING);
+      return;
+    }
+
+    setError("");
+    setRecommendation(null);
+    setStatus(mode === "manual" ? "Reading what you told En" : "Reading your history");
+    setView(VIEW.THINKING);
+
+    try {
+      const list =
+        mode === "manual" ? manualList : await fetchAnimeListWithRefresh();
+      setMalList(Array.isArray(list) ? list : []);
+      setStatus("Weighing it against your history");
+      const previousTasteProfile = loadTasteProfileCache();
+      const tasteProfile = buildTasteProfile({
+        malList: list,
+        feedbackHistory: history,
+        previousProfile: previousTasteProfile
+      });
+      saveTasteProfileCache(tasteProfile);
+
+      const recommendationMemory = buildRecommendationMemory({
+        malList: list,
+        history,
+        existingMemory: loadRecommendationMemoryCache()
+      });
+      saveRecommendationMemoryCache(recommendationMemory);
+
+      const recentPatterns = summarizeRecentPatterns(list, history);
+      const feedbackSignals = compactFeedbackHistory(history);
+      const queriedTitles = splitShortlist(text);
+      const candidateList = buildCandidatePool({
+        mood: "",
+        tasteProfile,
+        recentPatterns,
+        memory: recommendationMemory
+      });
+
+      const verdict = await askForAllowedVerdict({
+        queriedTitles,
+        tasteProfile,
+        recentPatterns,
+        feedbackHistory: feedbackSignals,
+        candidateList,
+        memory: recommendationMemory
+      });
+      const imageUrl = await fetchAnimeImage(
+        verdict.title,
+        mode === "manual" ? "" : tokens.access_token,
+        [verdict.title_jp]
+      );
+      const recommendationWithImage = { ...verdict, image_url: imageUrl || verdict.image_url || "" };
+      recordRecommendedAnime(recommendationWithImage, "recommended");
+
+      const entry = {
+        id: crypto.randomUUID(),
+        date: new Date().toISOString(),
+        mood: `asked about ${verdict.queried_title}`,
+        recommendation: recommendationWithImage,
+        note: "",
+        feedback: "",
+        state: "unrated",
+        mode: "verdict",
+        queried_title: verdict.queried_title,
+        verdict: verdict.verdict
+      };
+
+      setRecommendation(recommendationWithImage);
+      setCurrentDraftEntry(entry);
+      setStatus("");
+      setView(VIEW.REVEAL);
+    } catch (verdictError) {
+      if (isMalAuthError(verdictError)) {
+        clearExpiredMalSession();
+        setError("Your MyAnimeList session expired. Please connect again.");
+      } else {
+        setError(verdictError.message);
+      }
+      setStatus("");
+      setView(isMalAuthError(verdictError) ? VIEW.LANDING : VIEW.SHORTLIST);
+    }
+  }
+
   async function fetchAnimeListWithRefresh() {
     try {
       return await fetchAnimeList(tokens.access_token);
@@ -339,6 +434,8 @@ export default function App() {
     manualStart: handleManualStart,
     manualSubmit: handleManualSubmit,
     consider: handleConsider,
+    shortlistStart: handleShortlistStart,
+    verdict: handleVerdict,
     feedback: handleFeedback,
     pendingAnswer: handlePendingAnswer,
     deleteHistoryEntry: handleDeleteHistoryEntry,
@@ -366,15 +463,24 @@ export default function App() {
           onLog={nav.log}
           onConsider={() => handleConsider(mood)}
           onSurprise={() => handleConsider("")}
+          onShortlist={nav.shortlistStart}
           mood={mood}
           setMood={setMood}
+        />
+      )}
+      {view === VIEW.SHORTLIST && (
+        <ScreenShortlist
+          onLog={nav.log}
+          onSubmit={(value) => handleVerdict(value)}
+          shortlist={shortlist}
+          setShortlist={setShortlist}
         />
       )}
       {view === VIEW.THINKING && (
         <ScreenThinking
           onLog={nav.log}
           status={status}
-          mood={mood}
+          mood={mood || shortlist}
           watchedCount={mode === "manual" ? manualList : malList.length}
           mode={mode}
         />
@@ -641,7 +747,7 @@ function ScreenPending({ nav, pending }) {
   );
 }
 
-function ScreenMood({ onLog, onConsider, onSurprise, mood, setMood }) {
+function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, mood, setMood }) {
   const ref = useRef(null);
   const hints = useMemo(
     () => [
@@ -755,6 +861,86 @@ function ScreenMood({ onLog, onConsider, onSurprise, mood, setMood }) {
                 or — surprise me
               </button>
             </div>
+            <div style={{ marginTop: 16 }}>
+              <button className="btn-quiet" onClick={onShortlist}>
+                or — I already have one in mind
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ScreenShortlist({ onLog, onSubmit, shortlist, setShortlist }) {
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => ref.current?.focus(), 600);
+    return () => clearTimeout(t);
+  }, []);
+
+  return (
+    <div className="app-frame">
+      <Chrome step={1} total={3} onLog={onLog} />
+      <div className="app-stage">
+        <div className="column" style={{ textAlign: "center" }}>
+          <div className="eyebrow fade-up">Instead of a mood</div>
+          <h2
+            className="serif-display fade-up delay-1"
+            style={{ fontSize: 44, margin: "32px 0 14px", fontWeight: 300 }}
+          >
+            What are you considering?
+          </h2>
+          <p
+            className="fade-up delay-2"
+            style={{
+              color: "var(--bone-3)",
+              fontSize: 15,
+              marginBottom: 80,
+              fontStyle: "italic"
+            }}
+          >
+            One title, or a few you're torn between.
+          </p>
+
+          <div
+            className="fade-up delay-3"
+            style={{ position: "relative", maxWidth: 620, margin: "0 auto" }}
+          >
+            <textarea
+              ref={ref}
+              value={shortlist}
+              onChange={(e) => setShortlist(e.target.value)}
+              rows={2}
+              className="serif-display"
+              placeholder="Chainsaw Man, or Chainsaw Man vs Frieren..."
+              style={{
+                width: "100%",
+                fontSize: 28,
+                textAlign: "center",
+                lineHeight: 1.4,
+                color: "var(--bone)",
+                resize: "none",
+                fontWeight: 300
+              }}
+            />
+            <hr className="hairline" style={{ marginTop: 8 }} />
+          </div>
+
+          <div className="fade-up delay-4" style={{ marginTop: 80 }}>
+            <button
+              className="btn-link"
+              onClick={() => onSubmit(shortlist)}
+              style={{
+                opacity: shortlist.trim().length ? 1 : 0.4,
+                pointerEvents: shortlist.trim().length ? "auto" : "none",
+                transition: "opacity 0.4s ease"
+              }}
+            >
+              Ask En
+            </button>
           </div>
         </div>
       </div>
@@ -853,7 +1039,11 @@ function ScreenReveal({ nav, pick }) {
 
           <div className="reveal-scroll__copy ink-bloom delay-3">
             <div className="eyebrow shu">
-              ・ for you, tonight
+              {pick.verdict === "yes"
+                ? `・ yes — ${pick.queried_title}`
+                : pick.verdict === "no"
+                  ? `・ not ${pick.queried_title} — this instead`
+                  : "・ for you, tonight"}
             </div>
             <h1
               className="serif-display reveal-scroll__title"
@@ -1079,6 +1269,14 @@ function ScreenHistory({ nav, history }) {
                           ? "— meh"
                           : ""}
                   </div>
+                  {entry.mode === "verdict" && (
+                    <div
+                      className="meta"
+                      style={{ marginTop: 10, fontSize: 9.5, letterSpacing: "0.16em", color: "var(--bone-4)" }}
+                    >
+                      {entry.verdict === "yes" ? "asked · confirmed" : "asked · redirected"}
+                    </div>
+                  )}
                 </div>
 
                 <div>
@@ -1259,6 +1457,96 @@ async function askForAllowedRecommendation({
 
   console.warn("[En debug] falling back to deterministic ranking", lastValidationError);
   return deterministicRecommendation(candidateList);
+}
+
+async function askForAllowedVerdict({
+  queriedTitles,
+  tasteProfile,
+  recentPatterns,
+  feedbackHistory,
+  candidateList,
+  memory
+}) {
+  let lastValidationError = "";
+
+  for (let attempt = 1; attempt <= MAX_RECOMMENDATION_ATTEMPTS; attempt += 1) {
+    try {
+      const verdict = await askEnVerdict({
+        queriedTitles,
+        tasteProfile,
+        recentPatterns,
+        feedbackHistory,
+        candidateList
+      });
+      const validation = validateVerdict(verdict, queriedTitles, candidateList, memory);
+      console.log("[En debug] returned verdict validation", { attempt, verdict, validation });
+
+      if (validation.ok) {
+        return validation.candidate ? mergeCandidateMeta(verdict, validation.candidate) : verdict;
+      }
+
+      lastValidationError = validation.error;
+    } catch (error) {
+      lastValidationError = error.message;
+      console.warn("[En debug] verdict attempt failed", { attempt, error });
+    }
+  }
+
+  console.warn("[En debug] falling back to deterministic veto", lastValidationError);
+  const fallbackCandidate = candidateList[0];
+  if (!fallbackCandidate) {
+    throw new Error("No eligible anime remain after filtering.");
+  }
+
+  return {
+    verdict: "no",
+    queried_title: queriedTitles[0] || "that one",
+    title: fallbackCandidate.title,
+    title_jp: fallbackCandidate.title_jp || fallbackCandidate.title,
+    year: fallbackCandidate.year,
+    episodes: fallbackCandidate.episodes,
+    genre: fallbackCandidate.genre,
+    reason: "En couldn't confirm that pick against your history right now. This one is closest to what you've actually been drawn to.",
+    log_line: "Signal's thin tonight. This one held up anyway."
+  };
+}
+
+function validateVerdict(verdict, queriedTitles, candidateList, memory) {
+  const required = ["verdict", "queried_title", "title", "title_jp", "year", "episodes", "genre", "reason", "log_line"];
+  const missing = required.find((key) => verdict?.[key] === undefined || verdict?.[key] === null || verdict?.[key] === "");
+  if (missing) {
+    return { ok: false, error: `missing ${missing}` };
+  }
+
+  if (verdict.verdict !== "yes" && verdict.verdict !== "no") {
+    return { ok: false, error: "invalid verdict value" };
+  }
+
+  if (verdict.verdict === "no") {
+    if (isMemoryExcludedTitle(verdict.title, memory) || isMemoryExcludedTitle(verdict.title_jp, memory)) {
+      return { ok: false, error: "alternative already exists in recommendation memory" };
+    }
+
+    if (titleMatchesAnyQueried(verdict.title, queriedTitles) || titleMatchesAnyQueried(verdict.title_jp, queriedTitles)) {
+      return { ok: false, error: "alternative repeats the queried title" };
+    }
+  }
+
+  const candidate = findCandidateByRecommendation(verdict, candidateList);
+  return { ok: true, candidate };
+}
+
+function titleMatchesAnyQueried(title, queriedTitles) {
+  const normalized = normalizeTitleForCompare(title);
+  return Boolean(normalized) && queriedTitles.some((queried) => normalizeTitleForCompare(queried) === normalized);
+}
+
+function splitShortlist(text) {
+  return text
+    .split(/[\n,;]+|\bvs\.?\b|\bor\b/i)
+    .map((title) => title.trim())
+    .filter(Boolean)
+    .slice(0, 5);
 }
 
 function countStatuses(list) {
