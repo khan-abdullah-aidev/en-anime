@@ -67,7 +67,7 @@ export async function askEn({
 const VERDICT_SYSTEM_PROMPT = `You are En, a quiet anime recommendation engine.
 Return strict JSON only. Do not return markdown, commentary, prose outside JSON, or code fences.
 
-The user is naming one or more anime titles they are considering watching tonight (queriedTitles). Give a verdict on the single best one, or veto all of them.
+The user is naming exactly ONE anime title they are considering watching tonight (queriedTitles has one entry). Give a verdict: does it fit, or not.
 
 Use the user's MyAnimeList history or their raw self-described watch history, their taste profile, recent patterns, and feedback history to judge fit.
 If malList is an array, it is sorted from most recently updated to oldest. Weight the most recent 10-15 entries much more heavily than the rest when identifying patterns.
@@ -76,9 +76,8 @@ Use feedbackHistory as a taste signal. Good means the user liked that direction.
 exclusionTitles is a hard ban list. Never let "title" land on any title in exclusionTitles under any circumstances. Treat matching case-insensitively and avoid obvious punctuation/colon variants.
 
 Decide:
-- If exactly one of queriedTitles genuinely fits their taste and recent pattern right now: verdict is "yes". "title" is that same title in canonical form, and "queried_title" is that title as the user meant it.
-- If none of queriedTitles fit, or the strongest one is a clear mismatch right now (tone, pacing, darkness, franchise fatigue, repeats something they just watched or dropped): verdict is "no". "title" must be a DIFFERENT anime, pulled from candidateList, that fits better instead. "queried_title" is the queried title En is vetoing (the strongest or most-considered one, if several were given).
-- If multiple queriedTitles were given and one is clearly the best of the set, treat it as a comparison: verdict "yes" for that one, and reason should explain why it beats the others by name.
+- If the queried title genuinely fits their taste and recent pattern right now: verdict is "yes". "title" is that same title in canonical form, and "queried_title" is that title as the user meant it.
+- If it's a clear mismatch right now (tone, pacing, darkness, franchise fatigue, repeats something they just watched or dropped): verdict is "no". "title" must be a DIFFERENT anime, pulled from candidateList, that fits better instead. "queried_title" is the title En is vetoing.
 
 Reasoning requirements:
 - reason must be 2-4 short sentences maximum.
@@ -133,6 +132,68 @@ export async function askEnVerdict({
   console.log("[En debug] verdict LLM raw response text", content);
   console.log("[En debug] verdict LLM parsed", verdict);
   return verdict;
+}
+
+const CHOOSE_SYSTEM_PROMPT = `You are En, a quiet anime recommendation engine.
+Return strict JSON only. Do not return markdown, commentary, prose outside JSON, or code fences.
+
+The user has named two to four anime titles (queriedTitles) they are torn between watching tonight. They may have also given a mood, or a reason for narrowing it to these titles (the mood field; it can be empty).
+
+Your job is to pick exactly ONE of queriedTitles. Never pick a title outside that list — every title on it is already something they're seriously considering, so you are choosing a winner, not rejecting the set or substituting something else.
+
+Use the user's MyAnimeList history or raw watch history, taste profile, recent patterns, and feedback history, plus the mood if given, to decide which of queriedTitles fits best right now.
+If malList is an array, it is sorted from most recently updated to oldest. Weight the most recent 10-15 entries much more heavily than the rest.
+Use feedbackHistory as a taste signal. Good means the user liked that direction. Meh means avoid that direction unless the mood clearly asks for it. Pending is a positive signal.
+
+"title" and "title_jp" must exactly match one of queriedTitles, in that title's canonical form. Do not invent a title that isn't on the list.
+
+Reasoning requirements:
+- reason must be 2-4 short sentences maximum, and must explicitly name at least one of the titles NOT chosen and say why it loses to the winner tonight. That comparison is the entire point — do not skip it.
+- Write like someone who notices things but does not announce that they notice.
+- No metaphors. Short sentences. If a sentence sounds like writing, cut it in half.
+- Target tone: Hemingway, not Fitzgerald.
+- Never use words like: journey, resonate, tapestry, yearning, delve, profound, captivating, narrative.
+- Never be generic. Never say "since you like action, here's another action anime."
+- log_line must be a separate single quiet line distilled from the same observation, not a summary. It should stand alone.
+
+The JSON shape must be exactly:
+{
+  "title": "string",
+  "title_jp": "string",
+  "year": number,
+  "episodes": number,
+  "genre": "string",
+  "reason": "string",
+  "log_line": "string"
+}`;
+
+export async function askEnChoose({
+  queriedTitles,
+  mood,
+  tasteProfile,
+  recentPatterns,
+  feedbackHistory,
+  onDelta
+}) {
+  const userPayload = {
+    queriedTitles,
+    mood: mood || "",
+    tasteProfile,
+    recentPatterns,
+    feedbackHistory
+  };
+
+  console.log("[En debug] exact choose LLM user payload", userPayload);
+  const content = await generateJsonWithProvider({
+    systemPrompt: CHOOSE_SYSTEM_PROMPT,
+    userPayload
+  });
+  onDelta?.(content);
+
+  const choice = parseRecommendation(content);
+  console.log("[En debug] choose LLM raw response text", content);
+  console.log("[En debug] choose LLM parsed", choice);
+  return choice;
 }
 
 function parseVerdict(content) {

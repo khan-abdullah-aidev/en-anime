@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { askEn, askEnVerdict } from "./openrouter.js";
+import { askEn, askEnChoose, askEnVerdict } from "./openrouter.js";
 import { beginMalOauth, finishMalOauth, refreshMalOauth } from "./oauth.js";
 import { MalAuthError, fetchAnimeImage, fetchAnimeList, isMalAuthError } from "./mal.js";
+import { ANIME_CATALOG } from "./animeCatalog.js";
 import {
   appendHistory,
   clearRecommendationLog,
@@ -31,7 +32,7 @@ import {
   compactFeedbackHistory,
   summarizeRecentPatterns
 } from "./tasteProfile.js";
-import { normalizeTitleForCompare } from "./titleUtils.js";
+import { normalizeTitleForCompare, titleMatchesAnime } from "./titleUtils.js";
 
 const VIEW = {
   LANDING: "landing",
@@ -39,6 +40,7 @@ const VIEW = {
   PENDING: "pending",
   MOOD: "mood",
   SHORTLIST: "shortlist",
+  SHORTLIST_MOOD: "shortlist_mood",
   THINKING: "thinking",
   REVEAL: "reveal",
   FEEDBACK: "feedback",
@@ -53,6 +55,8 @@ export default function App() {
   const [history, setHistory] = useState(() => loadHistory());
   const [mood, setMood] = useState("");
   const [shortlist, setShortlist] = useState("");
+  const [shortlistTitles, setShortlistTitles] = useState([]);
+  const [chooseMood, setChooseMood] = useState("");
   const [manualList, setManualList] = useState(() => loadManualList());
   const [mode, setMode] = useState(() => (loadManualList() ? "manual" : "mal"));
   const [malList, setMalList] = useState([]);
@@ -215,6 +219,115 @@ export default function App() {
   function handleShortlistStart() {
     setError("");
     setView(VIEW.SHORTLIST);
+  }
+
+  function handleShortlistSubmit(rawText) {
+    const text = rawText.trim();
+    if (!text) return;
+
+    const titles = splitShortlist(text);
+    if (titles.length <= 1) {
+      handleVerdict(text);
+      return;
+    }
+
+    setError("");
+    setShortlistTitles(titles);
+    setChooseMood("");
+    setView(VIEW.SHORTLIST_MOOD);
+  }
+
+  async function handleChoose(titles, moodText) {
+    if (!titles.length || !hasRecommendationInput() || (mode !== "manual" && !tokens?.access_token)) {
+      setView(VIEW.LANDING);
+      return;
+    }
+
+    setError("");
+    setRecommendation(null);
+    setStatus(mode === "manual" ? "Reading what you told En" : "Reading your history");
+    setView(VIEW.THINKING);
+
+    try {
+      const list =
+        mode === "manual" ? manualList : await fetchAnimeListWithRefresh();
+      setMalList(Array.isArray(list) ? list : []);
+      setStatus("Weighing them against each other");
+      const previousTasteProfile = loadTasteProfileCache();
+      const tasteProfile = buildTasteProfile({
+        malList: list,
+        feedbackHistory: history,
+        previousProfile: previousTasteProfile
+      });
+      saveTasteProfileCache(tasteProfile);
+
+      const recentPatterns = summarizeRecentPatterns(list, history);
+      const feedbackSignals = compactFeedbackHistory(history);
+
+      const choice = await askForAllowedChoice({
+        queriedTitles: titles,
+        mood: moodText,
+        tasteProfile,
+        recentPatterns,
+        feedbackHistory: feedbackSignals
+      });
+
+      const catalogMatch = matchCatalogAnime(choice.title, choice.title_jp);
+      const enrichedChoice = catalogMatch
+        ? {
+            ...choice,
+            title: catalogMatch.title,
+            title_jp: catalogMatch.title_jp || catalogMatch.title,
+            year: catalogMatch.year,
+            episodes: catalogMatch.episodes,
+            genre: catalogMatch.genre
+          }
+        : choice;
+
+      const chooseAgainst = titles.filter(
+        (title) => normalizeTitleForCompare(title) !== normalizeTitleForCompare(enrichedChoice.title)
+      );
+
+      const imageUrl = await fetchAnimeImage(
+        enrichedChoice.title,
+        mode === "manual" ? "" : tokens.access_token,
+        [enrichedChoice.title_jp]
+      );
+      const recommendationWithImage = {
+        ...enrichedChoice,
+        image_url: imageUrl || enrichedChoice.image_url || "",
+        mode: "choose",
+        chooseAgainst
+      };
+      recordRecommendedAnime(recommendationWithImage, "recommended");
+
+      const entry = {
+        id: crypto.randomUUID(),
+        date: new Date().toISOString(),
+        mood: moodText || `choosing between ${titles.join(", ")}`,
+        recommendation: recommendationWithImage,
+        note: "",
+        feedback: "",
+        state: "unrated",
+        mode: "choose",
+        queried_title: titles.join(" vs "),
+        verdict: "yes"
+      };
+
+      setRecommendation(recommendationWithImage);
+      setCurrentDraftEntry(entry);
+      setStatus("");
+      setView(VIEW.REVEAL);
+    } catch (chooseError) {
+      if (isMalAuthError(chooseError)) {
+        clearExpiredMalSession();
+        setError("Your MyAnimeList session expired. Please connect again.");
+      } else {
+        setError(chooseError.message);
+      }
+      setStatus("");
+      setView(isMalAuthError(chooseError) ? VIEW.LANDING : VIEW.SHORTLIST_MOOD);
+    }
   }
 
   async function handleVerdict(rawText) {
@@ -435,7 +548,8 @@ export default function App() {
     manualSubmit: handleManualSubmit,
     consider: handleConsider,
     shortlistStart: handleShortlistStart,
-    verdict: handleVerdict,
+    shortlistSubmit: handleShortlistSubmit,
+    choose: handleChoose,
     feedback: handleFeedback,
     pendingAnswer: handlePendingAnswer,
     deleteHistoryEntry: handleDeleteHistoryEntry,
@@ -471,16 +585,26 @@ export default function App() {
       {view === VIEW.SHORTLIST && (
         <ScreenShortlist
           onLog={nav.log}
-          onSubmit={(value) => handleVerdict(value)}
+          onSubmit={nav.shortlistSubmit}
           shortlist={shortlist}
           setShortlist={setShortlist}
+        />
+      )}
+      {view === VIEW.SHORTLIST_MOOD && (
+        <ScreenShortlistMood
+          onLog={nav.log}
+          titles={shortlistTitles}
+          mood={chooseMood}
+          setMood={setChooseMood}
+          onSubmit={() => nav.choose(shortlistTitles, chooseMood)}
+          onSkip={() => nav.choose(shortlistTitles, "")}
         />
       )}
       {view === VIEW.THINKING && (
         <ScreenThinking
           onLog={nav.log}
           status={status}
-          mood={mood || shortlist}
+          mood={mood || shortlist || chooseMood || shortlistTitles.join(", ")}
           watchedCount={mode === "manual" ? manualList : malList.length}
           mode={mode}
         />
@@ -948,6 +1072,78 @@ function ScreenShortlist({ onLog, onSubmit, shortlist, setShortlist }) {
   );
 }
 
+function ScreenShortlistMood({ onLog, titles, mood, setMood, onSubmit, onSkip }) {
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => ref.current?.focus(), 600);
+    return () => clearTimeout(t);
+  }, []);
+
+  return (
+    <div className="app-frame">
+      <Chrome step={2} total={3} onLog={onLog} />
+      <div className="app-stage">
+        <div className="column" style={{ textAlign: "center" }}>
+          <div className="eyebrow fade-up">Choosing between</div>
+          <h2
+            className="serif-display fade-up delay-1"
+            style={{ fontSize: 32, margin: "24px 0 14px", fontWeight: 300, fontStyle: "italic" }}
+          >
+            {titles.join(" · ")}
+          </h2>
+          <p
+            className="fade-up delay-2"
+            style={{
+              color: "var(--bone-3)",
+              fontSize: 15,
+              marginBottom: 64,
+              fontStyle: "italic"
+            }}
+          >
+            What are you in the mood for tonight? Or — why these, tonight?
+          </p>
+
+          <div
+            className="fade-up delay-3"
+            style={{ position: "relative", maxWidth: 560, margin: "0 auto" }}
+          >
+            <textarea
+              ref={ref}
+              value={mood}
+              onChange={(e) => setMood(e.target.value)}
+              rows={2}
+              className="serif-display"
+              placeholder="something quiet, or nothing at all"
+              style={{
+                width: "100%",
+                fontSize: 26,
+                textAlign: "center",
+                lineHeight: 1.4,
+                color: "var(--bone)",
+                resize: "none",
+                fontWeight: 300
+              }}
+            />
+            <hr className="hairline" style={{ marginTop: 8 }} />
+          </div>
+
+          <div className="fade-up delay-4" style={{ marginTop: 72 }}>
+            <button className="btn-link" onClick={onSubmit}>
+              Let En decide
+            </button>
+            <div style={{ marginTop: 20 }}>
+              <button className="btn-quiet" onClick={onSkip}>
+                or — no particular mood, just pick
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ScreenThinking({ onLog, status, mood, watchedCount, mode }) {
   const [phase, setPhase] = useState(0);
   const lines = useMemo(() => {
@@ -1039,11 +1235,13 @@ function ScreenReveal({ nav, pick }) {
 
           <div className="reveal-scroll__copy ink-bloom delay-3">
             <div className="eyebrow shu">
-              {pick.verdict === "yes"
-                ? `・ yes — ${pick.queried_title}`
-                : pick.verdict === "no"
-                  ? `・ not ${pick.queried_title} — this instead`
-                  : "・ for you, tonight"}
+              {pick.mode === "choose"
+                ? `・ over ${pick.chooseAgainst?.join(", ") || "the rest"}`
+                : pick.verdict === "yes"
+                  ? `・ yes — ${pick.queried_title}`
+                  : pick.verdict === "no"
+                    ? `・ not ${pick.queried_title} — this instead`
+                    : "・ for you, tonight"}
             </div>
             <h1
               className="serif-display reveal-scroll__title"
@@ -1277,6 +1475,14 @@ function ScreenHistory({ nav, history }) {
                       {entry.verdict === "yes" ? "asked · confirmed" : "asked · redirected"}
                     </div>
                   )}
+                  {entry.mode === "choose" && (
+                    <div
+                      className="meta"
+                      style={{ marginTop: 10, fontSize: 9.5, letterSpacing: "0.16em", color: "var(--bone-4)" }}
+                    >
+                      chose · from a shortlist
+                    </div>
+                  )}
                 </div>
 
                 <div>
@@ -1457,6 +1663,67 @@ async function askForAllowedRecommendation({
 
   console.warn("[En debug] falling back to deterministic ranking", lastValidationError);
   return deterministicRecommendation(candidateList);
+}
+
+async function askForAllowedChoice({ queriedTitles, mood, tasteProfile, recentPatterns, feedbackHistory }) {
+  let lastValidationError = "";
+
+  for (let attempt = 1; attempt <= MAX_RECOMMENDATION_ATTEMPTS; attempt += 1) {
+    try {
+      const choice = await askEnChoose({
+        queriedTitles,
+        mood,
+        tasteProfile,
+        recentPatterns,
+        feedbackHistory
+      });
+      const validation = validateChoice(choice, queriedTitles);
+      console.log("[En debug] returned choice validation", { attempt, choice, validation });
+
+      if (validation.ok) {
+        return choice;
+      }
+
+      lastValidationError = validation.error;
+    } catch (error) {
+      lastValidationError = error.message;
+      console.warn("[En debug] choose attempt failed", { attempt, error });
+    }
+  }
+
+  console.warn("[En debug] falling back to first named title", lastValidationError);
+  const fallbackTitle = queriedTitles[0];
+  const catalogMatch = matchCatalogAnime(fallbackTitle, fallbackTitle);
+  return {
+    title: catalogMatch?.title || fallbackTitle,
+    title_jp: catalogMatch?.title_jp || fallbackTitle,
+    year: catalogMatch?.year || new Date().getFullYear(),
+    episodes: catalogMatch?.episodes || 12,
+    genre: catalogMatch?.genre || "",
+    reason: "En couldn't settle this cleanly. Going with the first one you named.",
+    log_line: "Ties go to whoever spoke first."
+  };
+}
+
+function validateChoice(choice, queriedTitles) {
+  const required = ["title", "title_jp", "year", "episodes", "genre", "reason", "log_line"];
+  const missing = required.find((key) => choice?.[key] === undefined || choice?.[key] === null || choice?.[key] === "");
+  if (missing) {
+    return { ok: false, error: `missing ${missing}` };
+  }
+
+  const matched = titleMatchesAnyQueried(choice.title, queriedTitles) || titleMatchesAnyQueried(choice.title_jp, queriedTitles);
+  if (!matched) {
+    return { ok: false, error: "chosen title was not one of the queried titles" };
+  }
+
+  return { ok: true };
+}
+
+function matchCatalogAnime(title, titleJp) {
+  return ANIME_CATALOG.find(
+    (anime) => titleMatchesAnime(title, anime) || titleMatchesAnime(titleJp, anime)
+  );
 }
 
 async function askForAllowedVerdict({
