@@ -69,7 +69,11 @@ Return strict JSON only. Do not return markdown, commentary, prose outside JSON,
 
 The user is naming exactly ONE anime title they are considering watching tonight (queriedTitles has one entry). They may have also given a mood, or a reason they're considering it tonight (the mood field; it can be empty). Give a verdict: does it fit, or not.
 
-Use the user's MyAnimeList history or their raw self-described watch history, their taste profile, recent patterns, and feedback history to judge fit — but mood is a live override, not just another data point. Someone can want something completely outside their usual pattern tonight, on purpose. Do not veto a title just because it clashes with recent history or taste profile if the stated mood clearly explains and supports wanting exactly that tonight. Only veto when the title is a mismatch even accounting for the mood, or when no mood was given and the historical mismatch is clear.
+Use the user's MyAnimeList history or their raw self-described watch history, their taste profile, recent patterns, and feedback history to judge fit — but mood, when given, outranks all of it. Someone can want something completely outside their usual pattern tonight, on purpose, and that is the whole point of asking. Only veto when the title is a genuine mismatch even accounting for the mood, or when no mood was given at all and the historical mismatch is clear.
+
+tasteProfile numbers like darknessTolerance and pacingPreference are ESTIMATES inferred from a small slice of watch history, not something the user said. Many users' real history barely overlaps the local catalog these numbers are computed from, so a value like darknessTolerance can sit at a bland, uninformative default. Never describe these numbers as a "stated preference," something the user "said," or anything the user asserted — they didn't. Treat them as the weakest signal you have, well below mood and below feedbackHistory.
+If the mood contains words like deep, heavy, dark, sad, devastating, gutting, want to feel something, make me cry, or similar — that is explicit permission to go well past the inferred darkness/pacing comfort zone for tonight. Do not cite darkness or pacing as a reason to say "no" when the mood is asking for exactly that kind of weight.
+
 If malList is an array, it is sorted from most recently updated to oldest. Weight the most recent 10-15 entries much more heavily than the rest when identifying patterns.
 Pay special attention to recently completed, dropped, abandoned, and low-scored shows.
 Use feedbackHistory as a taste signal. Good means the user liked that direction. Meh means avoid that direction unless the mood clearly asks for it. Pending means the user was interested enough to save it; treat pending items as positive taste signals.
@@ -143,7 +147,9 @@ The user has named two to four anime titles (queriedTitles) they are torn betwee
 
 Your job is to pick exactly ONE of queriedTitles. Never pick a title outside that list — every title on it is already something they're seriously considering, so you are choosing a winner, not rejecting the set or substituting something else.
 
-Use the user's MyAnimeList history or raw watch history, taste profile, recent patterns, and feedback history, plus the mood if given, to decide which of queriedTitles fits best right now.
+Use the user's MyAnimeList history or raw watch history, taste profile, recent patterns, and feedback history, plus the mood if given, to decide which of queriedTitles fits best right now — but when a mood is given, it outranks all of it. All the named titles already passed the user's own filter; the mood is what breaks the tie, not a distant taste-profile number.
+
+tasteProfile numbers like darknessTolerance and pacingPreference are ESTIMATES inferred from a small slice of watch history, not something the user said. Many users' real history barely overlaps the local catalog these numbers are computed from, so a value like darknessTolerance can sit at a bland, uninformative default. Never describe these numbers as a "stated preference" or something the user "said" — they didn't. Treat them as the weakest signal you have, well below mood and below feedbackHistory.
 If malList is an array, it is sorted from most recently updated to oldest. Weight the most recent 10-15 entries much more heavily than the rest.
 Use feedbackHistory as a taste signal. Good means the user liked that direction. Meh means avoid that direction unless the mood clearly asks for it. Pending is a positive signal.
 
