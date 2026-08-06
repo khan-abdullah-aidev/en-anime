@@ -33,6 +33,7 @@ import {
   summarizeRecentPatterns
 } from "./tasteProfile.js";
 import { normalizeTitleForCompare, titleMatchesAnime } from "./titleUtils.js";
+import { resolveAnimeOnAniList } from "./anilist.js";
 
 const VIEW = {
   LANDING: "landing",
@@ -277,15 +278,16 @@ export default function App() {
         feedbackHistory: feedbackSignals
       });
 
-      const catalogMatch = matchCatalogAnime(choice.title, choice.title_jp);
-      const enrichedChoice = catalogMatch
+      const resolvedMeta = await resolveAnimeMetadata(choice.title, choice.title_jp);
+      const enrichedChoice = resolvedMeta
         ? {
             ...choice,
-            title: catalogMatch.title,
-            title_jp: catalogMatch.title_jp || catalogMatch.title,
-            year: catalogMatch.year,
-            episodes: catalogMatch.episodes,
-            genre: catalogMatch.genre
+            title: resolvedMeta.title,
+            title_jp: resolvedMeta.title_jp || resolvedMeta.title,
+            year: resolvedMeta.year ?? choice.year,
+            episodes: resolvedMeta.episodes ?? choice.episodes,
+            genre: resolvedMeta.genre || choice.genre,
+            image_url: resolvedMeta.image_url || choice.image_url || ""
           }
         : choice;
 
@@ -386,12 +388,26 @@ export default function App() {
         candidateList,
         memory: recommendationMemory
       });
+
+      const resolvedMeta = await resolveAnimeMetadata(verdict.title, verdict.title_jp);
+      const enrichedVerdict = resolvedMeta
+        ? {
+            ...verdict,
+            title: resolvedMeta.title,
+            title_jp: resolvedMeta.title_jp || resolvedMeta.title,
+            year: resolvedMeta.year ?? verdict.year,
+            episodes: resolvedMeta.episodes ?? verdict.episodes,
+            genre: resolvedMeta.genre || verdict.genre,
+            image_url: resolvedMeta.image_url || verdict.image_url || ""
+          }
+        : verdict;
+
       const imageUrl = await fetchAnimeImage(
-        verdict.title,
+        enrichedVerdict.title,
         mode === "manual" ? "" : tokens.access_token,
-        [verdict.title_jp]
+        [enrichedVerdict.title_jp]
       );
-      const recommendationWithImage = { ...verdict, image_url: imageUrl || verdict.image_url || "" };
+      const recommendationWithImage = { ...enrichedVerdict, image_url: imageUrl || enrichedVerdict.image_url || "" };
       recordRecommendedAnime(recommendationWithImage, "recommended");
 
       const entry = {
@@ -1702,13 +1718,13 @@ async function askForAllowedChoice({ queriedTitles, mood, tasteProfile, recentPa
 
   console.warn("[En debug] falling back to first named title", lastValidationError);
   const fallbackTitle = queriedTitles[0];
-  const catalogMatch = matchCatalogAnime(fallbackTitle, fallbackTitle);
+  const resolvedMeta = await resolveAnimeMetadata(fallbackTitle, fallbackTitle);
   return {
-    title: catalogMatch?.title || fallbackTitle,
-    title_jp: catalogMatch?.title_jp || fallbackTitle,
-    year: catalogMatch?.year || new Date().getFullYear(),
-    episodes: catalogMatch?.episodes || 12,
-    genre: catalogMatch?.genre || "",
+    title: resolvedMeta?.title || fallbackTitle,
+    title_jp: resolvedMeta?.title_jp || fallbackTitle,
+    year: resolvedMeta?.year || new Date().getFullYear(),
+    episodes: resolvedMeta?.episodes || 12,
+    genre: resolvedMeta?.genre || "",
     reason: "En couldn't settle this cleanly. Going with the first one you named.",
     log_line: "Ties go to whoever spoke first."
   };
@@ -1733,6 +1749,34 @@ function matchCatalogAnime(title, titleJp) {
   return ANIME_CATALOG.find(
     (anime) => titleMatchesAnime(title, anime) || titleMatchesAnime(titleJp, anime)
   );
+}
+
+// Local catalog is checked first (free, instant, hand-verified metadata) and
+// treated as the trusted authority when a title happens to be one of the 90
+// curated entries. AniList is the fallback for everything else - it's what
+// makes existence-validation and metadata work across a user's full history
+// instead of only the tiny local pool. AniList failures (offline, rate
+// limited, timed out) resolve to null here rather than throwing, so callers
+// always have a well-defined "couldn't confirm it" path to fall back to.
+async function resolveAnimeMetadata(title, titleJp) {
+  const localMatch = matchCatalogAnime(title, titleJp);
+  if (localMatch) {
+    return {
+      source: "catalog",
+      title: localMatch.title,
+      title_jp: localMatch.title_jp || localMatch.title,
+      year: localMatch.year,
+      episodes: localMatch.episodes,
+      genre: localMatch.genre,
+      image_url: ""
+    };
+  }
+
+  const aniListMatch =
+    (await resolveAnimeOnAniList(title)) ||
+    (titleJp && titleJp !== title ? await resolveAnimeOnAniList(titleJp) : null);
+
+  return aniListMatch ? { source: "anilist", ...aniListMatch } : null;
 }
 
 async function askForAllowedVerdict({
