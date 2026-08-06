@@ -226,15 +226,20 @@ export default function App() {
     if (!text) return;
 
     const titles = splitShortlist(text);
-    if (titles.length <= 1) {
-      handleVerdict(text);
-      return;
-    }
+    if (!titles.length) return;
 
     setError("");
     setShortlistTitles(titles);
     setChooseMood("");
     setView(VIEW.SHORTLIST_MOOD);
+  }
+
+  function handleShortlistDecide(titles, moodText) {
+    if (titles.length <= 1) {
+      handleVerdict(titles[0] || "", moodText);
+    } else {
+      handleChoose(titles, moodText);
+    }
   }
 
   async function handleChoose(titles, moodText) {
@@ -330,7 +335,7 @@ export default function App() {
     }
   }
 
-  async function handleVerdict(rawText) {
+  async function handleVerdict(rawText, moodText = "") {
     const text = rawText.trim();
     if (!text || !hasRecommendationInput() || (mode !== "manual" && !tokens?.access_token)) {
       setView(VIEW.LANDING);
@@ -366,7 +371,7 @@ export default function App() {
       const feedbackSignals = compactFeedbackHistory(history);
       const queriedTitles = splitShortlist(text);
       const candidateList = buildCandidatePool({
-        mood: "",
+        mood: moodText,
         tasteProfile,
         recentPatterns,
         memory: recommendationMemory
@@ -374,6 +379,7 @@ export default function App() {
 
       const verdict = await askForAllowedVerdict({
         queriedTitles,
+        mood: moodText,
         tasteProfile,
         recentPatterns,
         feedbackHistory: feedbackSignals,
@@ -391,7 +397,7 @@ export default function App() {
       const entry = {
         id: crypto.randomUUID(),
         date: new Date().toISOString(),
-        mood: `asked about ${verdict.queried_title}`,
+        mood: moodText || `asked about ${verdict.queried_title}`,
         recommendation: recommendationWithImage,
         note: "",
         feedback: "",
@@ -413,7 +419,7 @@ export default function App() {
         setError(verdictError.message);
       }
       setStatus("");
-      setView(isMalAuthError(verdictError) ? VIEW.LANDING : VIEW.SHORTLIST);
+      setView(isMalAuthError(verdictError) ? VIEW.LANDING : VIEW.SHORTLIST_MOOD);
     }
   }
 
@@ -549,7 +555,7 @@ export default function App() {
     consider: handleConsider,
     shortlistStart: handleShortlistStart,
     shortlistSubmit: handleShortlistSubmit,
-    choose: handleChoose,
+    shortlistDecide: handleShortlistDecide,
     feedback: handleFeedback,
     pendingAnswer: handlePendingAnswer,
     deleteHistoryEntry: handleDeleteHistoryEntry,
@@ -596,8 +602,8 @@ export default function App() {
           titles={shortlistTitles}
           mood={chooseMood}
           setMood={setChooseMood}
-          onSubmit={() => nav.choose(shortlistTitles, chooseMood)}
-          onSkip={() => nav.choose(shortlistTitles, "")}
+          onSubmit={() => nav.shortlistDecide(shortlistTitles, chooseMood)}
+          onSkip={() => nav.shortlistDecide(shortlistTitles, "")}
         />
       )}
       {view === VIEW.THINKING && (
@@ -1074,6 +1080,7 @@ function ScreenShortlist({ onLog, onSubmit, shortlist, setShortlist }) {
 
 function ScreenShortlistMood({ onLog, titles, mood, setMood, onSubmit, onSkip }) {
   const ref = useRef(null);
+  const isSingle = titles.length <= 1;
 
   useEffect(() => {
     const t = setTimeout(() => ref.current?.focus(), 600);
@@ -1085,7 +1092,7 @@ function ScreenShortlistMood({ onLog, titles, mood, setMood, onSubmit, onSkip })
       <Chrome step={2} total={3} onLog={onLog} />
       <div className="app-stage">
         <div className="column" style={{ textAlign: "center" }}>
-          <div className="eyebrow fade-up">Choosing between</div>
+          <div className="eyebrow fade-up">{isSingle ? "Considering" : "Choosing between"}</div>
           <h2
             className="serif-display fade-up delay-1"
             style={{ fontSize: 32, margin: "24px 0 14px", fontWeight: 300, fontStyle: "italic" }}
@@ -1101,7 +1108,9 @@ function ScreenShortlistMood({ onLog, titles, mood, setMood, onSubmit, onSkip })
               fontStyle: "italic"
             }}
           >
-            What are you in the mood for tonight? Or — why these, tonight?
+            {isSingle
+              ? "What are you in the mood for tonight? Or — why this one, tonight?"
+              : "What are you in the mood for tonight? Or — why these, tonight?"}
           </p>
 
           <div
@@ -1728,6 +1737,7 @@ function matchCatalogAnime(title, titleJp) {
 
 async function askForAllowedVerdict({
   queriedTitles,
+  mood,
   tasteProfile,
   recentPatterns,
   feedbackHistory,
@@ -1740,6 +1750,7 @@ async function askForAllowedVerdict({
     try {
       const verdict = await askEnVerdict({
         queriedTitles,
+        mood,
         tasteProfile,
         recentPatterns,
         feedbackHistory,

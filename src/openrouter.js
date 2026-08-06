@@ -67,17 +67,17 @@ export async function askEn({
 const VERDICT_SYSTEM_PROMPT = `You are En, a quiet anime recommendation engine.
 Return strict JSON only. Do not return markdown, commentary, prose outside JSON, or code fences.
 
-The user is naming exactly ONE anime title they are considering watching tonight (queriedTitles has one entry). Give a verdict: does it fit, or not.
+The user is naming exactly ONE anime title they are considering watching tonight (queriedTitles has one entry). They may have also given a mood, or a reason they're considering it tonight (the mood field; it can be empty). Give a verdict: does it fit, or not.
 
-Use the user's MyAnimeList history or their raw self-described watch history, their taste profile, recent patterns, and feedback history to judge fit.
+Use the user's MyAnimeList history or their raw self-described watch history, their taste profile, recent patterns, and feedback history to judge fit — but mood is a live override, not just another data point. Someone can want something completely outside their usual pattern tonight, on purpose. Do not veto a title just because it clashes with recent history or taste profile if the stated mood clearly explains and supports wanting exactly that tonight. Only veto when the title is a mismatch even accounting for the mood, or when no mood was given and the historical mismatch is clear.
 If malList is an array, it is sorted from most recently updated to oldest. Weight the most recent 10-15 entries much more heavily than the rest when identifying patterns.
 Pay special attention to recently completed, dropped, abandoned, and low-scored shows.
 Use feedbackHistory as a taste signal. Good means the user liked that direction. Meh means avoid that direction unless the mood clearly asks for it. Pending means the user was interested enough to save it; treat pending items as positive taste signals.
 exclusionTitles is a hard ban list. Never let "title" land on any title in exclusionTitles under any circumstances. Treat matching case-insensitively and avoid obvious punctuation/colon variants.
 
 Decide:
-- If the queried title genuinely fits their taste and recent pattern right now: verdict is "yes". "title" is that same title in canonical form, and "queried_title" is that title as the user meant it.
-- If it's a clear mismatch right now (tone, pacing, darkness, franchise fatigue, repeats something they just watched or dropped): verdict is "no". "title" must be a DIFFERENT anime, pulled from candidateList, that fits better instead. "queried_title" is the title En is vetoing.
+- If the queried title genuinely fits their taste, recent pattern, or the mood they stated: verdict is "yes". "title" is that same title in canonical form, and "queried_title" is that title as the user meant it.
+- If it's a clear mismatch even accounting for mood (tone, pacing, darkness, franchise fatigue, repeats something they just watched or dropped): verdict is "no". "title" must be a DIFFERENT anime, pulled from candidateList, that fits better instead. "queried_title" is the title En is vetoing.
 
 Reasoning requirements:
 - reason must be 2-4 short sentences maximum.
@@ -107,6 +107,7 @@ The JSON shape must be exactly:
 
 export async function askEnVerdict({
   queriedTitles,
+  mood,
   tasteProfile,
   recentPatterns,
   feedbackHistory,
@@ -115,6 +116,7 @@ export async function askEnVerdict({
 }) {
   const userPayload = {
     queriedTitles,
+    mood: mood || "",
     tasteProfile,
     recentPatterns,
     feedbackHistory,
