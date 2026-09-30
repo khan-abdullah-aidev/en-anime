@@ -125,7 +125,8 @@ textarea::placeholder { color: var(--bone-4); font-style: italic; opacity: 1; }
   display: inline-block;
   transition: opacity 0.3s ease, letter-spacing 0.3s ease;
 }
-.btn-link:hover { opacity: 0.7; letter-spacing: 0.26em; }
+.btn-link:not(:disabled):hover { opacity: 0.7; letter-spacing: 0.26em; }
+.btn-link:disabled { opacity: 0.4; cursor: default; }
 
 .btn-quiet {
   font-family: var(--sans);
@@ -136,7 +137,14 @@ textarea::placeholder { color: var(--bone-4); font-style: italic; opacity: 1; }
   padding: 10px 0;
   transition: color 0.3s ease;
 }
-.btn-quiet:hover { color: var(--bone); }
+.btn-quiet:not(:disabled):hover { color: var(--bone); }
+.btn-quiet:disabled { opacity: 0.5; cursor: default; }
+
+/* Keyboard focus. The inputs rely on their hairline + caret instead. */
+button:focus-visible {
+  outline: 1px solid var(--shu);
+  outline-offset: 6px;
+}
 
 .choice-links {
   align-items: center;
@@ -163,6 +171,25 @@ textarea::placeholder { color: var(--bone-4); font-style: italic; opacity: 1; }
   text-align: center;
   width: 100%;
 }
+
+/* ——— Landing ——— */
+.landing-title {
+  font-size: 76px;
+  font-weight: 300;
+  line-height: 1.02;
+  margin: 36px 0 28px;
+}
+
+.landing-lede {
+  color: var(--bone-2);
+  font-size: 18px;
+  font-weight: 300;
+  line-height: 1.6;
+  margin: 0 auto 64px;
+  max-width: 440px;
+}
+
+.landing-footnote { margin-top: 80px; }
 
 /* ——— Layout ——— */
 .app-frame {
@@ -379,4 +406,24 @@ textarea::placeholder { color: var(--bone-4); font-style: italic; opacity: 1; }
   .reveal-scroll__title {
     font-size: 44px;
   }
+}
+
+/* Phones: keep both ways in above the fold on the landing screen. */
+@media (max-width: 520px) {
+  .app-stage {
+    padding-top: 44px;
+    padding-bottom: 44px;
+  }
+
+  .landing-title {
+    font-size: 54px;
+    margin: 24px 0 20px;
+  }
+
+  .landing-lede {
+    font-size: 16px;
+    margin-bottom: 40px;
+  }
+
+  .landing-footnote { margin-top: 48px; }
 }

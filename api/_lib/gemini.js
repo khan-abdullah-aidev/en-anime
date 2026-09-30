@@ -9,7 +9,7 @@ export class GeminiConfigError extends Error {
   }
 }
 
-export async function generateJson({ systemPrompt, userPayloadText }) {
+export async function generateJson({ systemPrompt, userPayloadText, responseSchema = null }) {
   // VITE_* names are still read so an existing deployment keeps working until
   // the key is renamed; nothing on the client references them any more.
   const apiKey =
@@ -23,16 +23,26 @@ export async function generateJson({ systemPrompt, userPayloadText }) {
   let lastError;
   for (const model of MODELS) {
     try {
-      return await callGemini({ apiKey, model, systemPrompt, userPayloadText });
+      return await callGemini({ apiKey, model, systemPrompt, userPayloadText, responseSchema });
     } catch (error) {
       lastError = error;
       console.warn(`[En] Gemini ${model} failed`, error.message);
+      // The schema only saves retries; if Gemini ever rejects it, answer
+      // without it rather than failing the request (the client validates).
+      if (responseSchema && error.status === 400) {
+        try {
+          return await callGemini({ apiKey, model, systemPrompt, userPayloadText, responseSchema: null });
+        } catch (retryError) {
+          lastError = retryError;
+          console.warn(`[En] Gemini ${model} failed without a schema too`, retryError.message);
+        }
+      }
     }
   }
   throw lastError;
 }
 
-async function callGemini({ apiKey, model, systemPrompt, userPayloadText }) {
+async function callGemini({ apiKey, model, systemPrompt, userPayloadText, responseSchema }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
@@ -55,14 +65,17 @@ async function callGemini({ apiKey, model, systemPrompt, userPayloadText }) {
         ],
         generationConfig: {
           temperature: 0.85,
-          responseMimeType: "application/json"
+          responseMimeType: "application/json",
+          ...(responseSchema ? { responseSchema } : {})
         }
       }),
       signal: controller.signal
     });
 
     if (!response.ok) {
-      throw new Error(formatGeminiError(await response.text()));
+      const error = new Error(formatGeminiError(await response.text()));
+      error.status = response.status;
+      throw error;
     }
 
     const payload = await response.json();

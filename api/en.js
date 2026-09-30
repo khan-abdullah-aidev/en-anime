@@ -1,5 +1,6 @@
 import { PROMPTS } from "./_lib/prompts.js";
 import { GeminiConfigError, generateJson } from "./_lib/gemini.js";
+import { buildResponseSchema } from "./_lib/schemas.js";
 
 // Generous for a digest + 60 candidates (~25 KB), small enough to stop this
 // endpoint being used as a general-purpose Gemini proxy.
@@ -24,7 +25,11 @@ export default async function handler(req, res) {
   }
 
   try {
-    const content = await generateJson({ systemPrompt: PROMPTS[kind], userPayloadText });
+    const content = await generateJson({
+      systemPrompt: PROMPTS[kind],
+      userPayloadText,
+      responseSchema: buildResponseSchema(kind, payload)
+    });
     res.status(200).json({ content });
   } catch (error) {
     if (error instanceof GeminiConfigError) {

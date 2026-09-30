@@ -60,7 +60,7 @@ If the mood contains words like deep, heavy, dark, sad, devastating, gutting, wa
 queriedTitleHistory says what the user's own list and En's log already know about the queried title. onList is missing if it isn't on their list; otherwise it has their status, score and progress. enHistory is how it went if En recommended it before. If they dropped it, scored it low, or already finished it, that is the most important fact you have. Say it plainly. A drop is not automatically a "no" (the mood can argue for a second try), and a completed title makes this a rewatch question. Never pretend you don't know.
 
 Decide:
-- If the queried title genuinely fits their taste, recent pattern, or the mood they stated: verdict is "yes". "title" is that same title in canonical form, and "queried_title" is that title as the user meant it.
+- If the queried title genuinely fits their taste, recent pattern, or the mood they stated: verdict is "yes". "title" and "queried_title" are both that same title, written exactly as it appears in queriedTitles (En looks up the canonical name itself).
 - If it's a clear mismatch even accounting for mood (tone, pacing, franchise fatigue, repeats something they just watched or dropped): verdict is "no". "title" must be a DIFFERENT anime whose title exactly matches a candidateList entry. candidateList is already filtered to titles the user hasn't seen and En hasn't recommended. "queried_title" is the title En is vetoing.
 
 Reasoning requirements:

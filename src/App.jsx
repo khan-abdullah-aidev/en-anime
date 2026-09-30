@@ -51,6 +51,9 @@ const VIEW = {
 };
 
 const MAX_RECOMMENDATION_ATTEMPTS = 3;
+// A big MAL list is several sequential API pages, so reuse it for a while
+// within one visit instead of refetching for every request.
+const MAL_LIST_TTL_MS = 10 * 60 * 1000;
 
 export default function App() {
   const [view, setView] = useState(VIEW.LANDING);
@@ -72,6 +75,9 @@ export default function App() {
   // Picks revealed in this visit. "Did you watch it?" is only asked about
   // picks from earlier visits, never one the user was just handed.
   const sessionEntryIds = useRef(new Set());
+  const malListCache = useRef(null);
+  // The mood behind the current pick, so "I've already seen it" can ask again.
+  const lastMood = useRef("");
 
   useEffect(() => {
     if (window.location.pathname !== "/callback" || handledCallback.current) return;
@@ -144,10 +150,13 @@ export default function App() {
     setView(VIEW.THINKING);
   }
 
-  // Everything En knows about the user, gathered once per request.
+  // Everything En knows about the user, gathered once per request. The log is
+  // read from storage rather than state so an answer saved a moment ago (e.g.
+  // "I've already seen it" right before asking again) is included.
   async function loadEnContext() {
     const list = mode === "manual" ? manualList : await fetchAnimeListWithRefresh();
     setMalList(Array.isArray(list) ? list : []);
+    const history = loadHistory();
 
     const tasteProfile = buildTasteProfile({
       malList: list,
@@ -184,7 +193,7 @@ export default function App() {
   async function describeQueriedTitles(titles, list) {
     const resolved = await Promise.all(titles.map((title) => resolveAnimeOnAniList(title)));
     return titles.map((asked, index) =>
-      describeQueriedTitle({ asked, resolved: resolved[index], list, history })
+      describeQueriedTitle({ asked, resolved: resolved[index], list, history: loadHistory() })
     );
   }
 
@@ -227,6 +236,7 @@ export default function App() {
       return;
     }
 
+    lastMood.current = nextMood;
     beginThinking();
     try {
       const { signals, memory } = await loadEnContext();
@@ -364,8 +374,18 @@ export default function App() {
   }
 
   async function fetchAnimeListWithRefresh() {
+    const cached = malListCache.current;
+    if (cached && cached.token === tokens.access_token && Date.now() - cached.fetchedAt < MAL_LIST_TTL_MS) {
+      return cached.list;
+    }
+
+    const remember = (token, list) => {
+      malListCache.current = { token, list, fetchedAt: Date.now() };
+      return list;
+    };
+
     try {
-      return await fetchAnimeList(tokens.access_token);
+      return remember(tokens.access_token, await fetchAnimeList(tokens.access_token));
     } catch (listError) {
       if (!isMalAuthError(listError)) {
         throw listError;
@@ -375,7 +395,7 @@ export default function App() {
         setStatus("Refreshing MyAnimeList connection");
         const nextTokens = await refreshMalOauth(tokens);
         setTokens(nextTokens);
-        return await fetchAnimeList(nextTokens.access_token);
+        return remember(nextTokens.access_token, await fetchAnimeList(nextTokens.access_token));
       } catch (refreshError) {
         throw isMalAuthError(refreshError)
           ? refreshError
@@ -389,37 +409,58 @@ export default function App() {
     setTokens(null);
     setMode(manualList.trim() ? "manual" : "mal");
     setMalList([]);
+    malListCache.current = null;
     setRecommendation(null);
     setCurrentDraftEntry(null);
   }
 
-  function handleFeedback(feedback, feedbackNote = "") {
-    if (!currentDraftEntry) return;
+  // Applies a "how was it?" answer to a logged pick, from the return-visit
+  // question or straight from the log.
+  function answerEntry(entry, answer, { note = "", seenBefore = false } = {}) {
+    let patch;
+    if (answer === "later") {
+      patch = { feedback: "", feedback_note: "", state: "pending", note: "waiting in the watchlist" };
+    } else if (answer === "pass") {
+      patch = { feedback: "", feedback_note: "", state: "skipped", note: "passed on it." };
+    } else {
+      patch = {
+        feedback: answer,
+        state: "rated",
+        feedback_note: note.trim(),
+        note: makeUserReflection(answer, note),
+        ...(seenBefore ? { seen_before: true } : {})
+      };
+    }
 
-    const patch =
-      feedback === "pending"
-        ? { feedback: "", feedback_note: "", state: "pending", note: "waiting in the watchlist" }
-        : {
-            feedback,
-            state: "rated",
-            feedback_note: feedbackNote.trim(),
-            note: makeUserReflection(feedback, feedbackNote)
-          };
-    const alreadySaved = loadHistory().some((entry) => entry.id === currentDraftEntry.id);
-    const nextHistory = alreadySaved
-      ? updateHistoryEntry(currentDraftEntry.id, patch)
-      : appendHistory({ ...currentDraftEntry, ...patch });
-    if (feedback === "pending") {
-      recordRecommendedAnime(currentDraftEntry.recommendation, "pending");
-      recordRecommendedAnime(currentDraftEntry.recommendation, "watchlisted");
-    } else if (feedback === "good") {
-      recordRecommendedAnime(currentDraftEntry.recommendation, "completed");
-    } else if (feedback === "meh") {
-      recordRecommendedAnime(currentDraftEntry.recommendation, "rejected");
+    const nextHistory = updateHistoryEntry(entry.id, patch);
+    if (answer === "later") {
+      recordRecommendedAnime(entry.recommendation, "pending");
+      recordRecommendedAnime(entry.recommendation, "watchlisted");
+    } else if (answer === "good") {
+      recordRecommendedAnime(entry.recommendation, "completed");
+    } else if (answer === "meh") {
+      recordRecommendedAnime(entry.recommendation, "rejected");
     }
     setHistory(nextHistory);
+    return nextHistory;
+  }
+
+  function handleSaveForLater() {
+    if (currentDraftEntry) answerEntry(currentDraftEntry, "later");
+  }
+
+  // "I've already seen it": keep how it landed as a taste signal, then ask
+  // again with the same mood (the title is already banned from the pool).
+  function handleSeenFeedback(feedback, feedbackNote = "") {
+    if (!currentDraftEntry) return;
+    answerEntry(currentDraftEntry, feedback, { note: feedbackNote, seenBefore: true });
     setCurrentDraftEntry(null);
-    setView(VIEW.HISTORY);
+    handleConsider(lastMood.current);
+  }
+
+  function handleAnswerFromLog(id, answer) {
+    const entry = history.find((item) => item.id === id);
+    if (entry) answerEntry(entry, answer);
   }
 
   function handlePendingAnswer(answer) {
@@ -438,31 +479,14 @@ export default function App() {
     if (answer === "not-yet") {
       // An unanswered pick they still mean to watch becomes a saved one.
       if (pending.state === "unrated") {
-        setHistory(updateHistoryEntry(pending.id, { state: "pending", note: "waiting in the watchlist" }));
-        recordRecommendedAnime(pending.recommendation, "pending");
-        recordRecommendedAnime(pending.recommendation, "watchlisted");
+        answerEntry(pending, "later");
       }
       setPendingReviewIds(remainingPendingIds);
       setView(remainingPendingIds.length ? VIEW.PENDING : VIEW.MOOD);
       return;
     }
 
-    const patch =
-      answer === "pass"
-        ? { feedback: "", state: "skipped", feedback_note: "", note: "passed on it." }
-        : {
-            feedback: answer,
-            state: "rated",
-            feedback_note: "",
-            note: makeUserReflection(answer, "")
-          };
-    const nextHistory = updateHistoryEntry(pending.id, patch);
-    if (answer === "good") {
-      recordRecommendedAnime(pending.recommendation, "completed");
-    } else if (answer === "meh") {
-      recordRecommendedAnime(pending.recommendation, "rejected");
-    }
-    setHistory(nextHistory);
+    const nextHistory = answerEntry(pending, answer);
     const nextPendingIds = remainingPendingIds.filter((id) =>
       nextHistory.some((entry) => entry.id === id && isAwaitingAnswer(entry))
     );
@@ -477,7 +501,7 @@ export default function App() {
   }
 
   function handleClearHistory() {
-    if (history.length && !window.confirm("Clear En's recommendation log and local recommendation memory?")) {
+    if (history.length && !window.confirm("Clear the log? En will also forget what it has recommended, so those titles can come up again.")) {
       return;
     }
 
@@ -489,35 +513,58 @@ export default function App() {
   }
 
   function handleDisconnect() {
+    if (!window.confirm("Disconnect MyAnimeList? Your log stays on this device.")) {
+      return;
+    }
+
     clearTokens();
     setTokens(null);
     setMalList([]);
+    malListCache.current = null;
     setRecommendation(null);
     setCurrentDraftEntry(null);
+    setError("");
     setView(VIEW.LANDING);
   }
 
+  // Leaving a screen dismisses whatever error it raised.
+  function navigateTo(nextView) {
+    setError("");
+    setView(nextView);
+  }
+
   const nav = {
-    goto: setView,
-    log: () => setView(VIEW.HISTORY),
-    newRecommendation: () => goToMoodOrPending(history),
+    goto: navigateTo,
+    log: () => navigateTo(VIEW.HISTORY),
+    newRecommendation: () => {
+      setError("");
+      goToMoodOrPending(history);
+    },
     connect: handleConnect,
     manualStart: handleManualStart,
+    editManualList: () => navigateTo(VIEW.MANUAL),
     manualSubmit: handleManualSubmit,
     consider: handleConsider,
     shortlistStart: handleShortlistStart,
     shortlistSubmit: handleShortlistSubmit,
     shortlistDecide: handleShortlistDecide,
-    feedback: handleFeedback,
+    saveForLater: handleSaveForLater,
+    seenIt: () => navigateTo(VIEW.FEEDBACK),
+    seenFeedback: handleSeenFeedback,
     pendingAnswer: handlePendingAnswer,
+    answerFromLog: handleAnswerFromLog,
     deleteHistoryEntry: handleDeleteHistoryEntry,
     clearHistory: handleClearHistory,
     disconnect: handleDisconnect
   };
 
+  // "I've already seen it" only makes sense when En chose the title; in
+  // verdict/choose mode the user named it themselves.
+  const canMarkSeen = Boolean(currentDraftEntry) && !currentDraftEntry.mode;
+
   return (
     <div style={{ minHeight: "100vh", position: "relative" }}>
-      {error ? <ErrorRibbon message={error} /> : null}
+      {error ? <ErrorRibbon message={error} onDismiss={() => setError("")} /> : null}
       {view === VIEW.LANDING && <ScreenLanding nav={nav} status={status} />}
       {view === VIEW.MANUAL && (
         <ScreenManual
@@ -571,20 +618,32 @@ export default function App() {
         />
       )}
       {view === VIEW.REVEAL && recommendation && (
-        <ScreenReveal nav={nav} pick={recommendation} />
+        <ScreenReveal
+          key={currentDraftEntry?.id}
+          nav={nav}
+          pick={recommendation}
+          canMarkSeen={canMarkSeen}
+        />
       )}
       {view === VIEW.FEEDBACK && recommendation && (
         <ScreenFeedback nav={nav} pick={recommendation} />
       )}
-      {view === VIEW.HISTORY && <ScreenHistory nav={nav} history={history} />}
+      {view === VIEW.HISTORY && (
+        <ScreenHistory
+          nav={nav}
+          history={history}
+          source={mode === "manual" || !tokens?.access_token ? "manual" : "mal"}
+        />
+      )}
     </div>
   );
 }
 
-function ErrorRibbon({ message }) {
+function ErrorRibbon({ message, onDismiss }) {
   return (
     <div
       className="meta"
+      role="alert"
       style={{
         position: "fixed",
         top: 72,
@@ -601,6 +660,11 @@ function ErrorRibbon({ message }) {
       }}
     >
       {message}
+      <div>
+        <button className="btn-quiet" onClick={onDismiss} style={{ marginTop: 6, paddingBottom: 0 }}>
+          dismiss
+        </button>
+      </div>
     </div>
   );
 }
@@ -654,15 +718,7 @@ function ScreenLanding({ nav, status }) {
         <div className="column column-narrow" style={{ textAlign: "center" }}>
           <div className="eyebrow fade-up">An anime sommelier</div>
 
-          <h1
-            className="serif-display fade-up delay-1"
-            style={{
-              fontSize: 76,
-              margin: "36px 0 28px",
-              lineHeight: 1.02,
-              fontWeight: 300
-            }}
-          >
+          <h1 className="serif-display landing-title fade-up delay-1">
             One anime.
             <br />
             <span style={{ fontStyle: "italic", color: "var(--bone-2)" }}>
@@ -670,17 +726,7 @@ function ScreenLanding({ nav, status }) {
             </span>
           </h1>
 
-          <p
-            className="fade-up delay-2"
-            style={{
-              fontSize: 18,
-              lineHeight: 1.6,
-              color: "var(--bone-2)",
-              maxWidth: 440,
-              margin: "0 auto 64px",
-              fontWeight: 300
-            }}
-          >
+          <p className="landing-lede fade-up delay-2">
             En reads your watch history, listens to your mood, and gives you a
             single recommendation.
             <br />
@@ -705,7 +751,7 @@ function ScreenLanding({ nav, status }) {
             </p>
           ) : null}
 
-          <div className="fade-up delay-4" style={{ marginTop: 80 }}>
+          <div className="landing-footnote fade-up delay-4">
             <hr className="hairline-soft" style={{ width: 60, margin: "0 auto 18px" }} />
             <p className="meta" style={{ fontSize: 11, letterSpacing: "0.18em" }}>
               縁 · the thread of fate that connects two people
@@ -757,6 +803,8 @@ function ScreenManual({ onLog, onSubmit, manualList, setManualList }) {
               ref={ref}
               value={manualList}
               onChange={(e) => setManualList(e.target.value)}
+              onKeyDown={submitOnEnter(() => manualList.trim() && onSubmit(manualList), { requireModifier: true })}
+              aria-label="Anime you've watched and loved, separated by commas or new lines"
               rows={3}
               className="serif-display"
               placeholder="Death Note, Your Name, Vinland Saga..."
@@ -777,11 +825,8 @@ function ScreenManual({ onLog, onSubmit, manualList, setManualList }) {
             <button
               className="btn-link"
               onClick={() => onSubmit(manualList)}
-              style={{
-                opacity: manualList.trim().length ? 1 : 0.4,
-                pointerEvents: manualList.trim().length ? "auto" : "none",
-                transition: "opacity 0.4s ease"
-              }}
+              disabled={!manualList.trim()}
+              style={{ transition: "opacity 0.4s ease" }}
             >
               Continue
             </button>
@@ -894,6 +939,8 @@ function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, mood, setMood 
               ref={ref}
               value={mood}
               onChange={(e) => setMood(e.target.value)}
+              onKeyDown={submitOnEnter(() => mood.trim() && onConsider())}
+              aria-label="How do you feel tonight? A word, a sentence, or nothing at all."
               rows={2}
               className="serif-display"
               style={{
@@ -939,11 +986,8 @@ function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, mood, setMood 
             <button
               className="btn-link"
               onClick={onConsider}
-              style={{
-                opacity: mood.length ? 1 : 0.4,
-                pointerEvents: mood.length ? "auto" : "none",
-                transition: "opacity 0.4s ease"
-              }}
+              disabled={!mood.trim()}
+              style={{ transition: "opacity 0.4s ease" }}
             >
               Let En consider
             </button>
@@ -1004,6 +1048,8 @@ function ScreenShortlist({ onLog, onSubmit, shortlist, setShortlist }) {
               ref={ref}
               value={shortlist}
               onChange={(e) => setShortlist(e.target.value)}
+              onKeyDown={submitOnEnter(() => shortlist.trim() && onSubmit(shortlist), { requireModifier: true })}
+              aria-label="The anime you're considering: one title, or a few separated by vs, or, or new lines"
               rows={2}
               className="serif-display"
               placeholder="Chainsaw Man, or Chainsaw Man vs Frieren..."
@@ -1024,11 +1070,8 @@ function ScreenShortlist({ onLog, onSubmit, shortlist, setShortlist }) {
             <button
               className="btn-link"
               onClick={() => onSubmit(shortlist)}
-              style={{
-                opacity: shortlist.trim().length ? 1 : 0.4,
-                pointerEvents: shortlist.trim().length ? "auto" : "none",
-                transition: "opacity 0.4s ease"
-              }}
+              disabled={!shortlist.trim()}
+              style={{ transition: "opacity 0.4s ease" }}
             >
               Ask En
             </button>
@@ -1082,6 +1125,8 @@ function ScreenShortlistMood({ onLog, titles, mood, setMood, onSubmit, onSkip })
               ref={ref}
               value={mood}
               onChange={(e) => setMood(e.target.value)}
+              onKeyDown={submitOnEnter(onSubmit)}
+              aria-label="Tonight's mood, or why you're considering these. Optional."
               rows={2}
               className="serif-display"
               placeholder="something quiet, or nothing at all"
@@ -1168,7 +1213,9 @@ function ScreenThinking({ onLog, status, mood, watchedCount, mode }) {
   );
 }
 
-function ScreenReveal({ nav, pick }) {
+function ScreenReveal({ nav, pick, canMarkSeen }) {
+  const [settled, setSettled] = useState("");
+
   return (
     <div className="app-frame reveal-a-frame">
       <div className="reveal-a-top">
@@ -1234,12 +1281,43 @@ function ScreenReveal({ nav, pick }) {
               {stripMarkdown(pick.reason)}
             </p>
 
-            <div
-              style={{ marginTop: 36 }}
-            >
-              <button className="btn-link" onClick={() => nav.goto(VIEW.FEEDBACK)}>
-                Begin
-              </button>
+            {/* The pick is already in the log; these only say what happens next. */}
+            <div style={{ marginTop: 36 }}>
+              {settled ? (
+                <p
+                  className="fade-in"
+                  role="status"
+                  style={{ color: "var(--bone-3)", fontStyle: "italic", fontSize: 15, margin: 0 }}
+                >
+                  {settled === "later"
+                    ? "Saved. En will ask about it later."
+                    : "Enjoy it. En will ask how it was next time."}
+                </p>
+              ) : (
+                <>
+                  <button className="btn-link" onClick={() => setSettled("tonight")}>
+                    Watch it tonight
+                  </button>
+                  <div style={{ marginTop: 20 }}>
+                    <button
+                      className="btn-quiet"
+                      onClick={() => {
+                        nav.saveForLater();
+                        setSettled("later");
+                      }}
+                    >
+                      or — save for later
+                    </button>
+                  </div>
+                  {canMarkSeen && (
+                    <div style={{ marginTop: 8 }}>
+                      <button className="btn-quiet" onClick={nav.seenIt}>
+                        or — I've already seen it
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -1249,6 +1327,8 @@ function ScreenReveal({ nav, pick }) {
   );
 }
 
+// Reached from "I've already seen it": how it landed is still a taste
+// signal, and then En picks again.
 function ScreenFeedback({ nav, pick }) {
   const [chosen, setChosen] = useState(null);
   const [mehNote, setMehNote] = useState("");
@@ -1256,7 +1336,7 @@ function ScreenFeedback({ nav, pick }) {
   function choose(value) {
     setChosen(value);
     if (value !== "meh") {
-      setTimeout(() => nav.feedback(value), 650);
+      setTimeout(() => nav.seenFeedback(value), 650);
     }
   }
 
@@ -1265,7 +1345,7 @@ function ScreenFeedback({ nav, pick }) {
       <Chrome onLog={nav.log} />
       <div className="app-stage">
         <div className="column" style={{ textAlign: "center", maxWidth: 560 }}>
-          <div className="eyebrow fade-up">After watching</div>
+          <div className="eyebrow fade-up">Already seen</div>
 
           <h2
             className="serif-display fade-up delay-1"
@@ -1285,8 +1365,7 @@ function ScreenFeedback({ nav, pick }) {
           <div className="choice-links fade-up delay-2">
             {[
               { k: "good", label: "It was good" },
-              { k: "meh", label: "Meh" },
-              { k: "pending", label: "Add to watchlist" }
+              { k: "meh", label: "Meh" }
             ].map((opt) => (
               <button
                 key={opt.k}
@@ -1308,11 +1387,9 @@ function ScreenFeedback({ nav, pick }) {
                 fontSize: 15
               }}
             >
-              {chosen === "pending"
-                ? "Saved. En will ask later."
-                : chosen === "good"
-                  ? "Noted. En will remember."
-                  : "Tell En what missed, or leave it blank."}
+              {chosen === "good"
+                ? "Noted. En will find you another."
+                : "Tell En what missed, or leave it blank."}
             </p>
           )}
 
@@ -1321,14 +1398,16 @@ function ScreenFeedback({ nav, pick }) {
               <input
                 value={mehNote}
                 onChange={(event) => setMehNote(event.target.value)}
+                onKeyDown={submitOnEnter(() => nav.seenFeedback("meh", mehNote))}
+                aria-label="What didn't land? Optional."
                 placeholder="what didn't land?"
                 className="meh-note-input"
               />
               <div className="choice-links" style={{ marginTop: 24, gap: 16 }}>
-                <button className="btn-link" onClick={() => nav.feedback("meh", mehNote)}>
+                <button className="btn-link" onClick={() => nav.seenFeedback("meh", mehNote)}>
                   Save
                 </button>
-                <button className="btn-quiet" onClick={() => nav.feedback("meh", "")}>
+                <button className="btn-quiet" onClick={() => nav.seenFeedback("meh", "")}>
                   skip
                 </button>
               </div>
@@ -1340,7 +1419,7 @@ function ScreenFeedback({ nav, pick }) {
   );
 }
 
-function ScreenHistory({ nav, history }) {
+function ScreenHistory({ nav, history, source }) {
   const [editing, setEditing] = useState(false);
 
   return (
@@ -1375,7 +1454,8 @@ function ScreenHistory({ nav, history }) {
             className="fade-up delay-2"
             style={{
               display: "flex",
-              gap: 22,
+              columnGap: 22,
+              rowGap: 4,
               marginTop: -48,
               marginBottom: 72,
               flexWrap: "wrap"
@@ -1396,8 +1476,22 @@ function ScreenHistory({ nav, history }) {
               }}
               disabled={!history.length}
             >
-              refresh log
+              clear log
             </button>
+            {source === "mal" ? (
+              <button className="btn-quiet" onClick={nav.disconnect}>
+                disconnect MyAnimeList
+              </button>
+            ) : (
+              <>
+                <button className="btn-quiet" onClick={nav.editManualList}>
+                  edit your list
+                </button>
+                <button className="btn-quiet" onClick={nav.connect}>
+                  connect MyAnimeList
+                </button>
+              </>
+            )}
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 56 }}>
@@ -1455,6 +1549,14 @@ function ScreenHistory({ nav, history }) {
                       style={{ marginTop: 10, fontSize: 9.5, letterSpacing: "0.16em", color: "var(--bone-4)" }}
                     >
                       chose · from a shortlist
+                    </div>
+                  )}
+                  {entry.seen_before && (
+                    <div
+                      className="meta"
+                      style={{ marginTop: 10, fontSize: 9.5, letterSpacing: "0.16em", color: "var(--bone-4)" }}
+                    >
+                      already seen
                     </div>
                   )}
                 </div>
@@ -1521,6 +1623,24 @@ function ScreenHistory({ nav, history }) {
                       </span>
                       {entry.note}
                     </p>
+                  )}
+                  {isAwaitingAnswer(entry) && (
+                    <div
+                      style={{ marginTop: 16, display: "flex", gap: 18, alignItems: "baseline", flexWrap: "wrap" }}
+                    >
+                      <span className="meta" style={{ fontStyle: "italic", fontFamily: "var(--serif)", fontSize: 14 }}>
+                        how was it?
+                      </span>
+                      <button className="btn-quiet" onClick={() => nav.answerFromLog(entry.id, "good")}>
+                        good
+                      </button>
+                      <button className="btn-quiet" onClick={() => nav.answerFromLog(entry.id, "meh")}>
+                        meh
+                      </button>
+                      <button className="btn-quiet" onClick={() => nav.answerFromLog(entry.id, "pass")}>
+                        pass
+                      </button>
+                    </div>
                   )}
                   {editing && (
                     <button
@@ -1804,12 +1924,29 @@ function titleMatchesAnyQueried(title, queriedTitles) {
   return Boolean(normalized) && queriedTitles.some((queried) => normalizeTitleForCompare(queried) === normalized);
 }
 
+// Explicit separators (new lines, ";", "vs", "or", " / ") win over commas, so
+// "So I'm a Spider, So What? vs Frieren" stays two titles, not three. Capped
+// at four, which is what the choose prompt handles.
 function splitShortlist(text) {
+  const explicit = /[\n;]+|\s\/\s|\bvs\.?(?=\s|$)|\bor\b/i;
   return text
-    .split(/[\n,;]+|\bvs\.?\b|\bor\b/i)
+    .split(explicit.test(text) ? new RegExp(explicit.source, "gi") : /,+/)
     .map((title) => title.trim())
     .filter(Boolean)
-    .slice(0, 5);
+    .slice(0, 4);
+}
+
+// Enter submits a one-line answer (Shift+Enter adds a line). List fields use
+// Ctrl/Cmd+Enter because new lines separate titles there. Never fires while
+// an IME is composing, or confirming Japanese input would submit.
+function submitOnEnter(onSubmit, { requireModifier = false } = {}) {
+  return (event) => {
+    // Safari reports the composition-ending Enter as keyCode 229 instead.
+    if (event.key !== "Enter" || event.nativeEvent.isComposing || event.keyCode === 229) return;
+    if (requireModifier ? !(event.ctrlKey || event.metaKey) : event.shiftKey) return;
+    event.preventDefault();
+    onSubmit();
+  };
 }
 
 function countStatuses(list) {
