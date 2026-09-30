@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { askEn, askEnChoose, askEnVerdict } from "./openrouter.js";
+import { isEnConfigError } from "./llmProviders.js";
 import { beginMalOauth, finishMalOauth, refreshMalOauth } from "./oauth.js";
 import { MalAuthError, fetchAnimeImage, fetchAnimeList, isMalAuthError } from "./mal.js";
 import { ANIME_CATALOG } from "./animeCatalog.js";
@@ -32,6 +33,7 @@ import {
   compactFeedbackHistory,
   summarizeRecentPatterns
 } from "./tasteProfile.js";
+import { buildWatchHistoryDigest, describeQueriedTitle } from "./watchHistory.js";
 import { normalizeTitleForCompare, titleMatchesAnime } from "./titleUtils.js";
 import { resolveAnimeOnAniList } from "./anilist.js";
 
@@ -67,6 +69,9 @@ export default function App() {
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const handledCallback = useRef(false);
+  // Picks revealed in this visit. "Did you watch it?" is only asked about
+  // picks from earlier visits, never one the user was just handed.
+  const sessionEntryIds = useRef(new Set());
 
   useEffect(() => {
     if (window.location.pathname !== "/callback" || handledCallback.current) return;
@@ -123,97 +128,122 @@ export default function App() {
       return;
     }
 
-    const pendingIds = findPendingEntries(nextHistory).map((entry) => entry.id);
+    const pendingIds = findReviewEntries(nextHistory, sessionEntryIds.current).map((entry) => entry.id);
     setPendingReviewIds(pendingIds);
     setView(pendingIds.length ? VIEW.PENDING : VIEW.MOOD);
   }
 
-  async function handleConsider(nextMood) {
-    if (!hasRecommendationInput() || (mode !== "manual" && !tokens?.access_token)) {
-      setView(VIEW.LANDING);
-      return;
-    }
+  function canAskEn() {
+    return hasRecommendationInput() && (mode === "manual" || Boolean(tokens?.access_token));
+  }
 
+  function beginThinking() {
     setError("");
     setRecommendation(null);
     setStatus(mode === "manual" ? "Reading what you told En" : "Reading your history");
     setView(VIEW.THINKING);
+  }
 
+  // Everything En knows about the user, gathered once per request.
+  async function loadEnContext() {
+    const list = mode === "manual" ? manualList : await fetchAnimeListWithRefresh();
+    setMalList(Array.isArray(list) ? list : []);
+
+    const tasteProfile = buildTasteProfile({
+      malList: list,
+      feedbackHistory: history,
+      previousProfile: loadTasteProfileCache()
+    });
+    saveTasteProfileCache(tasteProfile);
+
+    const memory = buildRecommendationMemory({
+      malList: list,
+      history,
+      existingMemory: loadRecommendationMemoryCache()
+    });
+    saveRecommendationMemoryCache(memory);
+
+    if (Array.isArray(list)) {
+      console.log("[En debug] MAL list item count", list.length);
+      console.log("[En debug] MAL status counts", countStatuses(list));
+      console.log("[En debug] persistent memory counts", countMemory(memory));
+    }
+
+    return {
+      list,
+      memory,
+      signals: {
+        watchHistory: buildWatchHistoryDigest(list),
+        tasteProfile,
+        recentPatterns: summarizeRecentPatterns(list, history),
+        feedbackHistory: compactFeedbackHistory(history)
+      }
+    };
+  }
+
+  async function describeQueriedTitles(titles, list) {
+    const resolved = await Promise.all(titles.map((title) => resolveAnimeOnAniList(title)));
+    return titles.map((asked, index) =>
+      describeQueriedTitle({ asked, resolved: resolved[index], list, history })
+    );
+  }
+
+  // The pick is saved to the log the moment it's shown, so closing the tab
+  // before rating it no longer loses the entry (while its title stays banned).
+  function revealPick(pick, entryFields) {
+    recordRecommendedAnime(pick, "recommended");
+    const entry = {
+      id: crypto.randomUUID(),
+      date: new Date().toISOString(),
+      recommendation: pick,
+      note: "",
+      feedback: "",
+      state: "unrated",
+      ...entryFields
+    };
+    sessionEntryIds.current.add(entry.id);
+    setHistory(appendHistory(entry));
+    setRecommendation(pick);
+    setCurrentDraftEntry(entry);
+    setStatus("");
+    setView(VIEW.REVEAL);
+  }
+
+  function handleRequestError(requestError, fallbackView) {
+    if (isMalAuthError(requestError)) {
+      clearExpiredMalSession();
+      setError("Your MyAnimeList session expired. Please connect again.");
+      setView(VIEW.LANDING);
+    } else {
+      setError(requestError.message);
+      setView(fallbackView);
+    }
+    setStatus("");
+  }
+
+  async function handleConsider(nextMood) {
+    if (!canAskEn()) {
+      setView(VIEW.LANDING);
+      return;
+    }
+
+    beginThinking();
     try {
-      const list =
-        mode === "manual" ? manualList : await fetchAnimeListWithRefresh();
-      setMalList(Array.isArray(list) ? list : []);
+      const { signals, memory } = await loadEnContext();
       setStatus("Listening to tonight");
-      const previousTasteProfile = loadTasteProfileCache();
-      const tasteProfile = buildTasteProfile({
-        malList: list,
-        feedbackHistory: history,
-        previousProfile: previousTasteProfile
-      });
-      saveTasteProfileCache(tasteProfile);
-
-      const recommendationMemory = buildRecommendationMemory({
-        malList: list,
-        history,
-        existingMemory: loadRecommendationMemoryCache()
-      });
-      saveRecommendationMemoryCache(recommendationMemory);
-
-      const recentPatterns = summarizeRecentPatterns(list, history);
-      const feedbackSignals = compactFeedbackHistory(history);
       const candidateList = buildCandidatePool({
         mood: nextMood,
-        tasteProfile,
-        recentPatterns,
-        memory: recommendationMemory
+        tasteProfile: signals.tasteProfile,
+        recentPatterns: signals.recentPatterns,
+        memory
       });
+      console.log("[En debug] candidate count", candidateList.length);
 
-      if (Array.isArray(list)) {
-        console.log("[En debug] MAL list item count", list.length);
-        console.log("[En debug] MAL status counts", countStatuses(list));
-        console.log("[En debug] persistent memory counts", countMemory(recommendationMemory));
-        console.log("[En debug] candidate count", candidateList.length);
-      }
-
-      const rec = await askForAllowedRecommendation({
-        mood: nextMood,
-        tasteProfile,
-        recentPatterns,
-        feedbackHistory: feedbackSignals,
-        candidateList,
-        memory: recommendationMemory
-      });
-      const imageUrl = await fetchAnimeImage(
-        rec.title,
-        mode === "manual" ? "" : tokens.access_token,
-        [rec.title_jp, rec.title_en]
-      );
-      const recommendationWithImage = { ...rec, image_url: imageUrl || rec.image_url || "" };
-      recordRecommendedAnime(recommendationWithImage, "recommended");
-
-      const entry = {
-        id: crypto.randomUUID(),
-        date: new Date().toISOString(),
-        mood: nextMood || "Surprise me",
-        recommendation: recommendationWithImage,
-        note: "",
-        feedback: "",
-        state: "unrated"
-      };
-
-      setRecommendation(recommendationWithImage);
-      setCurrentDraftEntry(entry);
-      setStatus("");
-      setView(VIEW.REVEAL);
+      const rec = await askForAllowedRecommendation({ mood: nextMood, signals, candidateList, memory });
+      const pick = await withImage(rec, [rec.title_jp]);
+      revealPick(pick, { mood: nextMood || "Surprise me" });
     } catch (considerError) {
-      if (isMalAuthError(considerError)) {
-        clearExpiredMalSession();
-        setError("Your MyAnimeList session expired. Please connect again.");
-      } else {
-        setError(considerError.message);
-      }
-      setStatus("");
-      setView(isMalAuthError(considerError) ? VIEW.LANDING : VIEW.MOOD);
+      handleRequestError(considerError, VIEW.MOOD);
     }
   }
 
@@ -244,198 +274,92 @@ export default function App() {
   }
 
   async function handleChoose(titles, moodText) {
-    if (!titles.length || !hasRecommendationInput() || (mode !== "manual" && !tokens?.access_token)) {
+    if (!titles.length || !canAskEn()) {
       setView(VIEW.LANDING);
       return;
     }
 
-    setError("");
-    setRecommendation(null);
-    setStatus(mode === "manual" ? "Reading what you told En" : "Reading your history");
-    setView(VIEW.THINKING);
-
+    beginThinking();
     try {
-      const list =
-        mode === "manual" ? manualList : await fetchAnimeListWithRefresh();
-      setMalList(Array.isArray(list) ? list : []);
+      const { list, signals } = await loadEnContext();
       setStatus("Weighing them against each other");
-      const previousTasteProfile = loadTasteProfileCache();
-      const tasteProfile = buildTasteProfile({
-        malList: list,
-        feedbackHistory: history,
-        previousProfile: previousTasteProfile
-      });
-      saveTasteProfileCache(tasteProfile);
-
-      const recentPatterns = summarizeRecentPatterns(list, history);
-      const feedbackSignals = compactFeedbackHistory(history);
+      const queriedTitleHistory = await describeQueriedTitles(titles, list);
 
       const choice = await askForAllowedChoice({
         queriedTitles: titles,
+        queriedTitleHistory,
         mood: moodText,
-        tasteProfile,
-        recentPatterns,
-        feedbackHistory: feedbackSignals
+        signals
       });
 
-      const resolvedMeta = await resolveAnimeMetadata(choice.title, choice.title_jp);
-      const enrichedChoice = resolvedMeta
-        ? {
-            ...choice,
-            title: resolvedMeta.title,
-            title_jp: resolvedMeta.title_jp || resolvedMeta.title,
-            year: resolvedMeta.year ?? choice.year,
-            episodes: resolvedMeta.episodes ?? choice.episodes,
-            genre: resolvedMeta.genre || choice.genre,
-            image_url: resolvedMeta.image_url || choice.image_url || ""
-          }
-        : choice;
-
-      const chooseAgainst = titles.filter(
-        (title) => normalizeTitleForCompare(title) !== normalizeTitleForCompare(enrichedChoice.title)
+      // Compare against what the user typed, not the canonical title AniList
+      // returns - "frieren" never equals "Frieren: Beyond Journey's End".
+      const chosenIndex = Math.max(0, findQueriedIndex(choice, titles));
+      const resolvedMeta = await resolveAnimeMetadata(titles[chosenIndex], choice.title);
+      const pick = await withImage(
+        {
+          ...applyResolvedMeta(choice, resolvedMeta),
+          mode: "choose",
+          chooseAgainst: titles.filter((_, index) => index !== chosenIndex)
+        },
+        [choice.title_jp]
       );
 
-      const imageUrl = await fetchAnimeImage(
-        enrichedChoice.title,
-        mode === "manual" ? "" : tokens.access_token,
-        [enrichedChoice.title_jp]
-      );
-      const recommendationWithImage = {
-        ...enrichedChoice,
-        image_url: imageUrl || enrichedChoice.image_url || "",
-        mode: "choose",
-        chooseAgainst
-      };
-      recordRecommendedAnime(recommendationWithImage, "recommended");
-
-      const entry = {
-        id: crypto.randomUUID(),
-        date: new Date().toISOString(),
+      revealPick(pick, {
         mood: moodText || `choosing between ${titles.join(", ")}`,
-        recommendation: recommendationWithImage,
-        note: "",
-        feedback: "",
-        state: "unrated",
         mode: "choose",
         queried_title: titles.join(" vs "),
         verdict: "yes"
-      };
-
-      setRecommendation(recommendationWithImage);
-      setCurrentDraftEntry(entry);
-      setStatus("");
-      setView(VIEW.REVEAL);
+      });
     } catch (chooseError) {
-      if (isMalAuthError(chooseError)) {
-        clearExpiredMalSession();
-        setError("Your MyAnimeList session expired. Please connect again.");
-      } else {
-        setError(chooseError.message);
-      }
-      setStatus("");
-      setView(isMalAuthError(chooseError) ? VIEW.LANDING : VIEW.SHORTLIST_MOOD);
+      handleRequestError(chooseError, VIEW.SHORTLIST_MOOD);
     }
   }
 
   async function handleVerdict(rawText, moodText = "") {
     const text = rawText.trim();
-    if (!text || !hasRecommendationInput() || (mode !== "manual" && !tokens?.access_token)) {
+    if (!text || !canAskEn()) {
       setView(VIEW.LANDING);
       return;
     }
 
-    setError("");
-    setRecommendation(null);
-    setStatus(mode === "manual" ? "Reading what you told En" : "Reading your history");
-    setView(VIEW.THINKING);
-
+    beginThinking();
     try {
-      const list =
-        mode === "manual" ? manualList : await fetchAnimeListWithRefresh();
-      setMalList(Array.isArray(list) ? list : []);
+      const { list, memory, signals } = await loadEnContext();
       setStatus("Weighing it against your history");
-      const previousTasteProfile = loadTasteProfileCache();
-      const tasteProfile = buildTasteProfile({
-        malList: list,
-        feedbackHistory: history,
-        previousProfile: previousTasteProfile
-      });
-      saveTasteProfileCache(tasteProfile);
-
-      const recommendationMemory = buildRecommendationMemory({
-        malList: list,
-        history,
-        existingMemory: loadRecommendationMemoryCache()
-      });
-      saveRecommendationMemoryCache(recommendationMemory);
-
-      const recentPatterns = summarizeRecentPatterns(list, history);
-      const feedbackSignals = compactFeedbackHistory(history);
-      const queriedTitles = splitShortlist(text);
+      const queriedTitles = [text];
+      const queriedTitleHistory = await describeQueriedTitles(queriedTitles, list);
       const candidateList = buildCandidatePool({
         mood: moodText,
-        tasteProfile,
-        recentPatterns,
-        memory: recommendationMemory
+        tasteProfile: signals.tasteProfile,
+        recentPatterns: signals.recentPatterns,
+        memory
       });
 
       const verdict = await askForAllowedVerdict({
         queriedTitles,
+        queriedTitleHistory,
         mood: moodText,
-        tasteProfile,
-        recentPatterns,
-        feedbackHistory: feedbackSignals,
+        signals,
         candidateList,
-        memory: recommendationMemory
+        memory
       });
 
-      const resolvedMeta = await resolveAnimeMetadata(verdict.title, verdict.title_jp);
-      const enrichedVerdict = resolvedMeta
-        ? {
-            ...verdict,
-            title: resolvedMeta.title,
-            title_jp: resolvedMeta.title_jp || resolvedMeta.title,
-            year: resolvedMeta.year ?? verdict.year,
-            episodes: resolvedMeta.episodes ?? verdict.episodes,
-            genre: resolvedMeta.genre || verdict.genre,
-            image_url: resolvedMeta.image_url || verdict.image_url || ""
-          }
-        : verdict;
+      // A "yes" must show the title the user actually asked about, whatever
+      // canonical name the model gave it.
+      const resolvedMeta = verdict.verdict === "yes"
+        ? await resolveAnimeMetadata(text, verdict.title)
+        : await resolveAnimeMetadata(verdict.title, verdict.title_jp);
+      const pick = await withImage(applyResolvedMeta(verdict, resolvedMeta), [verdict.title_jp]);
 
-      const imageUrl = await fetchAnimeImage(
-        enrichedVerdict.title,
-        mode === "manual" ? "" : tokens.access_token,
-        [enrichedVerdict.title_jp]
-      );
-      const recommendationWithImage = { ...enrichedVerdict, image_url: imageUrl || enrichedVerdict.image_url || "" };
-      recordRecommendedAnime(recommendationWithImage, "recommended");
-
-      const entry = {
-        id: crypto.randomUUID(),
-        date: new Date().toISOString(),
+      revealPick(pick, {
         mood: moodText || `asked about ${verdict.queried_title}`,
-        recommendation: recommendationWithImage,
-        note: "",
-        feedback: "",
-        state: "unrated",
         mode: "verdict",
         queried_title: verdict.queried_title,
         verdict: verdict.verdict
-      };
-
-      setRecommendation(recommendationWithImage);
-      setCurrentDraftEntry(entry);
-      setStatus("");
-      setView(VIEW.REVEAL);
+      });
     } catch (verdictError) {
-      if (isMalAuthError(verdictError)) {
-        clearExpiredMalSession();
-        setError("Your MyAnimeList session expired. Please connect again.");
-      } else {
-        setError(verdictError.message);
-      }
-      setStatus("");
-      setView(isMalAuthError(verdictError) ? VIEW.LANDING : VIEW.SHORTLIST_MOOD);
+      handleRequestError(verdictError, VIEW.SHORTLIST_MOOD);
     }
   }
 
@@ -481,7 +405,10 @@ export default function App() {
             feedback_note: feedbackNote.trim(),
             note: makeUserReflection(feedback, feedbackNote)
           };
-    const nextHistory = appendHistory({ ...currentDraftEntry, ...patch });
+    const alreadySaved = loadHistory().some((entry) => entry.id === currentDraftEntry.id);
+    const nextHistory = alreadySaved
+      ? updateHistoryEntry(currentDraftEntry.id, patch)
+      : appendHistory({ ...currentDraftEntry, ...patch });
     if (feedback === "pending") {
       recordRecommendedAnime(currentDraftEntry.recommendation, "pending");
       recordRecommendedAnime(currentDraftEntry.recommendation, "watchlisted");
@@ -498,8 +425,8 @@ export default function App() {
   function handlePendingAnswer(answer) {
     const reviewIds = pendingReviewIds.length
       ? pendingReviewIds
-      : findPendingEntries(history).map((entry) => entry.id);
-    const pending = findCurrentPending(history, reviewIds);
+      : findReviewEntries(history, sessionEntryIds.current).map((entry) => entry.id);
+    const pending = findCurrentPending(history, reviewIds, sessionEntryIds.current);
     if (!pending) {
       setPendingReviewIds([]);
       setView(VIEW.MOOD);
@@ -509,17 +436,26 @@ export default function App() {
     const remainingPendingIds = reviewIds.filter((id) => id !== pending.id);
 
     if (answer === "not-yet") {
+      // An unanswered pick they still mean to watch becomes a saved one.
+      if (pending.state === "unrated") {
+        setHistory(updateHistoryEntry(pending.id, { state: "pending", note: "waiting in the watchlist" }));
+        recordRecommendedAnime(pending.recommendation, "pending");
+        recordRecommendedAnime(pending.recommendation, "watchlisted");
+      }
       setPendingReviewIds(remainingPendingIds);
       setView(remainingPendingIds.length ? VIEW.PENDING : VIEW.MOOD);
       return;
     }
 
-    const patch = {
-      feedback: answer,
-      state: "rated",
-      feedback_note: "",
-      note: makeUserReflection(answer, "")
-    };
+    const patch =
+      answer === "pass"
+        ? { feedback: "", state: "skipped", feedback_note: "", note: "passed on it." }
+        : {
+            feedback: answer,
+            state: "rated",
+            feedback_note: "",
+            note: makeUserReflection(answer, "")
+          };
     const nextHistory = updateHistoryEntry(pending.id, patch);
     if (answer === "good") {
       recordRecommendedAnime(pending.recommendation, "completed");
@@ -528,7 +464,7 @@ export default function App() {
     }
     setHistory(nextHistory);
     const nextPendingIds = remainingPendingIds.filter((id) =>
-      nextHistory.some((entry) => entry.id === id && entry.state === "pending")
+      nextHistory.some((entry) => entry.id === id && isAwaitingAnswer(entry))
     );
     setPendingReviewIds(nextPendingIds);
     setView(nextPendingIds.length ? VIEW.PENDING : VIEW.MOOD);
@@ -592,7 +528,10 @@ export default function App() {
         />
       )}
       {view === VIEW.PENDING && (
-        <ScreenPending nav={nav} pending={findCurrentPending(history, pendingReviewIds)} />
+        <ScreenPending
+          nav={nav}
+          pending={findCurrentPending(history, pendingReviewIds, sessionEntryIds.current)}
+        />
       )}
       {view === VIEW.MOOD && (
         <ScreenMood
@@ -875,8 +814,11 @@ function ScreenPending({ nav, pending }) {
           >
             Did you watch {pending.recommendation.title}?
           </h2>
+          <p className="meta fade-up delay-1">
+            {pending.state === "pending" ? "Saved" : "En picked it"} · {formatDate(pending.date)}
+          </p>
 
-          <div className="choice-links fade-up delay-2" style={{ marginTop: 76 }}>
+          <div className="choice-links fade-up delay-2" style={{ marginTop: 64 }}>
             <button className="btn-link" onClick={() => nav.pendingAnswer("good")}>
               It was good
             </button>
@@ -885,6 +827,9 @@ function ScreenPending({ nav, pending }) {
             </button>
             <button className="btn-link" onClick={() => nav.pendingAnswer("not-yet")}>
               Not yet
+            </button>
+            <button className="btn-quiet" onClick={() => nav.pendingAnswer("pass")}>
+              I'll pass on it
             </button>
           </div>
         </div>
@@ -1486,11 +1431,15 @@ function ScreenHistory({ nav, history }) {
                   >
                     {entry.state === "pending"
                       ? "○ pending"
-                      : entry.feedback === "good"
-                        ? "・ good"
-                        : entry.feedback === "meh"
-                          ? "— meh"
-                          : ""}
+                      : entry.state === "unrated"
+                        ? "○ unrated"
+                        : entry.state === "skipped"
+                          ? "— passed"
+                          : entry.feedback === "good"
+                            ? "・ good"
+                            : entry.feedback === "meh"
+                              ? "— meh"
+                              : ""}
                   </div>
                   {entry.mode === "verdict" && (
                     <div
@@ -1546,7 +1495,7 @@ function ScreenHistory({ nav, history }) {
                       {stripMarkdown(entry.recommendation.log_line || entry.recommendation.reason)}
                     </em>
                   </p>
-                  {entry.state === "rated" && entry.note && (
+                  {(entry.state === "rated" || entry.state === "skipped") && entry.note && (
                     <p
                       style={{
                         marginTop: 18,
@@ -1605,19 +1554,24 @@ function formatCount(count) {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(count);
 }
 
-function findCurrentPending(history, pendingReviewIds) {
-  const pendingById = new Map(
-    history
-      .filter((entry) => entry.state === "pending")
-      .map((entry) => [entry.id, entry])
-  );
-  return pendingReviewIds.map((id) => pendingById.get(id)).find(Boolean) || findPendingEntries(history)[0];
+function isAwaitingAnswer(entry) {
+  return entry.state === "pending" || entry.state === "unrated";
 }
 
-function findPendingEntries(history) {
+function findCurrentPending(history, pendingReviewIds, sessionIds) {
+  const pendingById = new Map(
+    history
+      .filter(isAwaitingAnswer)
+      .map((entry) => [entry.id, entry])
+  );
+  return pendingReviewIds.map((id) => pendingById.get(id)).find(Boolean) || findReviewEntries(history, sessionIds)[0];
+}
+
+// Saved picks and unanswered picks from earlier visits, oldest first.
+function findReviewEntries(history, sessionIds = new Set()) {
   return history
     .map((entry, index) => ({ entry, index }))
-    .filter(({ entry }) => entry.state === "pending")
+    .filter(({ entry }) => isAwaitingAnswer(entry) && !sessionIds.has(entry.id))
     .sort((a, b) => {
       const timeA = Date.parse(a.entry.date);
       const timeB = Date.parse(b.entry.date);
@@ -1649,84 +1603,67 @@ function hasRecommendationInput() {
   return Boolean(loadTokens()?.access_token || loadManualList().trim());
 }
 
-async function askForAllowedRecommendation({
-  mood,
-  tasteProfile,
-  recentPatterns,
-  feedbackHistory,
-  candidateList,
-  memory
-}) {
-  let lastValidationError = "";
+// Retries the model up to MAX_RECOMMENDATION_ATTEMPTS times, telling it why
+// its previous answer was rejected. Configuration errors (no API key) are
+// rethrown straight away instead of being papered over by a fallback.
+async function askUntilValid({ label, ask, validate }) {
+  let previousAttemptRejected;
+  let lastError = "";
 
   for (let attempt = 1; attempt <= MAX_RECOMMENDATION_ATTEMPTS; attempt += 1) {
     try {
-      const recommendation = await askEn({
-        mood,
-        tasteProfile,
-        recentPatterns,
-        feedbackHistory,
-        candidateList
-      });
-      const validation = validateRecommendation(recommendation, candidateList, memory);
-      console.log("[En debug] returned recommendation validation", {
-        attempt,
-        recommendation,
-        validation
-      });
-
+      const answer = await ask(previousAttemptRejected);
+      const validation = validate(answer);
+      console.log(`[En debug] returned ${label} validation`, { attempt, answer, validation });
       if (validation.ok) {
-        return mergeCandidateMeta(recommendation, validation.candidate);
+        return { answer, validation };
       }
-
-      lastValidationError = validation.error;
+      lastError = validation.error;
+      previousAttemptRejected = { title: answer?.title || "", reason: validation.error };
     } catch (error) {
-      lastValidationError = error.message;
-      console.warn("[En debug] recommendation attempt failed", { attempt, error });
+      if (isEnConfigError(error)) throw error;
+      lastError = error.message;
+      console.warn(`[En debug] ${label} attempt failed`, { attempt, error });
     }
   }
 
-  console.warn("[En debug] falling back to deterministic ranking", lastValidationError);
-  return deterministicRecommendation(candidateList);
+  console.warn(`[En debug] ${label} fell back after ${MAX_RECOMMENDATION_ATTEMPTS} attempts`, lastError);
+  return null;
 }
 
-async function askForAllowedChoice({ queriedTitles, mood, tasteProfile, recentPatterns, feedbackHistory }) {
-  let lastValidationError = "";
+async function askForAllowedRecommendation({ mood, signals, candidateList, memory }) {
+  const result = await askUntilValid({
+    label: "recommendation",
+    ask: (previousAttemptRejected) =>
+      askEn({ mood, ...signals, candidateList, previousAttemptRejected }),
+    validate: (recommendation) => validateRecommendation(recommendation, candidateList, memory)
+  });
 
-  for (let attempt = 1; attempt <= MAX_RECOMMENDATION_ATTEMPTS; attempt += 1) {
-    try {
-      const choice = await askEnChoose({
-        queriedTitles,
-        mood,
-        tasteProfile,
-        recentPatterns,
-        feedbackHistory
-      });
-      const validation = validateChoice(choice, queriedTitles);
-      console.log("[En debug] returned choice validation", { attempt, choice, validation });
+  return result
+    ? mergeCandidateMeta(result.answer, result.validation.candidate)
+    : deterministicRecommendation(candidateList);
+}
 
-      if (validation.ok) {
-        return choice;
-      }
+async function askForAllowedChoice({ queriedTitles, queriedTitleHistory, mood, signals }) {
+  const result = await askUntilValid({
+    label: "choice",
+    ask: (previousAttemptRejected) =>
+      askEnChoose({ queriedTitles, queriedTitleHistory, mood, ...signals, previousAttemptRejected }),
+    validate: (choice) => validateChoice(choice, queriedTitles)
+  });
+  if (result) return result.answer;
 
-      lastValidationError = validation.error;
-    } catch (error) {
-      lastValidationError = error.message;
-      console.warn("[En debug] choose attempt failed", { attempt, error });
-    }
-  }
-
-  console.warn("[En debug] falling back to first named title", lastValidationError);
   const fallbackTitle = queriedTitles[0];
   const resolvedMeta = await resolveAnimeMetadata(fallbackTitle, fallbackTitle);
   return {
-    title: resolvedMeta?.title || fallbackTitle,
+    title: fallbackTitle,
     title_jp: resolvedMeta?.title_jp || fallbackTitle,
     year: resolvedMeta?.year || new Date().getFullYear(),
     episodes: resolvedMeta?.episodes || 12,
     genre: resolvedMeta?.genre || "",
     reason: "En couldn't settle this cleanly. Going with the first one you named.",
-    log_line: "Ties go to whoever spoke first."
+    log_line: "Ties go to whoever spoke first.",
+    fallback: true
   };
 }
 
@@ -1737,12 +1674,37 @@ function validateChoice(choice, queriedTitles) {
     return { ok: false, error: `missing ${missing}` };
   }
 
-  const matched = titleMatchesAnyQueried(choice.title, queriedTitles) || titleMatchesAnyQueried(choice.title_jp, queriedTitles);
-  if (!matched) {
-    return { ok: false, error: "chosen title was not one of the queried titles" };
+  if (findQueriedIndex(choice, queriedTitles) < 0) {
+    return { ok: false, error: "the chosen title must be one of queriedTitles, written exactly as given" };
   }
 
   return { ok: true };
+}
+
+function findQueriedIndex(pick, queriedTitles) {
+  const keys = [pick?.title, pick?.title_jp].map(normalizeTitleForCompare).filter(Boolean);
+  return queriedTitles.findIndex((queried) => keys.includes(normalizeTitleForCompare(queried)));
+}
+
+function applyResolvedMeta(pick, meta) {
+  if (!meta) return pick;
+  return {
+    ...pick,
+    title: meta.title,
+    title_jp: meta.title_jp || meta.title,
+    year: meta.year ?? pick.year,
+    episodes: meta.episodes ?? pick.episodes,
+    genre: meta.genre || pick.genre,
+    image_url: meta.image_url || pick.image_url || ""
+  };
+}
+
+// AniList covers come with the metadata; MAL search is only needed for
+// catalog picks that don't have one.
+async function withImage(pick, aliases = []) {
+  if (pick.image_url) return pick;
+  const imageUrl = await fetchAnimeImage(pick.title, aliases);
+  return { ...pick, image_url: imageUrl || "" };
 }
 
 function matchCatalogAnime(title, titleJp) {
@@ -1781,56 +1743,27 @@ async function resolveAnimeMetadata(title, titleJp) {
 
 async function askForAllowedVerdict({
   queriedTitles,
+  queriedTitleHistory,
   mood,
-  tasteProfile,
-  recentPatterns,
-  feedbackHistory,
+  signals,
   candidateList,
   memory
 }) {
-  let lastValidationError = "";
+  const result = await askUntilValid({
+    label: "verdict",
+    ask: (previousAttemptRejected) =>
+      askEnVerdict({ queriedTitles, queriedTitleHistory, mood, ...signals, candidateList, previousAttemptRejected }),
+    validate: (verdict) => validateVerdict(verdict, queriedTitles, candidateList, memory)
+  });
 
-  for (let attempt = 1; attempt <= MAX_RECOMMENDATION_ATTEMPTS; attempt += 1) {
-    try {
-      const verdict = await askEnVerdict({
-        queriedTitles,
-        mood,
-        tasteProfile,
-        recentPatterns,
-        feedbackHistory,
-        candidateList
-      });
-      const validation = validateVerdict(verdict, queriedTitles, candidateList, memory);
-      console.log("[En debug] returned verdict validation", { attempt, verdict, validation });
-
-      if (validation.ok) {
-        return validation.candidate ? mergeCandidateMeta(verdict, validation.candidate) : verdict;
-      }
-
-      lastValidationError = validation.error;
-    } catch (error) {
-      lastValidationError = error.message;
-      console.warn("[En debug] verdict attempt failed", { attempt, error });
-    }
+  // Failing to reach the model used to come back as a "no" plus a random
+  // catalog pick, i.e. En vetoed the user's title because it couldn't think.
+  if (!result) {
+    throw new Error("En couldn't weigh that one right now. Try again in a moment.");
   }
 
-  console.warn("[En debug] falling back to deterministic veto", lastValidationError);
-  const fallbackCandidate = candidateList[0];
-  if (!fallbackCandidate) {
-    throw new Error("No eligible anime remain after filtering.");
-  }
-
-  return {
-    verdict: "no",
-    queried_title: queriedTitles[0] || "that one",
-    title: fallbackCandidate.title,
-    title_jp: fallbackCandidate.title_jp || fallbackCandidate.title,
-    year: fallbackCandidate.year,
-    episodes: fallbackCandidate.episodes,
-    genre: fallbackCandidate.genre,
-    reason: "En couldn't confirm that pick against your history right now. This one is closest to what you've actually been drawn to.",
-    log_line: "Signal's thin tonight. This one held up anyway."
-  };
+  const { answer, validation } = result;
+  return validation.candidate ? mergeCandidateMeta(answer, validation.candidate) : answer;
 }
 
 function validateVerdict(verdict, queriedTitles, candidateList, memory) {
@@ -1844,17 +1777,25 @@ function validateVerdict(verdict, queriedTitles, candidateList, memory) {
     return { ok: false, error: "invalid verdict value" };
   }
 
-  if (verdict.verdict === "no") {
-    if (isMemoryExcludedTitle(verdict.title, memory) || isMemoryExcludedTitle(verdict.title_jp, memory)) {
-      return { ok: false, error: "alternative already exists in recommendation memory" };
-    }
-
-    if (titleMatchesAnyQueried(verdict.title, queriedTitles) || titleMatchesAnyQueried(verdict.title_jp, queriedTitles)) {
-      return { ok: false, error: "alternative repeats the queried title" };
-    }
+  if (verdict.verdict === "yes") {
+    return { ok: true };
   }
 
+  if (titleMatchesAnyQueried(verdict.title, queriedTitles) || titleMatchesAnyQueried(verdict.title_jp, queriedTitles)) {
+    return { ok: false, error: "the alternative repeats the queried title" };
+  }
+
+  if (isMemoryExcludedTitle(verdict.title, memory) || isMemoryExcludedTitle(verdict.title_jp, memory)) {
+    return { ok: false, error: "the alternative is already on the user's list or was recommended before" };
+  }
+
+  // The alternative has to come from the candidate pool, so it can't be a
+  // hallucinated or unvetted title.
   const candidate = findCandidateByRecommendation(verdict, candidateList);
+  if (!candidate) {
+    return { ok: false, error: "the alternative must exactly match a candidateList title" };
+  }
+
   return { ok: true, candidate };
 }
 
@@ -1888,11 +1829,11 @@ function validateRecommendation(recommendation, candidateList, memory) {
 
   const candidate = findCandidateByRecommendation(recommendation, candidateList);
   if (!candidate) {
-    return { ok: false, error: "title not in candidateList" };
+    return { ok: false, error: "that title isn't in candidateList; pick one that is" };
   }
 
   if (isMemoryExcludedTitle(recommendation.title, memory) || isMemoryExcludedTitle(recommendation.title_jp, memory)) {
-    return { ok: false, error: "title already exists in recommendation memory" };
+    return { ok: false, error: "that title is already on the user's list or was recommended before" };
   }
 
   const blockedEvidenceTitle = findBlockedEvidenceTitle(
@@ -1902,7 +1843,7 @@ function validateRecommendation(recommendation, candidateList, memory) {
   if (blockedEvidenceTitle) {
     return {
       ok: false,
-      error: `reason referenced watchlisted or pending title: ${blockedEvidenceTitle}`
+      error: `the reason cites ${blockedEvidenceTitle}, which the user hasn't watched yet; don't use it as evidence`
     };
   }
 

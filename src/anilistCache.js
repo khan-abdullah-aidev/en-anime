@@ -1,4 +1,6 @@
-const CACHE_KEY = "en.anilistCache";
+// v2 entries carry malId/title_romaji; v1 entries are dropped on first write.
+const CACHE_KEY = "en.anilistCache.v2";
+const LEGACY_CACHE_KEY = "en.anilistCache";
 const CACHE_TTL_MS = 21 * 24 * 60 * 60 * 1000;
 
 export function readAniListCache(key) {
@@ -30,6 +32,7 @@ function persistCache(cache) {
     Object.entries(cache).filter(([, entry]) => now - entry.cachedAt <= CACHE_TTL_MS)
   );
   try {
+    localStorage.removeItem(LEGACY_CACHE_KEY);
     localStorage.setItem(CACHE_KEY, JSON.stringify(pruned));
   } catch {
     // localStorage full or unavailable; skip caching for this write

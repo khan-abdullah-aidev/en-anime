@@ -37,3 +37,13 @@ export function titleMatchesAnime(title, anime) {
   const normalized = normalizeTitleForCompare(title);
   return Boolean(normalized && animeTitleKeys(anime).includes(normalized));
 }
+
+// The manual "what have you watched?" answer is free text; titles are
+// separated by newlines, commas or semicolons.
+export function parseManualTitles(value) {
+  return String(value || "")
+    .split(/[\n,;]+/)
+    .map((title) => title.trim())
+    .filter(Boolean)
+    .slice(0, 300);
+}

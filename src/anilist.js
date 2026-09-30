@@ -14,6 +14,7 @@ const SEARCH_QUERY = `query ($search: String) {
   Page(perPage: 8) {
     media(search: $search, type: ANIME, sort: [SEARCH_MATCH]) {
       id
+      idMal
       title { romaji english native }
       synonyms
       format
@@ -22,7 +23,7 @@ const SEARCH_QUERY = `query ($search: String) {
       startDate { year }
       episodes
       genres
-      coverImage { large }
+      coverImage { extraLarge large }
     }
   }
 }`;
@@ -97,12 +98,16 @@ function titleKeysFor(media) {
 function toAniListResult(media) {
   return {
     anilistId: media.id,
+    // Lets a queried title be matched to the user's MAL list by id rather
+    // than by however they happened to spell it.
+    malId: media.idMal || null,
     title: media.title.english || media.title.romaji,
     title_jp: media.title.native || media.title.romaji,
+    title_romaji: media.title.romaji || null,
     year: media.startDate?.year || null,
     episodes: media.episodes ?? null,
     genre: (media.genres || []).slice(0, 2).join(", "),
     genres: media.genres || [],
-    image_url: media.coverImage?.large || ""
+    image_url: media.coverImage?.extraLarge || media.coverImage?.large || ""
   };
 }

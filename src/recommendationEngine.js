@@ -1,11 +1,20 @@
 import { ANIME_CATALOG } from "./animeCatalog.js";
-import { normalizeTitleForCompare, titleMatchesAnime, uniqueTitles } from "./titleUtils.js";
+import { normalizeTitleForCompare, parseManualTitles, titleMatchesAnime, uniqueTitles } from "./titleUtils.js";
 
-const MEMORY_BUCKETS = ["recommended", "completed", "rejected", "watchlisted", "pending"];
+// in_progress mirrors what's currently watching/on hold on MAL, so unlike the
+// other buckets it is rebuilt from the list each time rather than accumulated.
+const MEMORY_BUCKETS = ["recommended", "completed", "rejected", "watchlisted", "pending", "in_progress"];
+const TOKEN_STOPWORDS = new Set(["of", "the", "a", "an", "and", "in", "to", "for", "with", "or"]);
+// MAL genre names that mean the same thing as the catalog's own tags.
+const TOKEN_ALIASES = { iyashikei: "healing", suspense: "thriller" };
 const DEFAULT_CANDIDATE_LIMIT = 60;
 
 export function buildRecommendationMemory({ malList, history = [], existingMemory = null }) {
   const memory = normalizeMemory(existingMemory);
+
+  if (Array.isArray(malList)) {
+    memory.in_progress = [];
+  }
 
   for (const entry of Array.isArray(malList) ? malList : []) {
     const status = entry.my_list_status?.status;
@@ -16,11 +25,13 @@ export function buildRecommendationMemory({ malList, history = [], existingMemor
       memory.rejected = uniqueTitles([...memory.rejected, ...titles]);
     } else if (status === "plan_to_watch") {
       memory.watchlisted = uniqueTitles([...memory.watchlisted, ...titles]);
+    } else if (status === "watching" || status === "on_hold") {
+      memory.in_progress = uniqueTitles([...memory.in_progress, ...titles]);
     }
   }
 
   if (typeof malList === "string") {
-    memory.completed = uniqueTitles([...memory.completed, ...extractManualTitles(malList)]);
+    memory.completed = uniqueTitles([...memory.completed, ...parseManualTitles(malList)]);
   }
 
   for (const entry of history) {
@@ -88,8 +99,11 @@ export function deterministicRecommendation(candidateList = []) {
     year: candidate.year,
     episodes: candidate.episodes,
     genre: candidate.genre,
-    reason: "This is the closest clean match left after your history and feedback were filtered out. It fits the mood without repeating a title En already gave you.",
-    log_line: "The list got smaller. This one stayed."
+    // Only reached when the model failed every attempt, so say so plainly
+    // rather than dressing a ranking up as a considered reading.
+    reason: "En couldn't think this one through tonight. This is simply the highest-ranked title left for your history. Ask again later for a real reason.",
+    log_line: "Taken from the shelf, not from thought.",
+    fallback: true
   };
 }
 
@@ -104,21 +118,47 @@ export function buildExcludedTitlesFromMemory(memory) {
     ...memory.completed,
     ...memory.rejected,
     ...memory.watchlisted,
-    ...memory.pending
+    ...memory.pending,
+    ...(memory.in_progress || [])
   ]);
 }
 
+// Comparing with spaces stripped made short titles and synonyms ("K", "DB")
+// match inside almost any sentence, which rejected otherwise valid
+// recommendations. Titles now have to appear as whole words.
 export function findBlockedEvidenceTitle(text, memory) {
-  const normalizedText = normalizeTitleForCompare(text);
   const blockedTitles = uniqueTitles([
     ...(memory?.watchlisted || []),
     ...(memory?.pending || [])
   ]);
 
-  return blockedTitles.find((title) => {
-    const key = normalizeTitleForCompare(title);
-    return key && normalizedText.includes(key);
-  }) || "";
+  return blockedTitles.find((title) => mentionsTitle(text, title)) || "";
+}
+
+function mentionsTitle(text, title) {
+  const needle = toSearchText(title);
+  if (needle.replace(/ /g, "").length < 4) return false;
+
+  if (needle.includes(" ") || /[^a-z0-9]/.test(needle)) {
+    return ` ${toSearchText(text)} `.includes(` ${needle} `);
+  }
+
+  // A one-word title ("Another", "Monster") is usually also an ordinary word,
+  // so only a capitalized use in the middle of a sentence counts as citing it.
+  const cited = needle[0].toUpperCase() + needle.slice(1);
+  return String(text || "")
+    .split(/[.!?]+/)
+    .some((sentence) => sentence.split(/[^A-Za-z0-9]+/).filter(Boolean).slice(1).includes(cited));
+}
+
+function toSearchText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9\u3040-\u30ff\u3400-\u9fff]+/g, " ")
+    .trim();
 }
 
 function normalizeMemory(memory = {}) {
@@ -136,14 +176,6 @@ function extractMalTitles(entry) {
     alternatives.ja,
     ...(alternatives.synonyms || [])
   ].filter(Boolean);
-}
-
-function extractManualTitles(value) {
-  return value
-    .split(/[\n,;]+/)
-    .map((title) => title.trim())
-    .filter(Boolean)
-    .slice(0, 300);
 }
 
 function buildExcludedTitleSet(memory) {
@@ -229,5 +261,6 @@ function tokenize(value) {
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .split(/[^a-z0-9]+/)
-    .filter(Boolean);
+    .filter((token) => token && !TOKEN_STOPWORDS.has(token))
+    .map((token) => TOKEN_ALIASES[token] || token);
 }

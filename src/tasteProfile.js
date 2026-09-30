@@ -1,5 +1,13 @@
 import { ANIME_CATALOG } from "./animeCatalog.js";
-import { animeTitleKeys, normalizeTitleForCompare, uniqueTitles } from "./titleUtils.js";
+import { animeTitleKeys, normalizeTitleForCompare, parseManualTitles, uniqueTitles } from "./titleUtils.js";
+
+// Genre affinity is the mean of (score - user's average) across every list
+// entry tagged with that genre, shrunk toward zero by this many phantom
+// neutral entries so one lucky title can't dominate.
+const GENRE_PRIOR = 3;
+const DROPPED_SIGNAL = -3;
+const UNSCORED_COMPLETED_SIGNAL = 0.5;
+const MIN_AFFINITY_ENTRIES = 5;
 
 const DEFAULT_PROFILE = {
   favoriteGenres: [],
@@ -45,8 +53,12 @@ export function buildTasteProfile({ malList, feedbackHistory = [], previousProfi
     .sort((a, b) => getMalUpdatedTime(b) - getMalUpdatedTime(a))
     .slice(0, 15);
 
+  const manualCatalog = typeof malList === "string"
+    ? parseManualTitles(malList).map((title) => findCatalogAnime({ title }, catalogByTitle)).filter(Boolean)
+    : [];
   const positiveCatalog = [
     ...likedEntries.map((entry) => findCatalogAnime(entry, catalogByTitle)).filter(Boolean),
+    ...manualCatalog,
     ...feedbackHistory
       .filter((entry) => entry.feedback === "good" || entry.state === "pending")
       .map((entry) => findCatalogAnime(entry.recommendation, catalogByTitle))
@@ -65,12 +77,27 @@ export function buildTasteProfile({ malList, feedbackHistory = [], previousProfi
     .join(" ")
     .toLowerCase();
 
+  const genreAffinity = inferGenreAffinity(watchedEntries, averageScore);
+  const favoriteGenres = uniqueTitles([
+    ...genreAffinity.favorites,
+    ...topValues(countValues(positiveCatalog.flatMap((anime) => anime.genres)), 8)
+  ]).slice(0, 8);
+
   return {
-    favoriteGenres: topValues(countValues(positiveCatalog.flatMap((anime) => anime.genres)), 8),
+    favoriteGenres,
     emotionalThemes: topValues(countValues(positiveCatalog.flatMap((anime) => anime.themes)), 10),
     pacingPreference: topValues(countValues(positiveCatalog.map((anime) => anime.pacing)), 1)[0] || previousProfile?.pacingPreference || DEFAULT_PROFILE.pacingPreference,
     darknessTolerance: inferDarknessTolerance(positiveCatalog, negativeCatalog, previousProfile),
-    dislikedTropes: inferDislikedTropes(negativeCatalog, feedbackText, previousProfile),
+    // How many of the user's titles darkness/pacing were inferred from, so
+    // the model can tell a real estimate from a default.
+    estimateBasis: positiveCatalog.length + negativeCatalog.length,
+    dislikedTropes: inferDislikedTropes({
+      negativeCatalog,
+      feedbackText,
+      previousProfile,
+      genreAffinity,
+      favoriteGenres
+    }),
     recentEmotionalShifts: inferRecentEmotionalShifts(recentEntries, catalogByTitle),
     rewatchBehavior: inferRewatchBehavior(watchedEntries, previousProfile),
     scoreTendencies: {
@@ -86,9 +113,10 @@ export function buildTasteProfile({ malList, feedbackHistory = [], previousProfi
 export function summarizeRecentPatterns(malList, feedbackHistory = []) {
   const entries = Array.isArray(malList) ? malList.filter(isWatchedTasteEntry) : [];
   const catalogByTitle = buildCatalogIndex();
-  const recentCatalog = [...entries]
+  const recentEntries = [...entries]
     .sort((a, b) => getMalUpdatedTime(b) - getMalUpdatedTime(a))
-    .slice(0, 12)
+    .slice(0, 12);
+  const recentCatalog = recentEntries
     .map((entry) => findCatalogAnime(entry, catalogByTitle))
     .filter(Boolean);
   const pendingCount = feedbackHistory.filter((entry) => entry.state === "pending").length;
@@ -99,7 +127,10 @@ export function summarizeRecentPatterns(malList, feedbackHistory = []) {
     .filter(Boolean);
 
   return {
-    recentGenres: topValues(countValues(recentCatalog.flatMap((anime) => anime.genres)), 6),
+    recentGenres: uniqueTitles([
+      ...topValues(countValues(recentEntries.flatMap((entry) => entry.genres || [])), 6),
+      ...topValues(countValues(recentCatalog.flatMap((anime) => anime.genres)), 6)
+    ]).slice(0, 6),
     recentThemes: topValues(countValues(recentCatalog.flatMap((anime) => anime.themes)), 8),
     recentPacing: topValues(countValues(recentCatalog.map((anime) => anime.pacing)), 3),
     pendingCount,
@@ -112,8 +143,12 @@ function isWatchedTasteEntry(entry) {
   return status !== "plan_to_watch" && status !== "watching";
 }
 
+// Unrated entries are picks the user hasn't answered about yet - no signal.
 export function compactFeedbackHistory(history = [], limit = 12) {
-  return history.slice(0, limit).map((entry) => ({
+  return history
+    .filter((entry) => entry.state !== "unrated")
+    .slice(0, limit)
+    .map((entry) => ({
     title: entry.recommendation?.title || "",
     feedback: entry.feedback || entry.state || "",
     note: entry.feedback_note || entry.note || "",
@@ -147,20 +182,75 @@ function inferDarknessTolerance(positiveCatalog, negativeCatalog, previousProfil
   return previousProfile?.darknessTolerance ?? DEFAULT_PROFILE.darknessTolerance;
 }
 
-function inferDislikedTropes(negativeCatalog, feedbackText, previousProfile) {
-  const catalogSignals = [
-    ...negativeCatalog.flatMap((anime) => anime.genres || []),
-    ...negativeCatalog.flatMap((anime) => anime.themes || [])
-  ];
+function inferGenreAffinity(entries, averageScore) {
+  const stats = new Map();
+  let signalCount = 0;
+
+  for (const entry of entries) {
+    const signal = entryTasteSignal(entry, averageScore);
+    if (signal === null) continue;
+    signalCount += 1;
+
+    for (const genre of entry.genres || []) {
+      const key = normalizeTitleForCompare(genre);
+      if (!key) continue;
+      const current = stats.get(key) || { label: genre, count: 0, total: 0 };
+      current.count += 1;
+      current.total += signal;
+      stats.set(key, current);
+    }
+  }
+
+  const ranked = [...stats.values()].map((stat) => ({
+    ...stat,
+    affinity: stat.total / (stat.count + GENRE_PRIOR)
+  }));
+
+  return {
+    hasSignal: signalCount >= MIN_AFFINITY_ENTRIES,
+    favorites: ranked
+      .filter((stat) => stat.count >= 2 && stat.affinity > 0)
+      .sort((a, b) => b.affinity - a.affinity || b.count - a.count)
+      .slice(0, 8)
+      .map((stat) => stat.label),
+    disliked: ranked
+      .filter((stat) => stat.count >= 3 && stat.affinity <= -0.75)
+      .sort((a, b) => a.affinity - b.affinity)
+      .slice(0, 4)
+      .map((stat) => stat.label)
+  };
+}
+
+function entryTasteSignal(entry, averageScore) {
+  const status = entry.my_list_status?.status;
+  const score = Number(entry.my_list_status?.score || 0);
+  if (status === "dropped") return DROPPED_SIGNAL;
+  if (score > 0) return score - (averageScore || 7);
+  if (status === "completed") return UNSCORED_COMPLETED_SIGNAL;
+  return null;
+}
+
+function inferDislikedTropes({ negativeCatalog, feedbackText, previousProfile, genreAffinity, favoriteGenres }) {
   const textSignals = TROPE_HINTS
     .filter(([, hints]) => hints.some((hint) => feedbackText.includes(hint)))
     .map(([trope]) => trope);
+  const favoriteKeys = new Set(favoriteGenres.map(normalizeTitleForCompare));
 
-  return uniqueTitles([
-    ...(previousProfile?.dislikedTropes || []),
-    ...topValues(countValues(catalogSignals), 5),
-    ...textSignals
-  ]).slice(0, 8);
+  // With enough scored MAL history, the whole-list genre affinity is far better
+  // grounded than genres borrowed from the few catalog titles the user dropped.
+  const listSignals = genreAffinity.hasSignal
+    ? genreAffinity.disliked
+    : [
+        ...topValues(countValues([
+          ...negativeCatalog.flatMap((anime) => anime.genres || []),
+          ...negativeCatalog.flatMap((anime) => anime.themes || [])
+        ]), 5),
+        ...(previousProfile?.dislikedTropes || [])
+      ];
+
+  return uniqueTitles([...textSignals, ...listSignals])
+    .filter((trope) => !favoriteKeys.has(normalizeTitleForCompare(trope)))
+    .slice(0, 8);
 }
 
 function inferRecentEmotionalShifts(recentEntries, catalogByTitle) {

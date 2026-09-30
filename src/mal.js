@@ -28,7 +28,9 @@ export function isMalAuthError(error) {
   return error instanceof MalAuthError || error?.name === "MalAuthError";
 }
 
-export async function fetchAnimeImage(title, accessToken, aliases = []) {
+// Image search doesn't need the user's token (the API route falls back to the
+// app client ID), and a missing picture must never sink a recommendation.
+export async function fetchAnimeImage(title, aliases = []) {
   if (!title) return "";
 
   const params = new URLSearchParams({ q: title });
@@ -36,20 +38,15 @@ export async function fetchAnimeImage(title, accessToken, aliases = []) {
     params.append("alias", alias);
   }
 
-  const response = await fetch(`/api/anime-image?${params.toString()}`, {
-    headers: accessToken
-      ? {
-          Authorization: `Bearer ${accessToken}`
-        }
-      : {}
-  });
-
-  const payload = await response.json();
-  if (!response.ok) {
+  try {
+    const response = await fetch(`/api/anime-image?${params.toString()}`);
+    if (!response.ok) return "";
+    const payload = await response.json();
+    return payload.image_url || "";
+  } catch (error) {
+    console.warn("[En debug] image lookup failed", { title, error: error.message });
     return "";
   }
-
-  return payload.image_url || "";
 }
 
 function sortByRecent(list) {

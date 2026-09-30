@@ -29,10 +29,12 @@ export function clearOauthSession() {
   localStorage.removeItem(OAUTH_KEY);
 }
 
+// Entries are saved the moment a pick is revealed (state "unrated"), so a pick
+// is never lost just because the user closed the tab before rating it.
 export function loadHistory() {
   const history = readJson(HISTORY_KEY, []);
   return Array.isArray(history)
-    ? history.filter((entry) => entry?.state === "pending" || Boolean(entry?.feedback))
+    ? history.filter((entry) => Boolean(entry?.recommendation?.title))
     : [];
 }
 
@@ -83,7 +85,8 @@ export function loadRecommendationMemoryCache() {
     completed: [],
     rejected: [],
     watchlisted: [],
-    pending: []
+    pending: [],
+    in_progress: []
   });
 }
 
