@@ -1,6 +1,19 @@
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models";
-const MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
+// The 2.5 models are closed to newly created keys. Set GEMINI_MODEL /
+// GEMINI_FALLBACK_MODEL in Vercel to switch models without a code change
+// the next time Google retires one.
+const DEFAULT_MODEL = "gemini-3.8-flash";
+const DEFAULT_FALLBACK_MODEL = "gemini-3.5-flash-lite";
 const REQUEST_TIMEOUT_MS = 25000;
+
+function modelChain() {
+  return [
+    ...new Set([
+      process.env.GEMINI_MODEL || DEFAULT_MODEL,
+      process.env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL
+    ])
+  ];
+}
 
 export class GeminiConfigError extends Error {
   constructor(message) {
@@ -21,7 +34,7 @@ export async function generateJson({ systemPrompt, userPayloadText, responseSche
   }
 
   let lastError;
-  for (const model of MODELS) {
+  for (const model of modelChain()) {
     try {
       return await callGemini({ apiKey, model, systemPrompt, userPayloadText, responseSchema });
     } catch (error) {
@@ -63,8 +76,9 @@ async function callGemini({ apiKey, model, systemPrompt, userPayloadText, respon
             parts: [{ text: userPayloadText }]
           }
         ],
+        // No temperature: Google recommends the default (1.0) for Gemini 3
+        // models and warns that lower values can cause looping.
         generationConfig: {
-          temperature: 0.85,
           responseMimeType: "application/json",
           ...(responseSchema ? { responseSchema } : {})
         }
