@@ -36,6 +36,13 @@ export const MOOD_TAGS = [
   "Josei", "Seinen", "Shoujo", "Shounen", "Kids"
 ];
 
+// Limits are words, not numbers: asked for a number with nothing to go on,
+// the model makes one up ("a long train ride" came back as 12-13 episodes).
+// "any" gives it something true to say. moodReading.js turns these into
+// episode counts and years.
+export const MOOD_LENGTHS = ["any", "film", "tonight", "short", "long"];
+export const MOOD_ERAS = ["any", "1970s", "1980s", "1990s", "2000s", "2010s", "2020s", "older", "recent"];
+
 // A mood can also rule out things it would never ask for.
 export const AVOID_GENRES = [...MOOD_GENRES, "Ecchi"];
 export const AVOID_TAGS = [

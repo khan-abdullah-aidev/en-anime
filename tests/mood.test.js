@@ -25,6 +25,19 @@ const reading = (overrides = {}) => ({
   ...overrides
 });
 
+// What the model sends back (limits as words; see MOOD_LENGTHS).
+const answer = (overrides = {}) => ({
+  reading: "quiet and a little sad",
+  genres: ["Slice of Life", "Drama"],
+  tags: ["Iyashikei"],
+  avoidGenres: [],
+  avoidTags: [],
+  length: "any",
+  era: "any",
+  airing: false,
+  ...overrides
+});
+
 describe("reading tonight's mood", () => {
   it("keeps only names AniList knows and numbers that make sense", () => {
     const parsed = parseMoodReading(JSON.stringify({
@@ -33,8 +46,8 @@ describe("reading tonight's mood", () => {
       tags: ["Swordplay", "Not A Tag"],
       avoidGenres: ["Romance"],
       avoidTags: [],
-      maxEpisodes: -3,
-      yearMin: 1200
+      length: "forever",
+      era: "1200s"
     }));
     assert.deepEqual(parsed.genres, ["Action"]);
     assert.deepEqual(parsed.tags, ["Swordplay"]);
@@ -43,19 +56,30 @@ describe("reading tonight's mood", () => {
     assert.equal(parsed.yearMin, null);
   });
 
-  it("never asks for and rules out the same thing, and drops impossible limits", () => {
-    const parsed = parseMoodReading(JSON.stringify({ reading: "x", genres: ["Horror", "Comedy"], tags: [], avoidGenres: ["Horror"], avoidTags: [], minEpisodes: 24, maxEpisodes: 12 }));
+  it("never asks for and rules out the same thing", () => {
+    const parsed = parseMoodReading(JSON.stringify(answer({ genres: ["Horror", "Comedy"], avoidGenres: ["Horror"] })), { mood: "nothing scary" });
     assert.deepEqual(parsed.genres, ["Comedy"]);
-    assert.equal(parsed.maxEpisodes, null);
-    assert.equal(parsed.minEpisodes, null);
+  });
+
+  it("turns the limit words into episode counts and years", () => {
+    const limits = (length, era, mood) => {
+      const parsed = parseMoodReading(JSON.stringify(answer({ length, era })), { mood });
+      return [parsed.film, parsed.maxEpisodes, parsed.minEpisodes, parsed.yearMin, parsed.yearMax];
+    };
+    const thisYear = new Date().getFullYear();
+    assert.deepEqual(limits("film", "any", "a movie"), [true, null, null, null, null]);
+    assert.deepEqual(limits("tonight", "any", "something I can finish tonight"), [false, 4, null, null, null]);
+    assert.deepEqual(limits("short", "1990s", "a short one from the 90s"), [false, 13, null, 1990, 1999]);
+    assert.deepEqual(limits("long", "recent", "a long new series"), [false, null, 24, thisYear - 3, null]);
+    assert.deepEqual(limits("any", "older", "an old classic"), [false, null, null, null, 2005]);
   });
 
   it("only lets the reading rule things out, or set limits, when the mood says so", () => {
-    const eager = JSON.stringify(reading({ avoidGenres: ["Action"], avoidTags: ["Gore"], maxEpisodes: 13, yearMax: 2005, film: true, airing: true }));
+    const eager = JSON.stringify(answer({ avoidGenres: ["Action"], avoidTags: ["Gore"], length: "short", era: "older", airing: true }));
     const quiet = parseMoodReading(eager, { mood: "rain on a tuesday" });
-    assert.deepEqual([quiet.avoidGenres, quiet.avoidTags, quiet.maxEpisodes, quiet.yearMax, quiet.film, quiet.airing], [[], [], null, null, false, false]);
-    const said = parseMoodReading(eager, { mood: "nothing gory, a short 90s film that's airing" });
-    assert.deepEqual([said.avoidGenres, said.avoidTags, said.maxEpisodes, said.yearMax, said.film, said.airing], [["Action"], ["Gore"], 13, 2005, true, true]);
+    assert.deepEqual([quiet.avoidGenres, quiet.avoidTags, quiet.maxEpisodes, quiet.yearMax, quiet.airing], [[], [], null, null, false]);
+    const said = parseMoodReading(eager, { mood: "nothing gory, something short and old that's airing" });
+    assert.deepEqual([said.avoidGenres, said.avoidTags, said.maxEpisodes, said.yearMax, said.airing], [["Action"], ["Gore"], 13, 2005, true]);
     assert.deepEqual(parseMoodReading(eager, { mood: "rain on a tuesday", passedOver: ["too heavy"] }).avoidTags, ["Gore"], "a pass reason is a reason to steer away");
     assert.equal(parseMoodReading(eager, { mood: "静かなものが見たい" }).maxEpisodes, 13, "other languages are taken as read");
   });
@@ -67,13 +91,13 @@ describe("reading tonight's mood", () => {
 
   it("asks the server once per mood (and per pass reason), and falls back quietly", async () => {
     globalThis.localStorage = memoryStorage();
-    const answer = JSON.stringify(reading());
-    const first = await withFetch(() => json({ content: answer }), () => readMood("rain on a tuesday"));
+    const content = JSON.stringify(answer());
+    const first = await withFetch(() => json({ content }), () => readMood("rain on a tuesday"));
     assert.equal(first.result.reading, "quiet and a little sad");
     assert.deepEqual(first.calls[0].body, { kind: "mood", payload: { mood: "rain on a tuesday" } });
-    const again = await withFetch(() => json({ content: answer }), () => readMood("Rain on a  Tuesday"));
+    const again = await withFetch(() => json({ content }), () => readMood("Rain on a  Tuesday"));
     assert.equal(again.calls.length, 0, "cached");
-    const passed = await withFetch(() => json({ content: answer }), () => readMood("rain on a tuesday", { passedOver: [{ reason: "too heavy" }] }));
+    const passed = await withFetch(() => json({ content }), () => readMood("rain on a tuesday", { passedOver: [{ reason: "too heavy" }] }));
     assert.deepEqual(passed.calls[0].body.payload.passedOver, ["too heavy"]);
     const failed = await withFetch(() => json({ error: "down" }, 502), () => readMood("something new"));
     assert.equal(failed.result, null);
@@ -151,13 +175,14 @@ describe("api/en mood", () => {
     assert.deepEqual(schema.properties.avoidGenres.items.enum, AVOID_GENRES);
     assert.equal(schema.properties.tags.items.enum, undefined);
     assert.ok(!JSON.stringify(schema).includes("nullable"));
+    assert.deepEqual(schema.required.slice(-3), ["length", "era", "airing"], "limits always say something, if only \"any\"");
     assert.ok(MOOD_TAGS.every((tag) => PROMPTS.mood.includes(tag)));
   });
 
   it("goes to the lighter model first, since it's on the way to the pick", async () => {
     const res = { code: 0, body: null, status(code) { this.code = code; return this; }, json(value) { this.body = value; return this; } };
     const { calls } = await withFetch(
-      () => json({ candidates: [{ content: { parts: [{ text: JSON.stringify(reading()) }] } }] }),
+      () => json({ candidates: [{ content: { parts: [{ text: JSON.stringify(answer()) }] } }] }),
       () => handler({ method: "POST", body: { kind: "mood", payload: { mood: "rain on a tuesday" } } }, res)
     );
     assert.equal(res.code, 200);

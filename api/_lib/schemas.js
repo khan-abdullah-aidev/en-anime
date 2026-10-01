@@ -2,7 +2,7 @@
 // client will accept turns "not in candidateList" from a retry into
 // something the model can't produce. The client still validates everything.
 
-import { AVOID_GENRES, MOOD_GENRES } from "../../src/moodVocabulary.js";
+import { AVOID_GENRES, MOOD_ERAS, MOOD_GENRES, MOOD_LENGTHS } from "../../src/moodVocabulary.js";
 
 const STRING = { type: "STRING" };
 const INTEGER = { type: "INTEGER" };
@@ -32,7 +32,7 @@ export function buildResponseSchema(kind, payload) {
 // Genres are held to AniList's names here. The tag list (157 names, twice)
 // made the schema too large for Gemini, which then answered without one, so
 // tags are listed in the prompt instead and the client drops unknown names.
-// Limits are optional rather than nullable, to keep the schema plain.
+// Limits are required words with an "any" (see MOOD_LENGTHS).
 function moodSchema() {
   const genres = (names) => ({ type: "ARRAY", items: { type: "STRING", enum: names } });
   const strings = { type: "ARRAY", items: STRING };
@@ -44,14 +44,11 @@ function moodSchema() {
       tags: strings,
       avoidGenres: genres(AVOID_GENRES),
       avoidTags: strings,
-      film: { type: "BOOLEAN" },
-      maxEpisodes: INTEGER,
-      minEpisodes: INTEGER,
-      airing: { type: "BOOLEAN" },
-      yearMin: INTEGER,
-      yearMax: INTEGER
+      length: { type: "STRING", enum: MOOD_LENGTHS },
+      era: { type: "STRING", enum: MOOD_ERAS },
+      airing: { type: "BOOLEAN" }
     },
-    required: ["reading", "genres", "tags", "avoidGenres", "avoidTags"]
+    required: ["reading", "genres", "tags", "avoidGenres", "avoidTags", "length", "era", "airing"]
   };
 }
 

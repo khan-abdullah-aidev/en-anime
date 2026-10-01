@@ -12,12 +12,9 @@ export const MOOD_READING = {
   tags: ["Iyashikei"],
   avoidGenres: [],
   avoidTags: [],
-  film: null,
-  maxEpisodes: null,
-  minEpisodes: null,
-  airing: null,
-  yearMin: null,
-  yearMax: null
+  length: "any",
+  era: "any",
+  airing: false
 };
 
 export async function stubServices(page, { aniListList = [], moodReading = MOOD_READING } = {}) {

@@ -2,12 +2,25 @@ import { debugLog } from "./debug.js";
 import { requestEn } from "./llmProviders.js";
 import { AVOID_GENRES, AVOID_TAGS, MOOD_GENRES, MOOD_TAGS } from "./moodVocabulary.js";
 
+// What the model's limit words mean, in the limits discovery applies.
+const LENGTHS = { film: { film: true }, tonight: { maxEpisodes: 4 }, short: { maxEpisodes: 13 }, long: { minEpisodes: 24 } };
+function eraYears(era, thisYear = new Date().getFullYear()) {
+  const decade = /^(19|20)(\d)0s$/.exec(era || "");
+  if (decade) {
+    const start = Number(`${decade[1]}${decade[2]}0`);
+    return { yearMin: start, yearMax: start + 9 };
+  }
+  if (era === "older") return { yearMin: null, yearMax: 2005 };
+  if (era === "recent") return { yearMin: thisYear - 3, yearMax: null };
+  return { yearMin: null, yearMax: null };
+}
+
 // Tonight's mood, read by the model (api/_lib/prompts.js MOOD_PROMPT) into
 // AniList genres and tags to search for, what it rules out, any limits it
 // states, and a few words for how it sounds. Anything can fail here (no
 // network, slow model, odd answer): then it's null, and discovery falls
 // back to its word list, so a pick never waits on this.
-const CACHE_KEY = "en.moodReadings.v2"; // v2: readings checked against the mood's own words
+const CACHE_KEY = "en.moodReadings.v3"; // v3: limits come as words (length, era)
 const CACHE_LIMIT = 40;
 const CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const TIMEOUT_MS = 7000;
@@ -61,8 +74,8 @@ export function parseMoodReading(content, { mood = "", passedOver = [] } = {}) {
 
   const known = (values, allowed, limit) =>
     [...new Set((Array.isArray(values) ? values : []).filter((value) => allowed.includes(value)))].slice(0, limit);
-  const count = (value, min, max) => (Number.isInteger(value) && value >= min && value <= max ? value : null);
-  const year = (value) => count(value, 1950, new Date().getFullYear() + 1);
+  const length = LENGTHS[raw.length] || {};
+  const era = eraYears(raw.era);
 
   const reading = {
     reading: typeof raw.reading === "string" ? raw.reading.trim().toLowerCase().replace(/[.!]+$/, "").slice(0, 60) : "",
@@ -70,12 +83,12 @@ export function parseMoodReading(content, { mood = "", passedOver = [] } = {}) {
     tags: known(raw.tags, MOOD_TAGS, 4),
     avoidGenres: known(raw.avoidGenres, AVOID_GENRES, 4),
     avoidTags: known(raw.avoidTags, AVOID_TAGS, 6),
-    film: raw.film === true,
-    maxEpisodes: count(raw.maxEpisodes, 1, 200),
-    minEpisodes: count(raw.minEpisodes, 2, 500),
+    film: Boolean(length.film),
+    maxEpisodes: length.maxEpisodes || null,
+    minEpisodes: length.minEpisodes || null,
     airing: raw.airing === true,
-    yearMin: year(raw.yearMin),
-    yearMax: year(raw.yearMax)
+    yearMin: era.yearMin,
+    yearMax: era.yearMax
   };
   const said = (cue) => !mood || NON_LATIN.test(mood) || CUES[cue].test(mood);
   if (!said("avoid") && !passedOver.length) {
@@ -96,14 +109,6 @@ export function parseMoodReading(content, { mood = "", passedOver = [] } = {}) {
   // What it asks for and what it rules out can't overlap.
   reading.genres = reading.genres.filter((genre) => !reading.avoidGenres.includes(genre));
   reading.tags = reading.tags.filter((tag) => !reading.avoidTags.includes(tag));
-  if (reading.maxEpisodes && reading.minEpisodes && reading.minEpisodes > reading.maxEpisodes) {
-    reading.maxEpisodes = null;
-    reading.minEpisodes = null;
-  }
-  if (reading.yearMin && reading.yearMax && reading.yearMin > reading.yearMax) {
-    reading.yearMin = null;
-    reading.yearMax = null;
-  }
 
   const saysSomething =
     reading.reading || reading.genres.length || reading.tags.length || reading.avoidGenres.length ||
