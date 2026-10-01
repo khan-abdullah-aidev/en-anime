@@ -172,6 +172,43 @@ button:focus-visible {
   width: 100%;
 }
 
+/* ——— Header ——— */
+.chrome-left,
+.chrome-right {
+  align-items: center;
+  display: flex;
+}
+.chrome-left { gap: 20px; }
+.chrome-right { gap: 24px; }
+.wordmark { cursor: pointer; }
+.label-short { display: none; }
+
+/* ——— Log + answers ——— */
+.log-entry-link {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--hairline-strong);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 6px;
+  transition: text-decoration-color 0.3s ease;
+}
+.log-entry-link:hover,
+.log-entry-link:focus-visible { text-decoration-color: var(--bone-3); }
+
+.answer-controls {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin-top: 16px;
+}
+.answer-controls__prompt {
+  font-family: var(--serif);
+  font-size: 14px;
+  font-style: italic;
+}
+.answer-current { color: var(--shu); }
+
 /* ——— Landing ——— */
 .landing-title {
   font-size: 76px;
@@ -408,8 +445,15 @@ button:focus-visible {
   }
 }
 
-/* Phones: keep both ways in above the fold on the landing screen. */
+/* Phones: keep both ways in above the fold on the landing screen, and fit
+   wordmark + back + LOG on one header line. */
 @media (max-width: 520px) {
+  .chrome-left { gap: 14px; }
+  .chrome-right { gap: 16px; }
+  .chrome-step { display: none; }
+  .label-full { display: none; }
+  .label-short { display: inline; }
+
   .app-stage {
     padding-top: 44px;
     padding-bottom: 44px;

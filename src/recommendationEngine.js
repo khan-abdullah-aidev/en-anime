@@ -112,6 +112,16 @@ export function isMemoryExcludedTitle(title, memory) {
   return Boolean(key && buildExcludedTitleSet(memory).has(key));
 }
 
+// Same check, with the excluded set built once - for filtering hundreds of
+// candidate titles at a time.
+export function createExclusionCheck(memory) {
+  const excluded = buildExcludedTitleSet(memory);
+  return (title) => {
+    const key = normalizeTitleForCompare(title);
+    return Boolean(key && excluded.has(key));
+  };
+}
+
 export function buildExcludedTitlesFromMemory(memory) {
   return uniqueTitles([
     ...memory.recommended,

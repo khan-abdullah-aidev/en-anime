@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { askEn, askEnChoose, askEnVerdict } from "./openrouter.js";
 import { isEnConfigError } from "./llmProviders.js";
 import { beginMalOauth, finishMalOauth, refreshMalOauth } from "./oauth.js";
@@ -21,7 +21,6 @@ import {
   updateHistoryEntry
 } from "./storage.js";
 import {
-  buildCandidatePool,
   buildRecommendationMemory,
   buildUnwatchedTitles,
   deterministicRecommendation,
@@ -35,50 +34,119 @@ import {
   summarizeRecentPatterns
 } from "./tasteProfile.js";
 import { buildWatchHistoryDigest, describeQueriedTitle } from "./watchHistory.js";
+import { buildOpenCandidatePool, toModelCandidate } from "./discovery.js";
 import { normalizeTitleForCompare, titleMatchesAnime } from "./titleUtils.js";
 import { resolveAnimeOnAniList } from "./anilist.js";
+import { PARENT, VIEW, parsePath, pathFor } from "./routes.js";
+import { debugLog } from "./debug.js";
 
-const VIEW = {
-  LANDING: "landing",
-  MANUAL: "manual",
-  PENDING: "pending",
-  MOOD: "mood",
-  SHORTLIST: "shortlist",
-  SHORTLIST_MOOD: "shortlist_mood",
-  THINKING: "thinking",
-  REVEAL: "reveal",
-  FEEDBACK: "feedback",
-  HISTORY: "history"
-};
+// Lets the header (wordmark, "← back") reach navigation without threading
+// it through every screen.
+const NavContext = createContext(null);
 
 const MAX_RECOMMENDATION_ATTEMPTS = 3;
 // A big MAL list is several sequential API pages, so reuse it for a while
 // within one visit instead of refetching for every request.
 const MAL_LIST_TTL_MS = 10 * 60 * 1000;
+const MOOD_DRAFT_KEY = "en.moodDraft";
+
+// Works out what a URL (or a browser-history entry) should show right now.
+// Used on first load and on back/forward; in-app navigation calls go().
+function resolveRoute(target, { initial = false, sessionIds = new Set() } = {}) {
+  const hasInput = hasRecommendationInput();
+  const home = () => {
+    if (!hasInput) return { view: VIEW.LANDING };
+    return findReviewEntries(loadHistory(), sessionIds).length ? { view: VIEW.PENDING } : { view: VIEW.MOOD };
+  };
+  const { view, entryId, titles } = target || {};
+
+  // A request can't survive a reload or back/forward; land where it started.
+  if (!view || view === VIEW.THINKING) return home();
+  // Returning visitors skip the landing page, MAL or manual list alike.
+  if (view === VIEW.LANDING) return initial && hasInput ? home() : { view };
+  if (view === VIEW.REVEAL || view === VIEW.FEEDBACK) {
+    return loadHistory().some((entry) => entry.id === entryId) ? { view, entryId } : { view: VIEW.HISTORY };
+  }
+  if (view === VIEW.HISTORY || view === VIEW.MANUAL) return { view };
+  if (!hasInput) return { view: VIEW.LANDING };
+  if (view === VIEW.SHORTLIST_MOOD && !titles?.length) return { view: VIEW.SHORTLIST };
+  if (view === VIEW.PENDING && !findReviewEntries(loadHistory(), sessionIds).length) return { view: VIEW.MOOD };
+  return { view, titles };
+}
+
+function initialRoute() {
+  if (window.location.pathname === "/callback") return { view: VIEW.LANDING };
+  const saved = window.history.state;
+  return resolveRoute(saved?.view ? saved : parsePath(window.location.pathname), { initial: true });
+}
+
+// Pushes or replaces a browser-history entry for a screen and returns its
+// position, which is how "← back" knows whether there's anywhere to go.
+function writeHistory(method, { view, entryId = null, titles }) {
+  const currentIdx = window.history.state?.idx ?? 0;
+  const idx = method === "push" ? currentIdx + 1 : currentIdx;
+  const url = view === VIEW.THINKING ? window.location.pathname : pathFor(view, entryId);
+  const state = { view, entryId, ...(titles ? { titles } : {}), idx };
+  window.history[method === "push" ? "pushState" : "replaceState"](state, "", url);
+  return idx;
+}
 
 export default function App() {
-  const [view, setView] = useState(VIEW.LANDING);
+  const [initial] = useState(initialRoute);
+  const [view, setView] = useState(initial.view);
+  const [revealEntryId, setRevealEntryId] = useState(initial.entryId || null);
+  const [routeIdx, setRouteIdx] = useState(() => window.history.state?.idx ?? 0);
   const [tokens, setTokens] = useState(() => loadTokens());
   const [history, setHistory] = useState(() => loadHistory());
-  const [mood, setMood] = useState("");
+  const [mood, setMood] = useState(() => readSession(MOOD_DRAFT_KEY));
   const [shortlist, setShortlist] = useState("");
-  const [shortlistTitles, setShortlistTitles] = useState([]);
+  const [shortlistTitles, setShortlistTitles] = useState(initial.titles || []);
   const [chooseMood, setChooseMood] = useState("");
   const [manualList, setManualList] = useState(() => loadManualList());
-  const [mode, setMode] = useState(() => (loadManualList() ? "manual" : "mal"));
+  const [mode, setMode] = useState(() => (loadTokens()?.access_token ? "mal" : loadManualList() ? "manual" : "mal"));
   const [malList, setMalList] = useState([]);
-  const [recommendation, setRecommendation] = useState(null);
-  const [currentDraftEntry, setCurrentDraftEntry] = useState(null);
   const [pendingReviewIds, setPendingReviewIds] = useState([]);
   const [status, setStatus] = useState("");
+  const [thinkingMood, setThinkingMood] = useState("");
   const [error, setError] = useState("");
   const handledCallback = useRef(false);
   // Picks revealed in this visit. "Did you watch it?" is only asked about
   // picks from earlier visits, never one the user was just handed.
   const sessionEntryIds = useRef(new Set());
   const malListCache = useRef(null);
-  // The mood behind the current pick, so "I've already seen it" can ask again.
-  const lastMood = useRef("");
+  // Bumped whenever the user leaves a request (back, LOG, ...). A late answer
+  // from an abandoned request is dropped instead of popping up a pick.
+  const activeRequest = useRef(0);
+  // Set just before stepping back off a failed request so its error survives.
+  const keepErrorOnPop = useRef(false);
+
+  const revealEntry = history.find((entry) => entry.id === revealEntryId) || null;
+
+  // Give the first screen its proper URL and history entry.
+  useEffect(() => {
+    if (window.location.pathname === "/callback") return;
+    writeHistory("replace", initial);
+  }, []);
+
+  useEffect(() => {
+    function onPopState(event) {
+      activeRequest.current += 1;
+      const target = event.state?.view ? event.state : parsePath(window.location.pathname);
+      const route = resolveRoute(target, { sessionIds: sessionEntryIds.current });
+      if (!keepErrorOnPop.current) setError("");
+      keepErrorOnPop.current = false;
+      if (route.view !== target.view || (route.entryId || null) !== (target.entryId || null)) {
+        writeHistory("replace", route);
+      }
+      showRoute(route, window.history.state?.idx ?? 0);
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  useEffect(() => {
+    writeSession(MOOD_DRAFT_KEY, mood);
+  }, [mood]);
 
   useEffect(() => {
     if (window.location.pathname !== "/callback" || handledCallback.current) return;
@@ -89,22 +157,55 @@ export default function App() {
       .then((nextTokens) => {
         setTokens(nextTokens);
         setMode("mal");
-        goToMoodOrPending(loadHistory());
         setStatus("");
+        goHome({ replace: true });
       })
       .catch((oauthError) => {
-        setError(oauthError.message);
         setStatus("");
-        setView(VIEW.LANDING);
+        go(VIEW.LANDING, { replace: true });
+        setError(oauthError.message);
       });
   }, []);
 
-  useEffect(() => {
-    if (tokens?.access_token && view === VIEW.LANDING) {
-      setMode("mal");
-      goToMoodOrPending(history);
+  // In-app navigation: one browser-history entry per screen.
+  function go(nextView, { replace = false, entryId = null, titles } = {}) {
+    setError("");
+    if (nextView !== VIEW.THINKING) activeRequest.current += 1;
+    const route = { view: nextView, entryId, titles };
+    showRoute(route, writeHistory(replace ? "replace" : "push", route));
+  }
+
+  function showRoute({ view: nextView, entryId, titles }, idx) {
+    if (entryId) setRevealEntryId(entryId);
+    if (titles) setShortlistTitles(titles);
+    setRouteIdx(idx);
+    setView(nextView);
+  }
+
+  // Home is tonight's mood question, after any "did you watch it?" questions
+  // about earlier picks; the landing page until En has a list to read.
+  function goHome(options) {
+    if (!hasRecommendationInput()) {
+      go(VIEW.LANDING, options);
+      return;
     }
-  }, [tokens, view]);
+
+    const pendingIds = findReviewEntries(loadHistory(), sessionEntryIds.current).map((entry) => entry.id);
+    setPendingReviewIds(pendingIds);
+    go(pendingIds.length ? VIEW.PENDING : VIEW.MOOD, options);
+  }
+
+  // "← back" follows the browser's history when there is some in this tab,
+  // otherwise goes up a level (e.g. a pick opened in a new tab -> the log).
+  function goBack() {
+    if ((window.history.state?.idx ?? 0) > 0) {
+      window.history.back();
+      return;
+    }
+    const parent = PARENT[view];
+    if (parent === VIEW.MOOD) goHome({ replace: true });
+    else if (parent) go(parent, { replace: true, entryId: revealEntryId });
+  }
 
   async function handleConnect() {
     setError("");
@@ -116,9 +217,8 @@ export default function App() {
   }
 
   function handleManualStart() {
-    setError("");
     setMode("manual");
-    setView(VIEW.MANUAL);
+    go(VIEW.MANUAL);
   }
 
   function handleManualSubmit(value) {
@@ -126,29 +226,25 @@ export default function App() {
     setManualList(nextValue);
     saveManualList(nextValue);
     setMode("manual");
-    goToMoodOrPending(history);
-  }
-
-  function goToMoodOrPending(nextHistory = history) {
-    if (!hasRecommendationInput()) {
-      setView(VIEW.LANDING);
-      return;
-    }
-
-    const pendingIds = findReviewEntries(nextHistory, sessionEntryIds.current).map((entry) => entry.id);
-    setPendingReviewIds(pendingIds);
-    setView(pendingIds.length ? VIEW.PENDING : VIEW.MOOD);
+    goHome();
   }
 
   function canAskEn() {
     return hasRecommendationInput() && (mode === "manual" || Boolean(tokens?.access_token));
   }
 
-  function beginThinking() {
-    setError("");
-    setRecommendation(null);
+  // Returns an id for the request; anything it does after an await checks
+  // isCurrent(id) first, because the user may have navigated away meanwhile.
+  function beginThinking(moodText, { replace = false } = {}) {
     setStatus(mode === "manual" ? "Reading what you told En" : "Reading your history");
-    setView(VIEW.THINKING);
+    setThinkingMood(moodText || "");
+    go(VIEW.THINKING, { replace });
+    activeRequest.current += 1;
+    return activeRequest.current;
+  }
+
+  function isCurrent(requestId) {
+    return requestId === activeRequest.current;
   }
 
   // Everything En knows about the user, gathered once per request. The log is
@@ -174,9 +270,9 @@ export default function App() {
     saveRecommendationMemoryCache(memory);
 
     if (Array.isArray(list)) {
-      console.log("[En debug] MAL list item count", list.length);
-      console.log("[En debug] MAL status counts", countStatuses(list));
-      console.log("[En debug] persistent memory counts", countMemory(memory));
+      debugLog("[En debug] MAL list item count", list.length);
+      debugLog("[En debug] MAL status counts", countStatuses(list));
+      debugLog("[En debug] persistent memory counts", countMemory(memory));
     }
 
     return {
@@ -192,6 +288,21 @@ export default function App() {
     };
   }
 
+  // Candidates from all of AniList (see discovery.js), or the curated
+  // catalog if AniList can't be reached.
+  async function findCandidates({ mood, list, signals, memory }) {
+    const { candidates, source } = await buildOpenCandidatePool({
+      mood,
+      list,
+      history: loadHistory(),
+      tasteProfile: signals.tasteProfile,
+      recentPatterns: signals.recentPatterns,
+      memory
+    });
+    debugLog("[En debug] candidate pool", { source, count: candidates.length });
+    return candidates;
+  }
+
   async function describeQueriedTitles(titles, list) {
     const resolved = await Promise.all(titles.map((title) => resolveAnimeOnAniList(title)));
     return titles.map((asked, index) =>
@@ -201,7 +312,9 @@ export default function App() {
 
   // The pick is saved to the log the moment it's shown, so closing the tab
   // before rating it no longer loses the entry (while its title stays banned).
-  function revealPick(pick, entryFields) {
+  // A pick for a request the user already walked away from is dropped unseen.
+  function revealPick(requestId, pick, entryFields) {
+    if (!isCurrent(requestId)) return;
     recordRecommendedAnime(pick, "recommended");
     const entry = {
       id: crypto.randomUUID(),
@@ -214,54 +327,57 @@ export default function App() {
     };
     sessionEntryIds.current.add(entry.id);
     setHistory(appendHistory(entry));
-    setRecommendation(pick);
-    setCurrentDraftEntry(entry);
     setStatus("");
-    setView(VIEW.REVEAL);
+    go(VIEW.REVEAL, { replace: true, entryId: entry.id });
   }
 
-  function handleRequestError(requestError, fallbackView) {
+  function handleRequestError(requestId, requestError) {
+    if (!isCurrent(requestId)) return;
+    setStatus("");
+
     if (isMalAuthError(requestError)) {
       clearExpiredMalSession();
+      go(VIEW.LANDING, { replace: true });
       setError("Your MyAnimeList session expired. Please connect again.");
-      setView(VIEW.LANDING);
-    } else {
-      setError(requestError.message);
-      setView(fallbackView);
-    }
-    setStatus("");
-  }
-
-  async function handleConsider(nextMood) {
-    if (!canAskEn()) {
-      setView(VIEW.LANDING);
       return;
     }
 
-    lastMood.current = nextMood;
-    beginThinking();
+    // Step back off the thinking screen to wherever the request started,
+    // and keep the error showing there.
+    if (window.history.state?.view === VIEW.THINKING && (window.history.state?.idx ?? 0) > 0) {
+      setError(requestError.message);
+      keepErrorOnPop.current = true;
+      window.history.back();
+    } else {
+      goHome({ replace: true });
+      setError(requestError.message);
+    }
+  }
+
+  async function handleConsider(nextMood, { replace = false } = {}) {
+    if (!canAskEn()) {
+      go(VIEW.LANDING, { replace: true });
+      return;
+    }
+
+    const requestId = beginThinking(nextMood, { replace });
+    const say = (text) => isCurrent(requestId) && setStatus(text);
     try {
-      const { signals, memory, unwatchedTitles } = await loadEnContext();
-      setStatus("Listening to tonight");
-      const candidateList = buildCandidatePool({
-        mood: nextMood,
-        tasteProfile: signals.tasteProfile,
-        recentPatterns: signals.recentPatterns,
-        memory
-      });
-      console.log("[En debug] candidate count", candidateList.length);
+      const { list, signals, memory, unwatchedTitles } = await loadEnContext();
+      say("Looking through everything you haven't seen");
+      const candidateList = await findCandidates({ mood: nextMood, list, signals, memory });
+      say("Listening to tonight");
 
       const rec = await askForAllowedRecommendation({ mood: nextMood, signals, candidateList, memory, unwatchedTitles });
       const pick = await withImage(rec, [rec.title_jp]);
-      revealPick(pick, { mood: nextMood || "Surprise me" });
+      revealPick(requestId, pick, { mood: nextMood || "Surprise me", request_mood: nextMood });
     } catch (considerError) {
-      handleRequestError(considerError, VIEW.MOOD);
+      handleRequestError(requestId, considerError);
     }
   }
 
   function handleShortlistStart() {
-    setError("");
-    setView(VIEW.SHORTLIST);
+    go(VIEW.SHORTLIST);
   }
 
   function handleShortlistSubmit(rawText) {
@@ -271,10 +387,8 @@ export default function App() {
     const titles = splitShortlist(text);
     if (!titles.length) return;
 
-    setError("");
-    setShortlistTitles(titles);
     setChooseMood("");
-    setView(VIEW.SHORTLIST_MOOD);
+    go(VIEW.SHORTLIST_MOOD, { titles });
   }
 
   function handleShortlistDecide(titles, moodText) {
@@ -287,14 +401,15 @@ export default function App() {
 
   async function handleChoose(titles, moodText) {
     if (!titles.length || !canAskEn()) {
-      setView(VIEW.LANDING);
+      go(VIEW.LANDING, { replace: true });
       return;
     }
 
-    beginThinking();
+    const requestId = beginThinking(moodText);
+    const say = (text) => isCurrent(requestId) && setStatus(text);
     try {
       const { list, signals } = await loadEnContext();
-      setStatus("Weighing them against each other");
+      say("Weighing them against each other");
       const queriedTitleHistory = await describeQueriedTitles(titles, list);
 
       const choice = await askForAllowedChoice({
@@ -317,36 +432,34 @@ export default function App() {
         [choice.title_jp]
       );
 
-      revealPick(pick, {
+      revealPick(requestId, pick, {
         mood: moodText || `choosing between ${titles.join(", ")}`,
         mode: "choose",
         queried_title: titles.join(" vs "),
         verdict: "yes"
       });
     } catch (chooseError) {
-      handleRequestError(chooseError, VIEW.SHORTLIST_MOOD);
+      handleRequestError(requestId, chooseError);
     }
   }
 
   async function handleVerdict(rawText, moodText = "") {
     const text = rawText.trim();
     if (!text || !canAskEn()) {
-      setView(VIEW.LANDING);
+      go(VIEW.LANDING, { replace: true });
       return;
     }
 
-    beginThinking();
+    const requestId = beginThinking(moodText);
+    const say = (status) => isCurrent(requestId) && setStatus(status);
     try {
       const { list, memory, signals } = await loadEnContext();
-      setStatus("Weighing it against your history");
+      say("Weighing it against your history");
       const queriedTitles = [text];
-      const queriedTitleHistory = await describeQueriedTitles(queriedTitles, list);
-      const candidateList = buildCandidatePool({
-        mood: moodText,
-        tasteProfile: signals.tasteProfile,
-        recentPatterns: signals.recentPatterns,
-        memory
-      });
+      const [queriedTitleHistory, candidateList] = await Promise.all([
+        describeQueriedTitles(queriedTitles, list),
+        findCandidates({ mood: moodText, list, signals, memory })
+      ]);
 
       const verdict = await askForAllowedVerdict({
         queriedTitles,
@@ -358,20 +471,23 @@ export default function App() {
       });
 
       // A "yes" must show the title the user actually asked about, whatever
-      // canonical name the model gave it.
+      // canonical name the model gave it. A "no" alternative from the open
+      // pool already carries AniList metadata and a cover.
       const resolvedMeta = verdict.verdict === "yes"
         ? await resolveAnimeMetadata(text, verdict.title)
-        : await resolveAnimeMetadata(verdict.title, verdict.title_jp);
+        : verdict.anilistId
+          ? null
+          : await resolveAnimeMetadata(verdict.title, verdict.title_jp);
       const pick = await withImage(applyResolvedMeta(verdict, resolvedMeta), [verdict.title_jp]);
 
-      revealPick(pick, {
+      revealPick(requestId, pick, {
         mood: moodText || `asked about ${verdict.queried_title}`,
         mode: "verdict",
         queried_title: verdict.queried_title,
         verdict: verdict.verdict
       });
     } catch (verdictError) {
-      handleRequestError(verdictError, VIEW.SHORTLIST_MOOD);
+      handleRequestError(requestId, verdictError);
     }
   }
 
@@ -412,12 +528,10 @@ export default function App() {
     setMode(manualList.trim() ? "manual" : "mal");
     setMalList([]);
     malListCache.current = null;
-    setRecommendation(null);
-    setCurrentDraftEntry(null);
   }
 
-  // Applies a "how was it?" answer to a logged pick, from the return-visit
-  // question or straight from the log.
+  // Applies a "how was it?" answer to a logged pick: from the return-visit
+  // question, the log, or a reopened pick.
   function answerEntry(entry, answer, { note = "", seenBefore = false } = {}) {
     let patch;
     if (answer === "later") {
@@ -448,19 +562,18 @@ export default function App() {
   }
 
   function handleSaveForLater() {
-    if (currentDraftEntry) answerEntry(currentDraftEntry, "later");
+    if (revealEntry) answerEntry(revealEntry, "later");
   }
 
   // "I've already seen it": keep how it landed as a taste signal, then ask
-  // again with the same mood (the title is already banned from the pool).
+  // again with the mood that produced this pick (the title is already banned).
   function handleSeenFeedback(feedback, feedbackNote = "") {
-    if (!currentDraftEntry) return;
-    answerEntry(currentDraftEntry, feedback, { note: feedbackNote, seenBefore: true });
-    setCurrentDraftEntry(null);
-    handleConsider(lastMood.current);
+    if (!revealEntry) return;
+    answerEntry(revealEntry, feedback, { note: feedbackNote, seenBefore: true });
+    handleConsider(revealEntry.request_mood ?? "", { replace: true });
   }
 
-  function handleAnswerFromLog(id, answer) {
+  function handleAnswer(id, answer) {
     const entry = history.find((item) => item.id === id);
     if (entry) answerEntry(entry, answer);
   }
@@ -472,19 +585,21 @@ export default function App() {
     const pending = findCurrentPending(history, reviewIds, sessionEntryIds.current);
     if (!pending) {
       setPendingReviewIds([]);
-      setView(VIEW.MOOD);
+      go(VIEW.MOOD, { replace: true });
       return;
     }
 
     const remainingPendingIds = reviewIds.filter((id) => id !== pending.id);
 
+    // Answered questions are replaced rather than stacked, so "back" from the
+    // mood screen doesn't walk back through them.
     if (answer === "not-yet") {
       // An unanswered pick they still mean to watch becomes a saved one.
       if (pending.state === "unrated") {
         answerEntry(pending, "later");
       }
       setPendingReviewIds(remainingPendingIds);
-      setView(remainingPendingIds.length ? VIEW.PENDING : VIEW.MOOD);
+      go(remainingPendingIds.length ? VIEW.PENDING : VIEW.MOOD, { replace: true });
       return;
     }
 
@@ -493,7 +608,7 @@ export default function App() {
       nextHistory.some((entry) => entry.id === id && isAwaitingAnswer(entry))
     );
     setPendingReviewIds(nextPendingIds);
-    setView(nextPendingIds.length ? VIEW.PENDING : VIEW.MOOD);
+    go(nextPendingIds.length ? VIEW.PENDING : VIEW.MOOD, { replace: true });
   }
 
   function handleDeleteHistoryEntry(id) {
@@ -510,8 +625,6 @@ export default function App() {
     const nextHistory = clearRecommendationLog();
     setHistory(nextHistory);
     setPendingReviewIds([]);
-    setRecommendation(null);
-    setCurrentDraftEntry(null);
   }
 
   function handleDisconnect() {
@@ -523,121 +636,121 @@ export default function App() {
     setTokens(null);
     setMalList([]);
     malListCache.current = null;
-    setRecommendation(null);
-    setCurrentDraftEntry(null);
-    setError("");
-    setView(VIEW.LANDING);
-  }
-
-  // Leaving a screen dismisses whatever error it raised.
-  function navigateTo(nextView) {
-    setError("");
-    setView(nextView);
+    go(VIEW.LANDING);
   }
 
   const nav = {
-    goto: navigateTo,
-    log: () => navigateTo(VIEW.HISTORY),
-    newRecommendation: () => {
-      setError("");
-      goToMoodOrPending(history);
+    back: goBack,
+    canGoBack: routeIdx > 0 || Boolean(PARENT[view]),
+    home: () => {
+      if (view !== VIEW.MOOD) goHome();
     },
+    goto: (nextView) => go(nextView),
+    log: () => go(VIEW.HISTORY),
+    newRecommendation: () => goHome(),
     connect: handleConnect,
     manualStart: handleManualStart,
-    editManualList: () => navigateTo(VIEW.MANUAL),
+    editManualList: () => go(VIEW.MANUAL),
     manualSubmit: handleManualSubmit,
     consider: handleConsider,
     shortlistStart: handleShortlistStart,
     shortlistSubmit: handleShortlistSubmit,
     shortlistDecide: handleShortlistDecide,
     saveForLater: handleSaveForLater,
-    seenIt: () => navigateTo(VIEW.FEEDBACK),
+    seenIt: () => revealEntry && go(VIEW.FEEDBACK, { entryId: revealEntry.id }),
     seenFeedback: handleSeenFeedback,
     pendingAnswer: handlePendingAnswer,
-    answerFromLog: handleAnswerFromLog,
+    answer: handleAnswer,
+    openPick: (id) => go(VIEW.REVEAL, { entryId: id }),
     deleteHistoryEntry: handleDeleteHistoryEntry,
     clearHistory: handleClearHistory,
     disconnect: handleDisconnect
   };
 
+  // A pick handed over in this visit and not yet answered gets the "watch it
+  // tonight" actions; a reopened older pick shows how it went instead.
+  const isNewPick = Boolean(revealEntry) && sessionEntryIds.current.has(revealEntry.id) && revealEntry.state === "unrated";
   // "I've already seen it" only makes sense when En chose the title; in
   // verdict/choose mode the user named it themselves.
-  const canMarkSeen = Boolean(currentDraftEntry) && !currentDraftEntry.mode;
+  const canMarkSeen = isNewPick && !revealEntry.mode;
 
   return (
-    <div style={{ minHeight: "100vh", position: "relative" }}>
-      {error ? <ErrorRibbon message={error} onDismiss={() => setError("")} /> : null}
-      {view === VIEW.LANDING && <ScreenLanding nav={nav} status={status} />}
-      {view === VIEW.MANUAL && (
-        <ScreenManual
-          onLog={nav.log}
-          onSubmit={handleManualSubmit}
-          manualList={manualList}
-          setManualList={setManualList}
-        />
-      )}
-      {view === VIEW.PENDING && (
-        <ScreenPending
-          nav={nav}
-          pending={findCurrentPending(history, pendingReviewIds, sessionEntryIds.current)}
-        />
-      )}
-      {view === VIEW.MOOD && (
-        <ScreenMood
-          onLog={nav.log}
-          onConsider={() => handleConsider(mood)}
-          onSurprise={() => handleConsider("")}
-          onShortlist={nav.shortlistStart}
-          mood={mood}
-          setMood={setMood}
-        />
-      )}
-      {view === VIEW.SHORTLIST && (
-        <ScreenShortlist
-          onLog={nav.log}
-          onSubmit={nav.shortlistSubmit}
-          shortlist={shortlist}
-          setShortlist={setShortlist}
-        />
-      )}
-      {view === VIEW.SHORTLIST_MOOD && (
-        <ScreenShortlistMood
-          onLog={nav.log}
-          titles={shortlistTitles}
-          mood={chooseMood}
-          setMood={setChooseMood}
-          onSubmit={() => nav.shortlistDecide(shortlistTitles, chooseMood)}
-          onSkip={() => nav.shortlistDecide(shortlistTitles, "")}
-        />
-      )}
-      {view === VIEW.THINKING && (
-        <ScreenThinking
-          onLog={nav.log}
-          status={status}
-          mood={mood || shortlist || chooseMood || shortlistTitles.join(", ")}
-          watchedCount={mode === "manual" ? manualList : malList.length}
-          mode={mode}
-        />
-      )}
-      {view === VIEW.REVEAL && recommendation && (
-        <ScreenReveal
-          key={currentDraftEntry?.id}
-          nav={nav}
-          pick={recommendation}
-          canMarkSeen={canMarkSeen}
-        />
-      )}
-      {view === VIEW.FEEDBACK && recommendation && (
-        <ScreenFeedback nav={nav} pick={recommendation} />
-      )}
-      {view === VIEW.HISTORY && (
-        <ScreenHistory
-          nav={nav}
-          history={history}
-          source={mode === "manual" || !tokens?.access_token ? "manual" : "mal"}
-        />
-      )}
-    </div>
+    <NavContext.Provider value={nav}>
+      <div style={{ minHeight: "100vh", position: "relative" }}>
+        {error ? <ErrorRibbon message={error} onDismiss={() => setError("")} /> : null}
+        {view === VIEW.LANDING && <ScreenLanding nav={nav} status={status} />}
+        {view === VIEW.MANUAL && (
+          <ScreenManual
+            onLog={nav.log}
+            onSubmit={handleManualSubmit}
+            manualList={manualList}
+            setManualList={setManualList}
+          />
+        )}
+        {view === VIEW.PENDING && (
+          <ScreenPending
+            nav={nav}
+            pending={findCurrentPending(history, pendingReviewIds, sessionEntryIds.current)}
+          />
+        )}
+        {view === VIEW.MOOD && (
+          <ScreenMood
+            onLog={nav.log}
+            onConsider={() => handleConsider(mood)}
+            onSurprise={() => handleConsider("")}
+            onShortlist={nav.shortlistStart}
+            mood={mood}
+            setMood={setMood}
+          />
+        )}
+        {view === VIEW.SHORTLIST && (
+          <ScreenShortlist
+            onLog={nav.log}
+            onSubmit={nav.shortlistSubmit}
+            shortlist={shortlist}
+            setShortlist={setShortlist}
+          />
+        )}
+        {view === VIEW.SHORTLIST_MOOD && (
+          <ScreenShortlistMood
+            onLog={nav.log}
+            titles={shortlistTitles}
+            mood={chooseMood}
+            setMood={setChooseMood}
+            onSubmit={() => nav.shortlistDecide(shortlistTitles, chooseMood)}
+            onSkip={() => nav.shortlistDecide(shortlistTitles, "")}
+          />
+        )}
+        {view === VIEW.THINKING && (
+          <ScreenThinking
+            onLog={nav.log}
+            status={status}
+            mood={thinkingMood}
+            watchedCount={mode === "manual" ? 0 : malList.length}
+            mode={mode}
+          />
+        )}
+        {view === VIEW.REVEAL && revealEntry && (
+          <ScreenReveal
+            key={revealEntry.id}
+            nav={nav}
+            entry={revealEntry}
+            isNewPick={isNewPick}
+            canMarkSeen={canMarkSeen}
+          />
+        )}
+        {view === VIEW.FEEDBACK && revealEntry && (
+          <ScreenFeedback nav={nav} pick={revealEntry.recommendation} />
+        )}
+        {view === VIEW.HISTORY && (
+          <ScreenHistory
+            nav={nav}
+            history={history}
+            source={mode === "manual" || !tokens?.access_token ? "manual" : "mal"}
+          />
+        )}
+      </div>
+    </NavContext.Provider>
   );
 }
 
@@ -671,13 +784,34 @@ function ErrorRibbon({ message, onDismiss }) {
   );
 }
 
+// The wordmark doubles as the home link.
 function Wordmark({ subtle }) {
+  const nav = useContext(NavContext);
   return (
-    <div className="wordmark" style={{ opacity: subtle ? 0.85 : 1 }}>
+    <button
+      className="wordmark"
+      onClick={nav?.home}
+      aria-label="En, home"
+      style={{ opacity: subtle ? 0.85 : 1 }}
+    >
       <span className="kanji">縁</span>
       <span style={{ fontStyle: "italic", fontSize: 20, letterSpacing: "0.04em" }}>
         En
       </span>
+    </button>
+  );
+}
+
+function ChromeLeft() {
+  const nav = useContext(NavContext);
+  return (
+    <div className="chrome-left">
+      <Wordmark />
+      {nav?.canGoBack && (
+        <button className="btn-quiet" onClick={nav.back}>
+          ← back
+        </button>
+      )}
     </div>
   );
 }
@@ -685,10 +819,10 @@ function Wordmark({ subtle }) {
 function Chrome({ step, total, right, onLog }) {
   return (
     <div className="app-chrome">
-      <Wordmark />
-      <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
+      <ChromeLeft />
+      <div className="chrome-right">
         {step != null && (
-          <span className="meta" style={{ letterSpacing: "0.18em" }}>
+          <span className="meta chrome-step" style={{ letterSpacing: "0.18em" }}>
             {String(step).padStart(2, "0")}{" "}
             <span style={{ opacity: 0.5 }}>
               / {String(total).padStart(2, "0")}
@@ -1215,15 +1349,16 @@ function ScreenThinking({ onLog, status, mood, watchedCount, mode }) {
   );
 }
 
-function ScreenReveal({ nav, pick, canMarkSeen }) {
+function ScreenReveal({ nav, entry, isNewPick, canMarkSeen }) {
+  const pick = entry.recommendation;
   const [settled, setSettled] = useState("");
 
   return (
     <div className="app-frame reveal-a-frame">
       <div className="reveal-a-top">
-        <Wordmark />
-        <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
-          <span className="meta" style={{ letterSpacing: "0.2em" }}>03 / 03</span>
+        <ChromeLeft />
+        <div className="chrome-right">
+          {isNewPick && <span className="meta chrome-step" style={{ letterSpacing: "0.2em" }}>03 / 03</span>}
           <button className="btn-quiet" onClick={nav.log}>
             LOG
           </button>
@@ -1235,7 +1370,7 @@ function ScreenReveal({ nav, pick, canMarkSeen }) {
           <div
             className="reveal-scroll__vertical jp ink-bloom delay-1"
           >
-            {pick.title_jp} ・ {formatJapaneseDate(new Date())}
+            {pick.title_jp} ・ {formatJapaneseDate(new Date(entry.date))}
           </div>
 
           <div className="reveal-scroll__center ink-bloom delay-2">
@@ -1260,7 +1395,9 @@ function ScreenReveal({ nav, pick, canMarkSeen }) {
                   ? `・ yes — ${pick.queried_title}`
                   : pick.verdict === "no"
                     ? `・ not ${pick.queried_title} — this instead`
-                    : "・ for you, tonight"}
+                    : isNewPick
+                      ? "・ for you, tonight"
+                      : "・ chosen for you"}
             </div>
             <h1
               className="serif-display reveal-scroll__title"
@@ -1285,7 +1422,9 @@ function ScreenReveal({ nav, pick, canMarkSeen }) {
 
             {/* The pick is already in the log; these only say what happens next. */}
             <div style={{ marginTop: 36 }}>
-              {settled ? (
+              {!settled && !isNewPick ? (
+                <PastPickAnswer entry={entry} onAnswer={nav.answer} />
+              ) : settled ? (
                 <p
                   className="fade-in"
                   role="status"
@@ -1421,6 +1560,71 @@ function ScreenFeedback({ nav, pick }) {
   );
 }
 
+const ANSWERS = ["good", "meh", "pass"];
+
+function currentAnswer(entry) {
+  return entry.state === "skipped" ? "pass" : entry.feedback || "";
+}
+
+function AnswerControls({ entry, onAnswer, prompt }) {
+  const current = currentAnswer(entry);
+  return (
+    <div className="answer-controls">
+      <span className="meta answer-controls__prompt">{prompt}</span>
+      {ANSWERS.map((answer) => (
+        <button
+          key={answer}
+          className={current === answer ? "btn-quiet answer-current" : "btn-quiet"}
+          aria-pressed={current === answer}
+          onClick={() => onAnswer(entry.id, answer)}
+        >
+          {answer}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// A pick reopened from the log: how it went, and a way to change that.
+function PastPickAnswer({ entry, onAnswer }) {
+  const [changing, setChanging] = useState(false);
+  const summary =
+    entry.state === "pending"
+      ? "Saved for later."
+      : entry.state === "unrated"
+        ? "Not rated yet."
+        : entry.state === "skipped"
+          ? "You passed on it."
+          : entry.feedback === "good"
+            ? "You said it was good."
+            : "You said meh.";
+
+  return (
+    <div>
+      <p className="meta" style={{ margin: 0, fontFamily: "var(--serif)", fontStyle: "italic", fontSize: 15 }}>
+        {summary}
+        {entry.state === "rated" && entry.note ? ` "${entry.note}"` : ""}
+      </p>
+      {isAwaitingAnswer(entry) ? (
+        <AnswerControls entry={entry} onAnswer={onAnswer} prompt="how was it?" />
+      ) : changing ? (
+        <AnswerControls
+          entry={entry}
+          onAnswer={(id, answer) => {
+            onAnswer(id, answer);
+            setChanging(false);
+          }}
+          prompt="change it:"
+        />
+      ) : (
+        <button className="btn-quiet" onClick={() => setChanging(true)} style={{ marginTop: 10 }}>
+          change rating
+        </button>
+      )}
+    </div>
+  );
+}
+
 function ScreenHistory({ nav, history, source }) {
   const [editing, setEditing] = useState(false);
 
@@ -1429,7 +1633,8 @@ function ScreenHistory({ nav, history, source }) {
       <Chrome
         right={
           <button className="btn-quiet" onClick={nav.newRecommendation}>
-            new recommendation →
+            <span className="label-full">new recommendation</span>
+            <span className="label-short">new</span> →
           </button>
         }
         onLog={nav.log}
@@ -1571,7 +1776,17 @@ function ScreenHistory({ nav, history, source }) {
                     className="serif-display"
                     style={{ fontSize: 28, margin: 0, fontWeight: 300, fontStyle: "italic" }}
                   >
-                    {entry.recommendation.title}
+                    <a
+                      href={pathFor(VIEW.REVEAL, entry.id)}
+                      className="log-entry-link"
+                      onClick={(event) => {
+                        if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+                        event.preventDefault();
+                        nav.openPick(entry.id);
+                      }}
+                    >
+                      {entry.recommendation.title}
+                    </a>
                   </h3>
                   <p
                     style={{
@@ -1626,24 +1841,11 @@ function ScreenHistory({ nav, history, source }) {
                       {entry.note}
                     </p>
                   )}
-                  {isAwaitingAnswer(entry) && (
-                    <div
-                      style={{ marginTop: 16, display: "flex", gap: 18, alignItems: "baseline", flexWrap: "wrap" }}
-                    >
-                      <span className="meta" style={{ fontStyle: "italic", fontFamily: "var(--serif)", fontSize: 14 }}>
-                        how was it?
-                      </span>
-                      <button className="btn-quiet" onClick={() => nav.answerFromLog(entry.id, "good")}>
-                        good
-                      </button>
-                      <button className="btn-quiet" onClick={() => nav.answerFromLog(entry.id, "meh")}>
-                        meh
-                      </button>
-                      <button className="btn-quiet" onClick={() => nav.answerFromLog(entry.id, "pass")}>
-                        pass
-                      </button>
-                    </div>
-                  )}
+                  {isAwaitingAnswer(entry) ? (
+                    <AnswerControls entry={entry} onAnswer={nav.answer} prompt="how was it?" />
+                  ) : editing ? (
+                    <AnswerControls entry={entry} onAnswer={nav.answer} prompt="change it:" />
+                  ) : null}
                   {editing && (
                     <button
                       className="btn-quiet"
@@ -1670,6 +1872,23 @@ function ScreenHistory({ nav, history, source }) {
       </div>
     </div>
   );
+}
+
+function readSession(key) {
+  try {
+    return sessionStorage.getItem(key) || "";
+  } catch {
+    return "";
+  }
+}
+
+function writeSession(key, value) {
+  try {
+    if (value) sessionStorage.setItem(key, value);
+    else sessionStorage.removeItem(key);
+  } catch {
+    // storage unavailable (private mode); the draft just won't survive a reload
+  }
 }
 
 function formatCount(count) {
@@ -1736,7 +1955,7 @@ async function askUntilValid({ label, ask, validate }) {
     try {
       const answer = await ask(previousAttemptRejected);
       const validation = validate(answer);
-      console.log(`[En debug] returned ${label} validation`, { attempt, answer, validation });
+      debugLog(`[En debug] returned ${label} validation`, { attempt, answer, validation });
       if (validation.ok) {
         return { answer, validation };
       }
@@ -1754,10 +1973,11 @@ async function askUntilValid({ label, ask, validate }) {
 }
 
 async function askForAllowedRecommendation({ mood, signals, candidateList, memory, unwatchedTitles }) {
+  const modelCandidates = candidateList.map(toModelCandidate);
   const result = await askUntilValid({
     label: "recommendation",
     ask: (previousAttemptRejected) =>
-      askEn({ mood, ...signals, candidateList, previousAttemptRejected }),
+      askEn({ mood, ...signals, candidateList: modelCandidates, previousAttemptRejected }),
     validate: (recommendation) => validateRecommendation(recommendation, candidateList, memory, unwatchedTitles)
   });
 
@@ -1871,10 +2091,11 @@ async function askForAllowedVerdict({
   candidateList,
   memory
 }) {
+  const modelCandidates = candidateList.map(toModelCandidate);
   const result = await askUntilValid({
     label: "verdict",
     ask: (previousAttemptRejected) =>
-      askEnVerdict({ queriedTitles, queriedTitleHistory, mood, ...signals, candidateList, previousAttemptRejected }),
+      askEnVerdict({ queriedTitles, queriedTitleHistory, mood, ...signals, candidateList: modelCandidates, previousAttemptRejected }),
     validate: (verdict) => validateVerdict(verdict, queriedTitles, candidateList, memory)
   });
 
@@ -1997,7 +2218,10 @@ function mergeCandidateMeta(recommendation, candidate) {
     year: candidate.year,
     episodes: candidate.episodes,
     genre: candidate.genre,
-    image_url: candidate.image_url || recommendation.image_url || ""
+    image_url: candidate.image_url || recommendation.image_url || "",
+    // Saved with the pick so later pools can exclude it by id, not just name.
+    ...(candidate.anilistId ? { anilistId: candidate.anilistId } : {}),
+    ...(candidate.malId ? { malId: candidate.malId } : {})
   };
 }
 

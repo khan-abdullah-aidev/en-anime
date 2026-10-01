@@ -1,3 +1,4 @@
+import { debugLog } from "./debug.js";
 import { requestEn } from "./llmProviders.js";
 
 // Prompts live in api/_lib/prompts.js. These helpers shape the payload and
@@ -5,34 +6,34 @@ import { requestEn } from "./llmProviders.js";
 
 export async function askEn(payload) {
   const userPayload = { ...payload, mood: payload.mood || "Surprise me" };
-  console.log("[En debug] exact LLM user payload", userPayload);
+  debugLog("[En debug] exact LLM user payload", userPayload);
   const content = await requestEn("recommend", userPayload);
 
   const recommendation = parseRecommendation(content);
-  console.log("[En debug] LLM raw response text", content);
-  console.log("[En debug] LLM parsed recommendation", recommendation);
+  debugLog("[En debug] LLM raw response text", content);
+  debugLog("[En debug] LLM parsed recommendation", recommendation);
   return recommendation;
 }
 
 export async function askEnVerdict(payload) {
   const userPayload = { ...payload, mood: payload.mood || "" };
-  console.log("[En debug] exact verdict LLM user payload", userPayload);
+  debugLog("[En debug] exact verdict LLM user payload", userPayload);
   const content = await requestEn("verdict", userPayload);
 
   const verdict = parseVerdict(content);
-  console.log("[En debug] verdict LLM raw response text", content);
-  console.log("[En debug] verdict LLM parsed", verdict);
+  debugLog("[En debug] verdict LLM raw response text", content);
+  debugLog("[En debug] verdict LLM parsed", verdict);
   return verdict;
 }
 
 export async function askEnChoose(payload) {
   const userPayload = { ...payload, mood: payload.mood || "" };
-  console.log("[En debug] exact choose LLM user payload", userPayload);
+  debugLog("[En debug] exact choose LLM user payload", userPayload);
   const content = await requestEn("choose", userPayload);
 
   const choice = parseRecommendation(content);
-  console.log("[En debug] choose LLM raw response text", content);
-  console.log("[En debug] choose LLM parsed", choice);
+  debugLog("[En debug] choose LLM raw response text", content);
+  debugLog("[En debug] choose LLM parsed", choice);
   return choice;
 }
 

@@ -54,14 +54,22 @@ export async function resolveAnimeOnAniList(title) {
 }
 
 async function queryAniList(title) {
+  const data = await aniListRequest(SEARCH_QUERY, { search: title });
+  return pickBestMatch(title, data?.Page?.media || []);
+}
+
+// AniList is public and CORS-enabled, so it's called straight from the
+// browser: its rate limit (currently 30 requests/minute) then applies per
+// user rather than to one shared server IP.
+export async function aniListRequest(query, variables = {}, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(ANILIST_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ query: SEARCH_QUERY, variables: { search: title } }),
+      body: JSON.stringify({ query, variables }),
       signal: controller.signal
     });
 
@@ -70,8 +78,10 @@ async function queryAniList(title) {
     }
 
     const payload = await response.json();
-    const candidates = payload?.data?.Page?.media || [];
-    return pickBestMatch(title, candidates);
+    if (payload?.errors?.length) {
+      throw new Error(`AniList error: ${payload.errors[0].message}`);
+    }
+    return payload.data;
   } finally {
     clearTimeout(timeout);
   }
