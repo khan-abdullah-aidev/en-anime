@@ -259,8 +259,6 @@ function scoreAnime(anime, tasteProfile = {}, recentPatterns = {}, moodTokens = 
   score += overlapScore(genres, recentGenres) * 2;
   score += overlapScore(themes, recentThemes) * 2;
   score += overlapScore([...genres, ...themes, anime.genre], moodTokens) * 6;
-  score += pacingScore(anime.pacing, tasteProfile.pacingPreference);
-  score += darknessScore(anime.darkness, tasteProfile.darknessTolerance);
   score += collaborativeSignal(anime);
   score -= overlapScore([...genres, ...themes, anime.genre], dislikedTropes) * 5;
   return score;
@@ -272,20 +270,6 @@ function overlapScore(values, targets) {
     const targetTokens = tokenize(target);
     return score + targetTokens.filter((token) => valueKeys.has(token)).length;
   }, 0);
-}
-
-function pacingScore(pacing, preference) {
-  if (!preference) return 0;
-  if (pacing === preference) return 4;
-  if ((pacing === "steady" && preference === "slow") || (pacing === "slow" && preference === "steady")) return 2;
-  if ((pacing === "brisk" && preference === "fast") || (pacing === "fast" && preference === "brisk")) return 2;
-  return 0;
-}
-
-function darknessScore(darkness, tolerance = 3) {
-  if (!Number.isFinite(darkness)) return 0;
-  const distance = Math.abs(darkness - tolerance);
-  return Math.max(0, 4 - distance);
 }
 
 function collaborativeSignal(anime) {
@@ -301,8 +285,6 @@ function toCandidate(anime) {
     genre: anime.genre,
     genres: anime.genres || [],
     themes: anime.themes || [],
-    pacing: anime.pacing,
-    darkness: anime.darkness,
     franchise: anime.franchise,
     rankScore: Math.round(anime.rankScore * 100) / 100
   };

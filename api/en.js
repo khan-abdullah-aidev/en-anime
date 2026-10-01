@@ -28,7 +28,8 @@ export default async function handler(req, res) {
     const content = await generateJson({
       systemPrompt: PROMPTS[kind],
       userPayloadText,
-      responseSchema: buildResponseSchema(kind, payload)
+      responseSchema: buildResponseSchema(kind, payload),
+      fast: kind === "mood"
     });
     res.status(200).json({ content });
   } catch (error) {

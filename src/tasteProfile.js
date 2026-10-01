@@ -14,8 +14,6 @@ const NON_TASTE_LABELS = new Set(["awardwinning"]);
 const DEFAULT_PROFILE = {
   favoriteGenres: [],
   emotionalThemes: [],
-  pacingPreference: "steady",
-  darknessTolerance: 3,
   dislikedTropes: [],
   recentEmotionalShifts: [],
   rewatchBehavior: "unknown",
@@ -88,11 +86,6 @@ export function buildTasteProfile({ malList, feedbackHistory = [], previousProfi
   return {
     favoriteGenres,
     emotionalThemes: topValues(countValues(positiveCatalog.flatMap((anime) => anime.themes)), 10),
-    pacingPreference: topValues(countValues(positiveCatalog.map((anime) => anime.pacing)), 1)[0] || previousProfile?.pacingPreference || DEFAULT_PROFILE.pacingPreference,
-    darknessTolerance: inferDarknessTolerance(positiveCatalog, negativeCatalog, previousProfile),
-    // How many of the user's titles darkness/pacing were inferred from, so
-    // the model can tell a real estimate from a default.
-    estimateBasis: positiveCatalog.length + negativeCatalog.length,
     dislikedTropes: inferDislikedTropes({
       negativeCatalog,
       feedbackText,
@@ -134,7 +127,6 @@ export function summarizeRecentPatterns(malList, feedbackHistory = []) {
       ...topValues(countValues(recentCatalog.flatMap((anime) => anime.genres)), 6)
     ]).slice(0, 6),
     recentThemes: topValues(countValues(recentCatalog.flatMap((anime) => anime.themes)), 8),
-    recentPacing: topValues(countValues(recentCatalog.map((anime) => anime.pacing)), 3),
     pendingCount,
     recentRejections: mehTitles
   };
@@ -208,15 +200,6 @@ function findCatalogAnime(entry, index) {
     if (index.has(key)) return index.get(key);
   }
   return null;
-}
-
-function inferDarknessTolerance(positiveCatalog, negativeCatalog, previousProfile) {
-  const positiveAverage = average(positiveCatalog.map((anime) => anime.darkness));
-  const negativeHighDark = negativeCatalog.some((anime) => anime.darkness >= 4);
-  if (positiveAverage !== null) {
-    return clamp(Math.round(negativeHighDark ? positiveAverage - 1 : positiveAverage), 0, 5);
-  }
-  return previousProfile?.darknessTolerance ?? DEFAULT_PROFILE.darknessTolerance;
 }
 
 function inferGenreAffinity(entries, averageScore) {
@@ -337,15 +320,6 @@ function getMalUpdatedTime(entry) {
   ) || 0;
 }
 
-function average(values) {
-  const nums = values.filter((value) => Number.isFinite(value));
-  return nums.length ? nums.reduce((sum, value) => sum + value, 0) / nums.length : null;
-}
-
 function round(value) {
   return Math.round(value * 10) / 10;
-}
-
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
 }

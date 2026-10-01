@@ -104,9 +104,11 @@ describe("taste profile", () => {
     assert.ok(!bigProfile.favoriteGenres.includes("Award Winning"));
   });
 
-  it("feeds a manual list into the catalog-based estimates", () => {
+  it("reads a manual list's genres from the curated catalog, and makes no darkness or pacing guesses", () => {
     const manual = buildTasteProfile({ malList: "Odd Taxi, Ping Pong the Animation", feedbackHistory: [] });
-    assert.ok(manual.estimateBasis >= 2);
+    assert.ok(manual.favoriteGenres.includes("drama"));
+    assert.equal(manual.darknessTolerance, undefined);
+    assert.equal(manual.pacingPreference, undefined);
   });
 
   it("gives unrated picks no feedback signal", () => {

@@ -1,12 +1,14 @@
 import { aniListRequest, resolveAnimeOnAniList } from "./anilist.js";
 import { NOT_TONIGHT_COOLDOWN_MS, buildCandidatePool, createExclusionCheck, isStillExcluded } from "./recommendationEngine.js";
 import { streamingLinks } from "./streaming.js";
+import { MOOD_GENRES } from "./moodVocabulary.js";
 import { animeTitleKeys, normalizeTitleForCompare, parseManualTitles, uniqueTitles } from "./titleUtils.js";
 
 // Candidates come from all of AniList rather than a fixed list:
 //  - "similar": what fans of the user's highest-rated shows recommend,
 //  - "genre":   top titles in the genres the user scores above their average,
-//  - "mood":    titles tagged with what tonight's mood asks for,
+//  - "mood":    titles tagged with what tonight's mood asks for (as the
+//               model read it, see moodReading.js, plus a word list),
 //  - "recent":  strong releases from the last two years.
 // Everything on the user's list, everything En has recommended, and sequels
 // of shows they haven't finished are filtered out; the rest is ranked against
@@ -29,10 +31,9 @@ const MAX_PER_SEED = 6;
 const REQUEST_TIMEOUT_MS = 9000;
 
 const ALLOWED_FORMATS = new Set(["TV", "TV_SHORT", "MOVIE", "ONA", "OVA"]);
-const ANILIST_GENRES = [
-  "Action", "Adventure", "Comedy", "Drama", "Fantasy", "Horror", "Mahou Shoujo", "Mecha", "Music",
-  "Mystery", "Psychological", "Romance", "Sci-Fi", "Slice of Life", "Sports", "Supernatural", "Thriller"
-];
+const ANILIST_GENRES = MOOD_GENRES;
+// Discovery queries per request for tonight's mood.
+const MOOD_QUERIES = 4;
 // MAL genre names that are tags (or a differently named genre) on AniList.
 const LABEL_ALIASES = {
   iyashikei: { tags: ["Iyashikei"] },
@@ -87,8 +88,9 @@ const NO_EXCLUSIONS = { labels: [], genres: [], tags: [], matches: () => false }
 // exclude is the user's "leave out" filter (preferences.js exclusionFilter):
 // nothing it matches gets into the pool, from any source. mutedSeeds are
 // favorites the user asked En not to start from.
-export async function buildOpenCandidatePool({ mood = "", passedOver = [], list, history = [], tasteProfile, recentPatterns, memory, includeResume = false, exclude = NO_EXCLUSIONS, mutedSeeds = [], limit = POOL_LIMIT }) {
-  const pool = await buildFreshPool({ mood, passedOver, list, history, tasteProfile, recentPatterns, memory, exclude, mutedSeeds, limit });
+// moodReading is the model's reading of the mood (moodReading.js), or null.
+export async function buildOpenCandidatePool({ mood = "", passedOver = [], list, history = [], tasteProfile, recentPatterns, memory, includeResume = false, exclude = NO_EXCLUSIONS, mutedSeeds = [], moodReading = null, limit = POOL_LIMIT }) {
+  const pool = await buildFreshPool({ mood, passedOver, list, history, tasteProfile, recentPatterns, memory, exclude, mutedSeeds, moodReading, limit });
   if (!includeResume) return pool;
   // A couple of shows they started and set aside ride along; the model picks
   // one only when finishing it suits tonight better than anything new.
@@ -99,17 +101,18 @@ export async function buildOpenCandidatePool({ mood = "", passedOver = [], list,
   return { ...pool, candidates: [...pool.candidates, ...resume] };
 }
 
-async function buildFreshPool({ mood = "", passedOver = [], list, history = [], tasteProfile, recentPatterns, memory, exclude = NO_EXCLUSIONS, mutedSeeds = [], limit = POOL_LIMIT }) {
-  const { constraints, discoveryMood } = buildRequestFilters({ mood, passedOver });
+async function buildFreshPool({ mood = "", passedOver = [], list, history = [], tasteProfile, recentPatterns, memory, exclude = NO_EXCLUSIONS, mutedSeeds = [], moodReading = null, limit = POOL_LIMIT }) {
+  const { constraints, discoveryMood, moodWanted, avoid } = buildRequestFilters({ mood, passedOver, reading: moodReading });
+  const queryExclude = withAvoided(exclude, avoid);
   let fetched = null;
   try {
     const seeds = await selectSeeds({ list, history, muted: mutedSeeds });
     const filters = {
-      favorites: withoutExcluded(toAniListFilters(tasteProfile?.favoriteGenres || []), exclude),
-      mood: moodFilters(discoveryMood),
+      favorites: withoutExcluded(toAniListFilters(tasteProfile?.favoriteGenres || []), queryExclude),
+      mood: moodWanted,
       since: (new Date().getFullYear() - 2) * 10000 + 101,
       constraints,
-      exclude
+      exclude: queryExclude
     };
     const [seedGroups, discovery] = await Promise.all([fetchSeedRecommendations(seeds), fetchDiscovery(filters)]);
     // In manual mode the typed favorites were resolved to exact AniList ids,
@@ -121,12 +124,12 @@ async function buildFreshPool({ mood = "", passedOver = [], list, history = [], 
   }
 
   const assemble = (activeConstraints) => {
-    const pool = fetched ? rankPool({ ...fetched, tasteProfile, mood: discoveryMood, constraints: activeConstraints, exclude, limit }) : [];
+    const pool = fetched ? rankPool({ ...fetched, tasteProfile, moodWanted, avoid, constraints: activeConstraints, exclude, limit }) : [];
     if (pool.length >= MIN_POOL) return { candidates: pool, source: "anilist" };
 
     // AniList unreachable or the open pool came back thin: top up with the
     // curated catalog so a recommendation can still be made.
-    const catalog = buildCandidatePool({ mood: discoveryMood, tasteProfile, recentPatterns, memory, limit: limit * 2 })
+    const catalog = buildCandidatePool({ mood: catalogMood(discoveryMood, moodWanted), tasteProfile, recentPatterns, memory, limit: limit * 2 })
       .filter((candidate) => meetsConstraints(candidate, activeConstraints) && !exclude.matches(candidate));
     const taken = new Set(pool.map((candidate) => normalizeTitleForCompare(candidate.title)));
     const merged = [...pool, ...catalog.filter((candidate) => !taken.has(normalizeTitleForCompare(candidate.title)))].slice(0, limit);
@@ -148,8 +151,9 @@ async function buildFreshPool({ mood = "", passedOver = [], list, history = [], 
 // are left out entirely, since a continuation only works if both finished
 // the first part. Titles that fans of BOTH people's favorites recommend rank
 // highest.
-export async function buildTogetherPool({ mood = "", passedOver = [], you, partner, recentPatterns, exclude = NO_EXCLUSIONS, mutedSeeds = [], limit = POOL_LIMIT }) {
-  const { constraints, discoveryMood } = buildRequestFilters({ mood, passedOver });
+export async function buildTogetherPool({ mood = "", passedOver = [], you, partner, recentPatterns, exclude = NO_EXCLUSIONS, mutedSeeds = [], moodReading = null, limit = POOL_LIMIT }) {
+  const { constraints, discoveryMood, moodWanted, avoid } = buildRequestFilters({ mood, passedOver, reading: moodReading });
+  const queryExclude = withAvoided(exclude, avoid);
   const tasteProfile = combineTasteProfiles(you.tasteProfile, partner.tasteProfile);
   let fetched = null;
   try {
@@ -162,11 +166,11 @@ export async function buildTogetherPool({ mood = "", passedOver = [], you, partn
       fetchSeedRecommendations(half(yourSeeds, "you")),
       fetchSeedRecommendations(half(theirSeeds, "partner")),
       fetchDiscovery({
-        favorites: withoutExcluded(toAniListFilters(tasteProfile.favoriteGenres), exclude),
-        mood: moodFilters(discoveryMood),
+        favorites: withoutExcluded(toAniListFilters(tasteProfile.favoriteGenres), queryExclude),
+        mood: moodWanted,
         since: (new Date().getFullYear() - 2) * 10000 + 101,
         constraints,
-        exclude
+        exclude: queryExclude
       })
     ]);
     const resolvedIds = (seeds) => (seeds.by === "anilistId" ? seeds.seeds.map((seed) => seed.anilistId) : []);
@@ -185,11 +189,11 @@ export async function buildTogetherPool({ mood = "", passedOver = [], you, partn
   }
 
   const assemble = (activeConstraints) => {
-    const pool = fetched ? rankPool({ ...fetched, tasteProfile, mood: discoveryMood, constraints: activeConstraints, exclude, limit }) : [];
+    const pool = fetched ? rankPool({ ...fetched, tasteProfile, moodWanted, avoid, constraints: activeConstraints, exclude, limit }) : [];
     if (pool.length >= MIN_POOL) return { candidates: pool, source: "anilist" };
 
     const context = fetched?.context || buildTogetherContext({ you, partner });
-    const catalog = buildCandidatePool({ mood: discoveryMood, tasteProfile, recentPatterns, memory: you.memory, limit: limit * 2 })
+    const catalog = buildCandidatePool({ mood: catalogMood(discoveryMood, moodWanted), tasteProfile, recentPatterns, memory: you.memory, limit: limit * 2 })
       .filter((candidate) => meetsConstraints(candidate, activeConstraints) && !seenByPartner(candidate, context) && !exclude.matches(candidate));
     const taken = new Set(pool.map((candidate) => normalizeTitleForCompare(candidate.title)));
     const merged = [...pool, ...catalog.filter((candidate) => !taken.has(normalizeTitleForCompare(candidate.title)))].slice(0, limit);
@@ -357,8 +361,23 @@ export function parseConstraints(mood) {
 }
 
 // Tonight's limits: the mood's, plus whatever "not tonight" reasons rule out.
-export function buildRequestFilters({ mood = "", passedOver = [] }) {
+// Limits the model read from the mood fill in only what the patterns didn't
+// catch; the patterns are exact, the model's reading isn't. Also returns what
+// to look for (moodWanted) and what to steer around (avoid).
+export function buildRequestFilters({ mood = "", passedOver = [], reading = null }) {
   const constraints = parseConstraints(mood);
+  if (reading) {
+    if (reading.film && !constraints.formats) constraints.formats = ["MOVIE"];
+    if (constraints.maxEpisodes == null && constraints.minEpisodes == null) {
+      if (reading.maxEpisodes) constraints.maxEpisodes = reading.maxEpisodes;
+      else if (reading.minEpisodes) constraints.minEpisodes = reading.minEpisodes;
+    }
+    if (reading.airing && !constraints.status) constraints.status = "RELEASING";
+    if (constraints.yearMin == null && constraints.yearMax == null) {
+      if (reading.yearMin) constraints.yearMin = reading.yearMin;
+      if (reading.yearMax) constraints.yearMax = reading.yearMax;
+    }
+  }
   let discoveryMood = mood;
   for (const pass of passedOver) {
     if (pass.reason === "too long") {
@@ -371,7 +390,41 @@ export function buildRequestFilters({ mood = "", passedOver = [] }) {
       discoveryMood += " heavy dark";
     }
   }
-  return { constraints, discoveryMood: discoveryMood.trim() };
+  discoveryMood = discoveryMood.trim();
+  return {
+    constraints,
+    discoveryMood,
+    moodWanted: moodTerms(discoveryMood, reading),
+    avoid: { genres: reading?.avoidGenres || [], tags: reading?.avoidTags || [] }
+  };
+}
+
+// What to search for tonight: the model's reading first (it understands
+// "rain on a Tuesday"), then the word list's matches, minus anything the
+// mood rules out (so "nothing scary" never searches Horror).
+export function moodTerms(mood, reading = null) {
+  const words = moodFilters(mood);
+  if (!reading) return words;
+  const avoid = new Set([...(reading.avoidGenres || []), ...(reading.avoidTags || [])]);
+  return {
+    genres: [...new Set([...(reading.genres || []), ...words.genres])].filter((genre) => !avoid.has(genre)),
+    tags: [...new Set([...(reading.tags || []), ...words.tags])].filter((tag) => !avoid.has(tag))
+  };
+}
+
+function catalogMood(discoveryMood, moodWanted) {
+  return [discoveryMood, ...moodWanted.genres, ...moodWanted.tags].join(" ").trim();
+}
+
+// The query-side exclusions: the user's standing "leave out" plus what
+// tonight's mood rules out. (Ranking only penalizes the latter.)
+function withAvoided(exclude, avoid) {
+  if (!avoid.genres.length && !avoid.tags.length) return exclude;
+  return {
+    ...exclude,
+    genres: [...new Set([...exclude.genres, ...avoid.genres])],
+    tags: [...new Set([...exclude.tags, ...avoid.tags])]
+  };
 }
 
 export function meetsConstraints(candidate, constraints = {}) {
@@ -422,9 +475,7 @@ export function toModelCandidate(candidate) {
       ? { status: candidate.resume.status, stoppedAt: `${candidate.resume.watched}/${candidate.resume.total || "?"}`, since: candidate.resume.since }
       : null,
     continues: candidate.continues || null,
-    airing: candidate.status === "RELEASING" || null,
-    pacing: candidate.pacing,
-    darkness: candidate.darkness
+    airing: candidate.status === "RELEASING" || null
   });
 }
 
@@ -588,11 +639,11 @@ async function fetchDiscovery({ favorites, mood, since, constraints = {}, exclud
   favorites.tags.slice(0, 1).forEach((tag, index) => {
     aliases.push(page(`genreTag${index}`, 20, `tag_in: [${JSON.stringify(tag)}], ${quality(70, 8000)}`));
   });
-  const moodTerms = [
+  const moodQueries = [
     ...mood.tags.map((tag) => `tag_in: [${JSON.stringify(tag)}]`),
     ...mood.genres.map((genre) => `genre_in: [${JSON.stringify(genre)}]`)
-  ].slice(0, 3);
-  moodTerms.forEach((term, index) => {
+  ].slice(0, MOOD_QUERIES);
+  moodQueries.forEach((term, index) => {
     aliases.push(page(`mood${index}`, 20, `${term}, ${quality(68, 5000)}`));
   });
   // A year limit already decides the era, so "recent releases" would only
@@ -695,7 +746,7 @@ export function buildUserContext({ list, history = [], memory, watchedAnilistIds
   return { listIds, completedIds, completedAnilistIds, excludedAnilistIds, manualKeys, isExcludedTitle: createExclusionCheck(memory) };
 }
 
-export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfile = {}, mood = "", constraints = {}, exclude = NO_EXCLUSIONS, limit = POOL_LIMIT }) {
+export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfile = {}, mood = "", moodWanted = null, avoid = { genres: [], tags: [] }, constraints = {}, exclude = NO_EXCLUSIONS, limit = POOL_LIMIT }) {
   const merged = new Map();
   const add = (candidate, source, extra = {}) => {
     if (!candidate?.anilistId || !isUsable(candidate)) return;
@@ -724,8 +775,11 @@ export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfil
 
   const favorite = new Set((tasteProfile.favoriteGenres || []).map(normalizeTitleForCompare));
   const disliked = new Set((tasteProfile.dislikedTropes || []).map(normalizeTitleForCompare));
-  const moodWanted = moodFilters(mood);
-  const moodKeys = new Set([...moodWanted.genres, ...moodWanted.tags].map(normalizeTitleForCompare));
+  const wanted = moodWanted || moodFilters(mood);
+  const moodKeys = new Set([...wanted.genres, ...wanted.tags].map(normalizeTitleForCompare));
+  // What tonight's mood rules out sinks rather than disappears: a seed's
+  // recommendation can still be the right call, and the model sees the mood.
+  const avoidKeys = new Set([...avoid.genres, ...avoid.tags].map(normalizeTitleForCompare));
 
   const ranked = [];
   for (const entry of merged.values()) {
@@ -743,7 +797,8 @@ export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfil
       entry.similarity +
       1.5 * count(favorite) -
       2.5 * count(disliked) +
-      2.5 * count(moodKeys) +
+      2.5 * count(moodKeys) -
+      3 * count(avoidKeys) +
       (Number.isFinite(entry.score) ? (entry.score - 70) / 6 : 0) +
       (continuation.continues ? 2 : 0) +
       (bothLiked ? 3 : 0) +

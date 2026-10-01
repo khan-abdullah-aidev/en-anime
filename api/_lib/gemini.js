@@ -5,6 +5,9 @@ const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 const DEFAULT_MODEL = "gemini-3.8-flash";
 const DEFAULT_FALLBACK_MODEL = "gemini-3.5-flash-lite";
 const REQUEST_TIMEOUT_MS = 25000;
+// Small jobs (reading the mood) go to the lighter model first, with less
+// patience, so they never hold up the pick.
+const FAST_TIMEOUT_MS = 9000;
 
 function modelChain() {
   return [
@@ -22,7 +25,7 @@ export class GeminiConfigError extends Error {
   }
 }
 
-export async function generateJson({ systemPrompt, userPayloadText, responseSchema = null }) {
+export async function generateJson({ systemPrompt, userPayloadText, responseSchema = null, fast = false }) {
   // VITE_* names are still read so an existing deployment keeps working until
   // the key is renamed; nothing on the client references them any more.
   const apiKey =
@@ -34,9 +37,11 @@ export async function generateJson({ systemPrompt, userPayloadText, responseSche
   }
 
   let lastError;
-  for (const model of modelChain()) {
+  const models = fast ? [...modelChain()].reverse() : modelChain();
+  const timeoutMs = fast ? FAST_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+  for (const model of models) {
     try {
-      return await callGemini({ apiKey, model, systemPrompt, userPayloadText, responseSchema });
+      return await callGemini({ apiKey, model, systemPrompt, userPayloadText, responseSchema, timeoutMs });
     } catch (error) {
       lastError = error;
       console.warn(`[En] Gemini ${model} failed`, error.message);
@@ -44,7 +49,7 @@ export async function generateJson({ systemPrompt, userPayloadText, responseSche
       // without it rather than failing the request (the client validates).
       if (responseSchema && error.status === 400) {
         try {
-          return await callGemini({ apiKey, model, systemPrompt, userPayloadText, responseSchema: null });
+          return await callGemini({ apiKey, model, systemPrompt, userPayloadText, responseSchema: null, timeoutMs });
         } catch (retryError) {
           lastError = retryError;
           console.warn(`[En] Gemini ${model} failed without a schema too`, retryError.message);
@@ -55,9 +60,9 @@ export async function generateJson({ systemPrompt, userPayloadText, responseSche
   throw lastError;
 }
 
-async function callGemini({ apiKey, model, systemPrompt, userPayloadText, responseSchema }) {
+async function callGemini({ apiKey, model, systemPrompt, userPayloadText, responseSchema, timeoutMs = REQUEST_TIMEOUT_MS }) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(`${GEMINI_URL}/${model}:generateContent`, {

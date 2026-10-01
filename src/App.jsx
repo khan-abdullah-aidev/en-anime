@@ -1,4 +1,5 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { askEn, askEnChoose, askEnTogether, askEnVerdict } from "./openrouter.js";
 import { isEnConfigError } from "./llmProviders.js";
 import { beginMalOauth, finishMalOauth, refreshMalOauth } from "./oauth.js";
@@ -74,6 +75,7 @@ import {
 import { normalizeSnapshot } from "./syncMerge.js";
 import { sharePick } from "./shareCard.js";
 import { askAgainAfter, findCurrentPending, findReviewEntries, isAwaitingAnswer } from "./reviewQueue.js";
+import { readMood } from "./moodReading.js";
 
 // Lets the header (wordmark, "← back") reach navigation without threading
 // it through every screen.
@@ -119,6 +121,10 @@ function initialRoute() {
 // Pushes or replaces a browser-history entry for a screen and returns its
 // position, which is how "← back" knows whether there's anywhere to go.
 function writeHistory(method, { view, entryId = null, titles }) {
+  // Remember how far down the page you were, so "back" returns there.
+  if (method === "push" && window.history.state) {
+    window.history.replaceState({ ...window.history.state, scrollY: window.scrollY }, "");
+  }
   const currentIdx = window.history.state?.idx ?? 0;
   const idx = method === "push" ? currentIdx + 1 : currentIdx;
   const url = view === VIEW.THINKING ? window.location.pathname : pathFor(view, entryId);
@@ -148,6 +154,8 @@ export default function App() {
   const [pendingReviewIds, setPendingReviewIds] = useState([]);
   const [status, setStatus] = useState("");
   const [thinkingMood, setThinkingMood] = useState("");
+  // How En heard tonight's mood ("quiet and a little sad"), once it has.
+  const [heardMood, setHeardMood] = useState("");
   const [error, setError] = useState("");
   // What the user has told En directly (preferences.js).
   const [preferences, setPreferences] = useState(() => loadPreferences());
@@ -178,6 +186,9 @@ export default function App() {
   const activeRequest = useRef(0);
   // Set just before stepping back off a failed request so its error survives.
   const keepErrorOnPop = useRef(false);
+  // Set by showRoute for the arrival effect: where to scroll once it renders.
+  const arrival = useRef(null);
+  const [arrivals, setArrivals] = useState(0);
 
   const revealEntry = history.find((entry) => entry.id === revealEntryId) || null;
 
@@ -197,7 +208,11 @@ export default function App() {
       if (route.view !== target.view || (route.entryId || null) !== (target.entryId || null)) {
         writeHistory("replace", route);
       }
-      showRoute(route, window.history.state?.idx ?? 0);
+      // A phone's back swipe already animates; don't animate on top of it.
+      showRoute(route, window.history.state?.idx ?? 0, {
+        scrollY: event.state?.scrollY || 0,
+        animate: !event.hasUAVisualTransition
+      });
     }
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
@@ -308,12 +323,54 @@ export default function App() {
     showRoute(route, writeHistory(replace ? "replace" : "push", route));
   }
 
-  function showRoute({ view: nextView, entryId, titles }, idx) {
-    if (entryId) setRevealEntryId(entryId);
-    if (titles) setShortlistTitles(titles);
-    setRouteIdx(idx);
-    setView(nextView);
+  // Screen changes cross-fade where the browser supports it (the View
+  // Transitions API), with the wordmark holding still. The new screen is
+  // rendered synchronously inside the transition so it's captured complete.
+  function showRoute({ view: nextView, entryId, titles }, idx, { scrollY = 0, animate = true } = {}) {
+    const apply = () => {
+      if (entryId) setRevealEntryId(entryId);
+      if (titles) setShortlistTitles(titles);
+      setRouteIdx(idx);
+      setView(nextView);
+      arrival.current = { scrollY };
+      setArrivals((count) => count + 1);
+    };
+    // After the first screen, entrances are quicker (see styles.css).
+    document.documentElement.classList.add("en-settled");
+    if (!animate || !canAnimateScreens()) {
+      apply();
+      return;
+    }
+    // The browser only swaps screens on its next frame; if it isn't drawing
+    // (a covered window), don't leave the old screen up waiting for one.
+    let applied = false;
+    const run = () => {
+      if (applied) return;
+      applied = true;
+      flushSync(apply);
+    };
+    const transition = document.startViewTransition(run);
+    setTimeout(() => {
+      if (applied) return;
+      transition.skipTransition();
+      run();
+    }, 400);
   }
+
+  // Arriving on a screen: the right scroll position (the top, or where you
+  // were when you go back), and focus on its heading, so keyboard and
+  // screen-reader users start at the new screen instead of a stale button.
+  useLayoutEffect(() => {
+    const landed = arrival.current;
+    if (!landed) return;
+    arrival.current = null;
+    window.scrollTo(0, landed.scrollY);
+    const heading = document.querySelector(".app-frame h1, .app-frame h2");
+    if (heading) {
+      heading.setAttribute("tabindex", "-1");
+      heading.focus({ preventScroll: true });
+    }
+  }, [arrivals]);
 
   // Home is tonight's mood question, after any "did you watch it?" questions
   // about earlier picks; the landing page until En has a list to read.
@@ -415,9 +472,19 @@ export default function App() {
     passOverUnanswered();
     setStatus(mode === "manual" ? "Reading what you told En" : "Reading your history");
     setThinkingMood(moodText || "");
+    setHeardMood("");
     go(VIEW.THINKING, { replace });
     activeRequest.current += 1;
     return activeRequest.current;
+  }
+
+  // Reads the mood (see moodReading.js) while the list loads, and says how
+  // it was heard on the thinking screen as soon as that's back.
+  function hearMood(requestId, moodText) {
+    return readMood(moodText, { passedOver: passedOverTonight() }).then((reading) => {
+      if (isCurrent(requestId) && reading?.reading) setHeardMood(reading.reading);
+      return reading;
+    });
   }
 
   function isCurrent(requestId) {
@@ -511,7 +578,7 @@ export default function App() {
 
   // Candidates from all of AniList (see discovery.js), or the curated
   // catalog if AniList can't be reached.
-  async function findCandidates({ mood, list, signals, memory, partner: other, includeResume = false }) {
+  async function findCandidates({ mood, list, signals, memory, partner: other, includeResume = false, moodReading = null }) {
     const passedOver = passedOverTonight();
     const { excludedGenres, mutedSeeds } = loadPreferences();
     const exclude = exclusionFilter(excludedGenres);
@@ -523,7 +590,8 @@ export default function App() {
           partner: other,
           recentPatterns: signals.recentPatterns,
           exclude,
-          mutedSeeds
+          mutedSeeds,
+          moodReading
         })
       : await buildOpenCandidatePool({
           mood,
@@ -535,9 +603,10 @@ export default function App() {
           memory,
           includeResume,
           exclude,
-          mutedSeeds
+          mutedSeeds,
+          moodReading
         });
-    debugLog("[En debug] candidate pool", { source, count: candidates.length, constraints, constraintsRelaxed, leftOut: exclude.labels });
+    debugLog("[En debug] candidate pool", { source, count: candidates.length, constraints, constraintsRelaxed, leftOut: exclude.labels, moodReading });
     if (!candidates.length) {
       throw new Error(
         exclude.labels.length
@@ -613,11 +682,12 @@ export default function App() {
 
     const requestId = beginThinking(nextMood, { replace });
     const say = (text) => isCurrent(requestId) && setStatus(text);
+    const heard = hearMood(requestId, nextMood);
     try {
       const { list, signals, memory, unwatchedTitles } = await loadEnContext();
       say("Looking through everything you haven't seen");
-      const { candidates: candidateList, steering } = await findCandidates({ mood: nextMood, list, signals, memory, includeResume: true });
-      say("Listening to tonight");
+      const { candidates: candidateList, steering } = await findCandidates({ mood: nextMood, list, signals, memory, includeResume: true, moodReading: await heard });
+      say("Considering");
 
       const rec = await askForAllowedRecommendation({ mood: nextMood, signals: { ...signals, ...steering }, candidateList, memory, unwatchedTitles });
       const pick = await withImage(rec, [rec.title_jp]);
@@ -684,6 +754,7 @@ export default function App() {
     const name = partnerName(who);
     const requestId = beginThinking(moodText, { replace });
     const say = (text) => isCurrent(requestId) && setStatus(text);
+    const heard = hearMood(requestId, moodText);
     try {
       const { list, signals, memory, unwatchedTitles } = await loadEnContext();
       say(`Reading ${possessive(name)} list`);
@@ -695,9 +766,10 @@ export default function App() {
         list,
         signals,
         memory,
-        partner: { list: partnerList, tasteProfile: partnerTaste }
+        partner: { list: partnerList, tasteProfile: partnerTaste },
+        moodReading: await heard
       });
-      say("Listening to tonight");
+      say("Considering");
 
       const rec = await askForAllowedRecommendation({
         mood: moodText,
@@ -800,13 +872,14 @@ export default function App() {
 
     const requestId = beginThinking(moodText);
     const say = (status) => isCurrent(requestId) && setStatus(status);
+    const heard = hearMood(requestId, moodText);
     try {
       const { list, memory, signals } = await loadEnContext();
       say("Weighing it against your history");
       const queriedTitles = [text];
       const [queriedTitleHistory, { candidates: candidateList, steering }] = await Promise.all([
         describeQueriedTitles(queriedTitles, list),
-        findCandidates({ mood: moodText, list, signals, memory })
+        heard.then((moodReading) => findCandidates({ mood: moodText, list, signals, memory, moodReading }))
       ]);
 
       const verdict = await askForAllowedVerdict({
@@ -1270,6 +1343,7 @@ export default function App() {
         )}
         {view === VIEW.PENDING && (
           <ScreenPending
+            key={findCurrentPending(history, pendingReviewIds, sessionEntryIds.current)?.id}
             nav={nav}
             pending={findCurrentPending(history, pendingReviewIds, sessionEntryIds.current)}
           />
@@ -1340,6 +1414,7 @@ export default function App() {
             onLog={nav.log}
             status={status}
             mood={thinkingMood}
+            heard={heardMood}
             watchedCount={mode === "manual" ? 0 : malList.length}
             mode={mode}
           />
@@ -1528,6 +1603,7 @@ function ScreenLanding({ nav, status }) {
             <p className="meta" style={{ fontSize: 11, letterSpacing: "0.18em" }}>
               縁 · the thread of fate that connects two people
             </p>
+            <SuggestionNote />
           </div>
         </div>
       </div>
@@ -2168,17 +2244,17 @@ function ScreenTogetherMood({ onLog, name, mood, setMood, onSubmit, onSurprise, 
   );
 }
 
-function ScreenThinking({ onLog, status, mood, watchedCount, mode }) {
+function ScreenThinking({ onLog, status, mood, heard, watchedCount, mode }) {
   const [phase, setPhase] = useState(0);
   const lines = useMemo(() => {
     const sourceLine = mode === "manual" ? "Reading what you told En" : "Reading your history";
     const listLine = watchedCount ? `${formatCount(watchedCount)} titles` : "Your list is opening";
-    const moodLine = mood ? "Listening to tonight" : "Letting tonight choose itself";
+    const moodLine = !mood ? "Letting tonight choose itself" : heard ? `Tonight sounds ${heard}` : "Listening to tonight";
     const baseLines = mode === "manual" ? [sourceLine, moodLine] : [sourceLine, listLine, moodLine];
     const finalLine = status && !baseLines.includes(status) ? status : "Considering";
 
     return [...baseLines, finalLine];
-  }, [mode, mood, status, watchedCount]);
+  }, [mode, mood, heard, status, watchedCount]);
 
   useEffect(() => {
     const timers = [];
@@ -2193,11 +2269,15 @@ function ScreenThinking({ onLog, status, mood, watchedCount, mode }) {
       <Chrome step={2} total={3} onLog={onLog} />
       <div className="app-stage">
         <div className="column" style={{ textAlign: "center" }}>
-          <div className="breathe" style={{ marginBottom: 64 }}>
+          <h2 className="visually-hidden">En is choosing</h2>
+          <p className="visually-hidden" role="status" aria-live="polite">
+            {lines[phase - 1] || ""}
+          </p>
+          <div className="breathe" style={{ marginBottom: 64 }} aria-hidden="true">
             <span className="dot" style={{ width: 8, height: 8 }}></span>
           </div>
 
-          <div style={{ minHeight: 140 }}>
+          <div style={{ minHeight: 140 }} aria-hidden="true">
             {lines.slice(0, phase).map((line, i) => (
               <div
                 key={`${line}-${i}`}
@@ -2669,7 +2749,7 @@ function ScreenHistory({ nav, history, source, listSource, malSync, sync }) {
                 key={entry.id}
                 className="fade-up"
                 style={{
-                  animationDelay: `${0.3 + i * 0.18}s`,
+                  animationDelay: `${0.3 + Math.min(i, 5) * 0.12}s`,
                   display: "grid",
                   gridTemplateColumns: "110px 1fr",
                   gap: 32,
@@ -2859,6 +2939,7 @@ function ScreenHistory({ nav, history, source, listSource, malSync, sync }) {
             >
               — and that is all, for now.
             </p>
+            <SuggestionNote />
           </div>
         </div>
       </div>
@@ -2945,6 +3026,50 @@ function Notice({ notice, onDismiss, onMalOffer }) {
         </button>
       </div>
     </div>
+  );
+}
+
+// Where suggestions go: a Discord handle, with a copy button since Discord
+// has no link that opens a chat by handle.
+const DISCORD_HANDLE = "erenfrickinyeager";
+
+function SuggestionNote() {
+  const [copied, setCopied] = useState("");
+  const handleRef = useRef(null);
+  // The clipboard API is often blocked (embedded views, older browsers);
+  // then select the handle and try the old copy command, and if even that
+  // fails, the handle is left selected for the user to copy.
+  async function copy() {
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(DISCORD_HANDLE);
+      ok = true;
+    } catch {
+      const range = document.createRange();
+      range.selectNodeContents(handleRef.current);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      try {
+        ok = document.execCommand("copy");
+      } catch {
+        ok = false;
+      }
+    }
+    setCopied(ok ? "copied" : "selected");
+    setTimeout(() => setCopied(""), 2500);
+  }
+  return (
+    <p className="suggestion-note">
+      Got a suggestion, or something En got wrong? Message <span ref={handleRef} className="suggestion-note__handle">{DISCORD_HANDLE}</span> on
+      Discord.{" "}
+      <button className="btn-quiet" onClick={copy} aria-label={`Copy the Discord handle ${DISCORD_HANDLE}`}>
+        {copied === "copied" ? "copied" : copied === "selected" ? "selected" : "copy"}
+      </button>
+      <span className="visually-hidden" role="status">
+        {copied === "copied" ? "Copied" : copied === "selected" ? "Handle selected" : ""}
+      </span>
+    </p>
   );
 }
 
@@ -3352,6 +3477,9 @@ function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre
                     {notesSaved && notes.trim() === preferences.notes.trim() ? "saved" : `${notes.length}/${NOTES_LIMIT}`}
                   </span>
                 </div>
+                <div style={{ marginTop: 72 }}>
+                  <SuggestionNote />
+                </div>
               </section>
             </>
           )}
@@ -3437,6 +3565,16 @@ function formatTimeAgo(date) {
   const hours = Math.round(minutes / 60);
   if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
   return formatDate(date);
+}
+
+// Cross-fading screens is a nicety: only where the browser has it, the tab
+// is visible, and the user hasn't asked for less motion.
+function canAnimateScreens() {
+  return (
+    typeof document.startViewTransition === "function" &&
+    document.visibilityState === "visible" &&
+    !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+  );
 }
 
 // The way in the user chose last, if it's still set up; otherwise MAL login,

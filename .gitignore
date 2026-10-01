@@ -5,3 +5,5 @@ dist
 .env.local
 _design_reference
 .DS_Store
+test-results
+playwright-report

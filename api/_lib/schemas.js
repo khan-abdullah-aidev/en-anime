@@ -2,11 +2,14 @@
 // client will accept turns "not in candidateList" from a retry into
 // something the model can't produce. The client still validates everything.
 
+import { MOOD_GENRES, MOOD_TAGS } from "../../src/moodVocabulary.js";
+
 const STRING = { type: "STRING" };
 const INTEGER = { type: "INTEGER" };
 const PICK_FIELDS = ["title", "title_jp", "year", "episodes", "genre", "reason", "log_line"];
 
 export function buildResponseSchema(kind, payload) {
+  if (kind === "mood") return moodSchema();
   if (kind === "recommend" || kind === "together") {
     return pickSchema(titlesFrom(payload.candidateList));
   }
@@ -24,6 +27,30 @@ export function buildResponseSchema(kind, payload) {
     return schema;
   }
   return null;
+}
+
+// Genres and tags can only be names AniList knows, so the reading can go
+// straight into a query.
+function moodSchema() {
+  const list = (names) => ({ type: "ARRAY", items: { type: "STRING", enum: names } });
+  const maybe = (type) => ({ type, nullable: true });
+  return {
+    type: "OBJECT",
+    properties: {
+      reading: STRING,
+      genres: list(MOOD_GENRES),
+      tags: list(MOOD_TAGS),
+      avoidGenres: list(MOOD_GENRES),
+      avoidTags: list(MOOD_TAGS),
+      film: maybe("BOOLEAN"),
+      maxEpisodes: maybe("INTEGER"),
+      minEpisodes: maybe("INTEGER"),
+      airing: maybe("BOOLEAN"),
+      yearMin: maybe("INTEGER"),
+      yearMax: maybe("INTEGER")
+    },
+    required: ["reading", "genres", "tags", "avoidGenres", "avoidTags"]
+  };
 }
 
 function pickSchema(allowedTitles) {

@@ -10,8 +10,6 @@ userSaid, when present, is what the user told En directly about themselves: note
 feedbackHistory is how En's past picks landed. good means the user liked that direction. meh means avoid that direction unless the mood clearly asks for it. pending means they saved it for later; treat it as a positive signal. watching means they've started it and are partway through; a mild positive signal, not a verdict. skipped means they passed on it without watching; a mild sign the pick didn't appeal, not a verdict on the show.
 If previousAttemptRejected is present, your last answer was rejected by En's checks for that reason. Don't repeat the mistake.`;
 
-const ESTIMATE_RULES = `tasteProfile numbers like darknessTolerance and pacingPreference are ESTIMATES inferred from the few of the user's titles that overlap a small curated catalog, not something the user said. tasteProfile.estimateBasis is how many titles they came from; when it's 0 or small, they're sitting at a bland default and mean almost nothing. Never describe these numbers as a "stated preference," something the user "said," or anything the user asserted — they didn't. Treat them as the weakest signal you have, well below mood, watchHistory and feedbackHistory.`;
-
 const CANDIDATE_RULES = `candidateList is drawn from across AniList, not a fixed list: titles that fans of the user's highest-rated shows recommend, top titles in the genres they score highest, titles matching tonight's mood, and strong recent releases. It is already filtered: nothing on the user's list, nothing En has recommended before, and no sequels to shows they haven't finished. Each entry has genres, tags and an AniList score (out of 100). becauseYouLiked names the user's own highly rated titles whose fans recommend this one, which is a concrete, nameable link to their history. continues means it's the next part of a show they finished. airing means it's still coming out weekly. Neither is a reason by itself: the mood still decides what tonight is for.
 If constraints is present, those are hard limits read from the mood (formats, maxEpisodes/minEpisodes, status, yearMin/yearMax) and every candidate already meets them. If constraintsRelaxed is true, nothing met all of them: say so plainly in one short clause, then pick the closest fit.`;
 
@@ -31,7 +29,6 @@ Recommend exactly ONE anime the user has not watched, chosen from candidateList.
 
 Use watchHistory, tonight's mood, and feedbackHistory. When a mood is given, it decides what tonight is for; history decides which title fits that best for this particular person.
 ${HISTORY_RULES}
-${ESTIMATE_RULES}
 ${CANDIDATE_RULES}
 ${PASSED_OVER_RULES}
 A candidate with resume is the exception to "nothing on the user's list": it's a show they started and set aside (resume.status, resume.stoppedAt as episodes watched / total, resume.since as when they last touched it). Pick one only when finishing it suits tonight better than anything new; if you do, name where they stopped, and the reason is about why now is the time to go back.
@@ -67,8 +64,7 @@ The user is naming exactly ONE anime title they are considering watching tonight
 
 Use watchHistory, tasteProfile, recentPatterns and feedbackHistory to judge fit — but mood, when given, outranks all of it. Someone can want something completely outside their usual pattern tonight, on purpose, and that is the whole point of asking. Only veto when the title is a genuine mismatch even accounting for the mood, or when no mood was given at all and the historical mismatch is clear.
 ${HISTORY_RULES}
-${ESTIMATE_RULES}
-If the mood contains words like deep, heavy, dark, sad, devastating, gutting, want to feel something, make me cry, or similar — that is explicit permission to go well past the inferred darkness/pacing comfort zone for tonight. Do not cite darkness or pacing as a reason to say "no" when the mood is asking for exactly that kind of weight.
+If the mood contains words like deep, heavy, dark, sad, devastating, gutting, want to feel something, make me cry, or similar — that is explicit permission to go somewhere heavier than their usual tonight. Don't call a title too dark or too slow when the mood is asking for exactly that kind of weight.
 
 queriedTitleHistory says what the user's own list and En's log already know about the queried title. onList is missing if it isn't on their list; otherwise it has their status, score and progress. enHistory is how it went if En recommended it before. If they dropped it, scored it low, or already finished it, that is the most important fact you have. Say it plainly. A drop is not automatically a "no" (the mood can argue for a second try), and a completed title makes this a rewatch question. Never pretend you don't know.
 
@@ -108,7 +104,6 @@ Your job is to pick exactly ONE of queriedTitles. Never pick a title outside tha
 
 Use watchHistory, tasteProfile, recentPatterns and feedbackHistory, plus the mood if given, to decide which of queriedTitles fits best right now — but when a mood is given, it outranks all of it. All the named titles already passed the user's own filter; the mood is what breaks the tie, not a distant taste-profile number.
 ${HISTORY_RULES}
-${ESTIMATE_RULES}
 queriedTitleHistory says, for each queried title, what the user's own list and En's log already know about it (onList: status, score, progress; enHistory: how it went if En recommended it before). A title they already dropped or scored low counts against it unless the mood argues otherwise. Use these facts when they decide the tie.
 
 "title" must exactly match one of queriedTitles as written. Do not invent a title that isn't on the list.
@@ -136,7 +131,6 @@ Two people are watching together tonight. Recommend exactly ONE anime for both o
 watchHistory is the user's own history. partner.watchHistory is the other person's, in the same shape, and partner.name is what to call them (if it's empty, say "they"). Both follow these rules:
 ${HISTORY_RULES}
 partner.tasteProfile is computed from the partner's history the same way tasteProfile is from the user's. feedbackHistory is only the user's.
-${ESTIMATE_RULES}
 
 The pick has to work for both of them, not just one. Weight what both score highly. Avoid what either one dropped or scored low, even if the other loved it. When a mood is given, it's for the two of them, and it decides what tonight is for.
 
@@ -164,7 +158,37 @@ The JSON shape must be exactly:
   "log_line": "string"
 }`;
 
+// Tonight's mood, in the user's words, turned into what to search AniList
+// for. Runs before the pool is built, on the faster model.
+const MOOD_PROMPT = `You are En's ear. The user said how they feel tonight, or what they're in the mood for, in their own words (mood). Translate it into what to search AniList for.
+Return strict JSON only.
+
+- genres: up to 3 AniList genres that fit what the mood asks for. tags: up to 4 AniList tags. Use only names from the allowed lists.
+- Read the feeling, not just the words. "rain on a Tuesday" asks for something quiet and a little melancholy. "my brain is fried" asks for something light and easy to follow. "I need to feel something" asks for emotional weight. "something like a long train ride" asks for travel, landscapes and a slow pace.
+- Choose what the mood asks for, not what it mentions: "nothing scary" is not a request for Horror.
+- avoidGenres / avoidTags: what the mood rules out, plainly or clearly ("nothing sad", "not another isekai", "I can't do gore tonight"). Empty when nothing is ruled out.
+- passedOver, when present, lists why the user turned down picks tonight: "too heavy" means go lighter than the mood alone suggests, "too light" means go heavier, "too long" means shorter. Adjust for it.
+- Limits only when the mood plainly states one; otherwise null. film: true only when they ask for a film or movie. maxEpisodes: "something I can finish tonight" is 4, "short" is 13. minEpisodes: "something long to sink into" is 24. airing: true only for shows airing now. yearMin / yearMax only for an era they name ("from the 90s" is 1990 to 1999, "an old one" is a yearMax of 2005).
+- reading: 2 to 6 lowercase words that finish the sentence "Tonight sounds ..." and describe the feeling, like "quiet and a little sad" or "loud, fast, no thinking". No titles, no genre names.
+- If the mood says nothing about what to watch, return empty lists, null limits and an empty reading.
+
+The JSON shape must be exactly:
+{
+  "reading": "string",
+  "genres": ["string"],
+  "tags": ["string"],
+  "avoidGenres": ["string"],
+  "avoidTags": ["string"],
+  "film": boolean | null,
+  "maxEpisodes": number | null,
+  "minEpisodes": number | null,
+  "airing": boolean | null,
+  "yearMin": number | null,
+  "yearMax": number | null
+}`;
+
 export const PROMPTS = {
+  mood: MOOD_PROMPT,
   recommend: RECOMMEND_PROMPT,
   verdict: VERDICT_PROMPT,
   choose: CHOOSE_PROMPT,
