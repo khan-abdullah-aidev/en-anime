@@ -8,6 +8,8 @@ const GENRE_PRIOR = 3;
 const DROPPED_SIGNAL = -3;
 const UNSCORED_COMPLETED_SIGNAL = 0.5;
 const MIN_AFFINITY_ENTRIES = 5;
+// MAL labels that say how a show was received, not what it is.
+const NON_TASTE_LABELS = new Set(["awardwinning"]);
 
 const DEFAULT_PROFILE = {
   favoriteGenres: [],
@@ -194,7 +196,7 @@ function inferGenreAffinity(entries, averageScore) {
 
     for (const genre of entry.genres || []) {
       const key = normalizeTitleForCompare(genre);
-      if (!key) continue;
+      if (!key || NON_TASTE_LABELS.has(key)) continue;
       const current = stats.get(key) || { label: genre, count: 0, total: 0 };
       current.count += 1;
       current.total += signal;
@@ -209,13 +211,15 @@ function inferGenreAffinity(entries, averageScore) {
 
   return {
     hasSignal: signalCount >= MIN_AFFINITY_ENTRIES,
+    // A genre needs a real share of the list to count: two entries means
+    // something on a 12-show list and nothing on a 400-show one.
     favorites: ranked
-      .filter((stat) => stat.count >= 2 && stat.affinity > 0)
+      .filter((stat) => stat.count >= Math.max(2, Math.round(signalCount * 0.03)) && stat.affinity > 0)
       .sort((a, b) => b.affinity - a.affinity || b.count - a.count)
       .slice(0, 8)
       .map((stat) => stat.label),
     disliked: ranked
-      .filter((stat) => stat.count >= 3 && stat.affinity <= -0.75)
+      .filter((stat) => stat.count >= Math.max(3, Math.round(signalCount * 0.03)) && stat.affinity <= -0.75)
       .sort((a, b) => a.affinity - b.affinity)
       .slice(0, 4)
       .map((stat) => stat.label)

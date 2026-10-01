@@ -91,6 +91,19 @@ describe("taste profile", () => {
     assert.ok(!profile.dislikedTropes.some((trope) => profile.favoriteGenres.includes(trope)));
   });
 
+  it("ignores genres with only a couple of entries on a big list, and MAL's Award Winning badge", () => {
+    const big = [
+      ...Array.from({ length: 100 }, (_, i) => malEntry(1000 + i, `Drama ${i}`, "completed", 8, ["Drama", "Award Winning"])),
+      ...Array.from({ length: 100 }, (_, i) => malEntry(2000 + i, `Action ${i}`, "completed", 6, ["Action"])),
+      malEntry(3000, "Niche A", "completed", 10, ["Childcare"]),
+      malEntry(3001, "Niche B", "completed", 10, ["Childcare"])
+    ];
+    const bigProfile = buildTasteProfile({ malList: big, feedbackHistory: [] });
+    assert.ok(bigProfile.favoriteGenres.includes("Drama"));
+    assert.ok(!bigProfile.favoriteGenres.includes("Childcare"));
+    assert.ok(!bigProfile.favoriteGenres.includes("Award Winning"));
+  });
+
   it("feeds a manual list into the catalog-based estimates", () => {
     const manual = buildTasteProfile({ malList: "Odd Taxi, Ping Pong the Animation", feedbackHistory: [] });
     assert.ok(manual.estimateBasis >= 2);

@@ -1,8 +1,8 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { askEn, askEnChoose, askEnVerdict } from "./openrouter.js";
+import { askEn, askEnChoose, askEnTogether, askEnVerdict } from "./openrouter.js";
 import { isEnConfigError } from "./llmProviders.js";
 import { beginMalOauth, finishMalOauth, refreshMalOauth } from "./oauth.js";
-import { MalAuthError, fetchAnimeImage, fetchAnimeList, isMalAuthError } from "./mal.js";
+import { MalAuthError, fetchAnimeImage, fetchAnimeList, fetchPartnerList, isMalAuthError } from "./mal.js";
 import { ANIME_CATALOG } from "./animeCatalog.js";
 import {
   appendHistory,
@@ -12,10 +12,12 @@ import {
   loadRecommendationMemoryCache,
   loadManualList,
   loadHistory,
+  loadPartner,
   loadTasteProfileCache,
   loadTokens,
   recordRecommendedAnime,
   saveManualList,
+  savePartner,
   saveRecommendationMemoryCache,
   saveTasteProfileCache,
   updateHistoryEntry
@@ -34,7 +36,7 @@ import {
   summarizeRecentPatterns
 } from "./tasteProfile.js";
 import { answersFromList, buildWatchHistoryDigest, describeQueriedTitle } from "./watchHistory.js";
-import { buildOpenCandidatePool, toModelCandidate } from "./discovery.js";
+import { buildOpenCandidatePool, buildTogetherPool, toModelCandidate } from "./discovery.js";
 import { normalizeTitleForCompare, titleMatchesAnime } from "./titleUtils.js";
 import { resolveAnimeOnAniList } from "./anilist.js";
 import { PARENT, VIEW, parsePath, pathFor } from "./routes.js";
@@ -70,6 +72,7 @@ function resolveRoute(target, { initial = false, sessionIds = new Set() } = {}) 
   if (view === VIEW.HISTORY || view === VIEW.MANUAL) return { view };
   if (!hasInput) return { view: VIEW.LANDING };
   if (view === VIEW.SHORTLIST_MOOD && !titles?.length) return { view: VIEW.SHORTLIST };
+  if (view === VIEW.TOGETHER_MOOD && !loadPartner()) return { view: VIEW.TOGETHER };
   if (view === VIEW.PENDING && !findReviewEntries(loadHistory(), sessionIds).length) return { view: VIEW.MOOD };
   return { view, titles };
 }
@@ -102,6 +105,9 @@ export default function App() {
   const [shortlist, setShortlist] = useState("");
   const [shortlistTitles, setShortlistTitles] = useState(initial.titles || []);
   const [chooseMood, setChooseMood] = useState("");
+  const [partner, setPartner] = useState(() => loadPartner());
+  const [togetherMood, setTogetherMood] = useState("");
+  const [checkingPartner, setCheckingPartner] = useState(false);
   const [manualList, setManualList] = useState(() => loadManualList());
   const [mode, setMode] = useState(() => (loadTokens()?.access_token ? "mal" : loadManualList() ? "manual" : "mal"));
   const [malList, setMalList] = useState([]);
@@ -114,6 +120,7 @@ export default function App() {
   // picks from earlier visits, never one the user was just handed.
   const sessionEntryIds = useRef(new Set());
   const malListCache = useRef(null);
+  const partnerListCache = useRef(null);
   // The screen showing right now, for async work that finishes later.
   const viewRef = useRef(view);
   viewRef.current = view;
@@ -342,17 +349,25 @@ export default function App() {
 
   // Candidates from all of AniList (see discovery.js), or the curated
   // catalog if AniList can't be reached.
-  async function findCandidates({ mood, list, signals, memory }) {
+  async function findCandidates({ mood, list, signals, memory, partner: other }) {
     const passedOver = passedOverTonight();
-    const { candidates, source, constraints, constraintsRelaxed } = await buildOpenCandidatePool({
-      mood,
-      passedOver,
-      list,
-      history: loadHistory(),
-      tasteProfile: signals.tasteProfile,
-      recentPatterns: signals.recentPatterns,
-      memory
-    });
+    const { candidates, source, constraints, constraintsRelaxed } = other
+      ? await buildTogetherPool({
+          mood,
+          passedOver,
+          you: { list, history: loadHistory(), memory, tasteProfile: signals.tasteProfile },
+          partner: other,
+          recentPatterns: signals.recentPatterns
+        })
+      : await buildOpenCandidatePool({
+          mood,
+          passedOver,
+          list,
+          history: loadHistory(),
+          tasteProfile: signals.tasteProfile,
+          recentPatterns: signals.recentPatterns,
+          memory
+        });
     debugLog("[En debug] candidate pool", { source, count: candidates.length, constraints, constraintsRelaxed });
     // Only sent when there's something to say, to keep the payload lean.
     const steering = {
@@ -433,6 +448,99 @@ export default function App() {
       revealPick(requestId, pick, { mood: nextMood || "Surprise me", request_mood: nextMood });
     } catch (considerError) {
       handleRequestError(requestId, considerError);
+    }
+  }
+
+  // ---------- For two ----------
+
+  async function loadPartnerList(who) {
+    if (who.kind === "manual") return who.list;
+    const cached = partnerListCache.current;
+    if (cached && cached.username === who.username && Date.now() - cached.fetchedAt < MAL_LIST_TTL_MS) {
+      return cached.list;
+    }
+    const list = await fetchPartnerList(who.username);
+    partnerListCache.current = { username: who.username, list, fetchedAt: Date.now() };
+    return list;
+  }
+
+  // Reads their list once up front, so a typo'd username or a private list
+  // is caught on this screen rather than after "thinking".
+  async function handlePartnerSubmit(draft) {
+    const next = draft.kind === "mal"
+      ? { kind: "mal", username: draft.username.trim() }
+      : { kind: "manual", name: draft.name.trim(), list: draft.list.trim() };
+    if (next.kind === "mal" ? !next.username : !next.list) return;
+
+    setError("");
+    if (next.kind === "mal") {
+      setCheckingPartner(true);
+      try {
+        const list = await loadPartnerList(next);
+        if (!list.length) throw new Error(`${next.username}'s list is empty, so En has nothing to read.`);
+      } catch (partnerError) {
+        setCheckingPartner(false);
+        setError(partnerError.message);
+        return;
+      }
+      setCheckingPartner(false);
+    }
+    savePartner(next);
+    setPartner(next);
+    go(VIEW.TOGETHER_MOOD);
+  }
+
+  async function handleTogether(moodText, { replace = false } = {}) {
+    const who = loadPartner();
+    if (!who) {
+      go(VIEW.TOGETHER, { replace: true });
+      return;
+    }
+    if (!canAskEn()) {
+      go(VIEW.LANDING, { replace: true });
+      return;
+    }
+
+    const name = partnerName(who);
+    const requestId = beginThinking(moodText, { replace });
+    const say = (text) => isCurrent(requestId) && setStatus(text);
+    try {
+      const { list, signals, memory, unwatchedTitles } = await loadEnContext();
+      say(`Reading ${possessive(name)} list`);
+      const partnerList = await loadPartnerList(who);
+      const partnerTaste = buildTasteProfile({ malList: partnerList, feedbackHistory: [] });
+      say("Looking for something you'd both like");
+      const { candidates: candidateList, steering } = await findCandidates({
+        mood: moodText,
+        list,
+        signals,
+        memory,
+        partner: { list: partnerList, tasteProfile: partnerTaste }
+      });
+      say("Listening to tonight");
+
+      const rec = await askForAllowedRecommendation({
+        mood: moodText,
+        signals: {
+          ...signals,
+          ...steering,
+          partner: { name: name === "them" ? "" : name, watchHistory: buildWatchHistoryDigest(partnerList), tasteProfile: partnerTaste }
+        },
+        candidateList,
+        memory,
+        unwatchedTitles,
+        ask: askEnTogether,
+        label: "together"
+      });
+      const pick = await withImage({ ...rec, mode: "together", partner_name: name }, [rec.title_jp]);
+      revealPick(requestId, pick, {
+        mood: moodText || `for two, with ${name}`,
+        request_mood: moodText,
+        mode: "together",
+        partner_name: name
+      });
+    } catch (togetherError) {
+      handleRequestError(requestId, togetherError);
     }
   }
 
@@ -646,7 +754,8 @@ export default function App() {
   function handleNotTonight(reason) {
     if (!revealEntry) return;
     answerEntry(revealEntry, "not-tonight", { reason });
-    handleConsider(revealEntry.request_mood ?? "", { replace: true });
+    if (revealEntry.mode === "together") handleTogether(revealEntry.request_mood ?? "", { replace: true });
+    else handleConsider(revealEntry.request_mood ?? "", { replace: true });
   }
 
   function handleSeenFeedback(feedback, feedbackNote = "") {
@@ -736,6 +845,7 @@ export default function App() {
     manualSubmit: handleManualSubmit,
     consider: handleConsider,
     shortlistStart: handleShortlistStart,
+    togetherStart: () => go(VIEW.TOGETHER),
     shortlistSubmit: handleShortlistSubmit,
     shortlistDecide: handleShortlistDecide,
     saveForLater: handleSaveForLater,
@@ -757,6 +867,9 @@ export default function App() {
   // "I've already seen it" only makes sense when En chose the title; in
   // verdict/choose mode the user named it themselves.
   const canMarkSeen = isNewPick && !revealEntry.mode;
+  // "Not tonight" re-asks the same question, which works for En's own picks
+  // and for picks for two.
+  const canPassTonight = isNewPick && (!revealEntry.mode || revealEntry.mode === "together");
 
   return (
     <NavContext.Provider value={nav}>
@@ -783,6 +896,7 @@ export default function App() {
             onConsider={() => handleConsider(mood)}
             onSurprise={() => handleConsider("")}
             onShortlist={nav.shortlistStart}
+            onTogether={nav.togetherStart}
             mood={mood}
             setMood={setMood}
           />
@@ -805,6 +919,26 @@ export default function App() {
             onSkip={() => nav.shortlistDecide(shortlistTitles, "")}
           />
         )}
+        {view === VIEW.TOGETHER && (
+          <ScreenTogether
+            key={partner ? partnerName(partner) : "new"}
+            onLog={nav.log}
+            partner={partner}
+            checking={checkingPartner}
+            onSubmit={handlePartnerSubmit}
+          />
+        )}
+        {view === VIEW.TOGETHER_MOOD && partner && (
+          <ScreenTogetherMood
+            onLog={nav.log}
+            name={partnerName(partner)}
+            mood={togetherMood}
+            setMood={setTogetherMood}
+            onSubmit={() => handleTogether(togetherMood)}
+            onSurprise={() => handleTogether("")}
+            onChangePartner={() => go(VIEW.TOGETHER)}
+          />
+        )}
         {view === VIEW.THINKING && (
           <ScreenThinking
             onLog={nav.log}
@@ -821,6 +955,7 @@ export default function App() {
             entry={revealEntry}
             isNewPick={isNewPick}
             canMarkSeen={canMarkSeen}
+            canPassTonight={canPassTonight}
           />
         )}
         {view === VIEW.FEEDBACK && revealEntry && (
@@ -1077,7 +1212,9 @@ function ScreenPending({ nav, pending }) {
               fontStyle: "italic"
             }}
           >
-            Did you watch {pending.recommendation.title}?
+            {pending.mode === "together"
+              ? `Did you and ${pending.partner_name || "them"} watch ${pending.recommendation.title}?`
+              : `Did you watch ${pending.recommendation.title}?`}
           </h2>
           <p className="meta fade-up delay-1">
             {pending.state === "pending" ? "Saved" : "En picked it"} · {formatDate(pending.date)}
@@ -1103,7 +1240,7 @@ function ScreenPending({ nav, pending }) {
   );
 }
 
-function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, mood, setMood }) {
+function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mood, setMood }) {
   const ref = useRef(null);
   const hints = useMemo(
     () => [
@@ -1219,6 +1356,11 @@ function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, mood, setMood 
             <div style={{ marginTop: 16 }}>
               <button className="btn-quiet" onClick={onShortlist}>
                 or — I already have one in mind
+              </button>
+            </div>
+            <div style={{ marginTop: 16 }}>
+              <button className="btn-quiet" onClick={onTogether}>
+                or — for two
               </button>
             </div>
           </div>
@@ -1379,6 +1521,161 @@ function ScreenShortlistMood({ onLog, titles, mood, setMood, onSubmit, onSkip })
   );
 }
 
+// "For two", step one: whose list to read alongside the user's.
+function ScreenTogether({ onLog, partner, checking, onSubmit }) {
+  const [kind, setKind] = useState(partner?.kind || "mal");
+  const [username, setUsername] = useState(partner?.kind === "mal" ? partner.username : "");
+  const [name, setName] = useState(partner?.kind === "manual" ? partner.name : "");
+  const [list, setList] = useState(partner?.kind === "manual" ? partner.list : "");
+  const ref = useRef(null);
+  const ready = !checking && (kind === "mal" ? username.trim() : list.trim());
+  const submit = () => ready && onSubmit({ kind, username, name, list });
+
+  useEffect(() => {
+    const t = setTimeout(() => ref.current?.focus(), 600);
+    return () => clearTimeout(t);
+  }, [kind]);
+
+  return (
+    <div className="app-frame">
+      <Chrome onLog={onLog} />
+      <div className="app-stage">
+        <div className="column" style={{ textAlign: "center" }}>
+          <div className="eyebrow fade-up">For two</div>
+          <h2
+            className="serif-display fade-up delay-1"
+            style={{ fontSize: 44, margin: "32px 0 14px", fontWeight: 300 }}
+          >
+            Who's watching with you?
+          </h2>
+          <p
+            className="fade-up delay-2"
+            style={{ color: "var(--bone-3)", fontSize: 15, marginBottom: 64, fontStyle: "italic" }}
+          >
+            {kind === "mal"
+              ? "Their MyAnimeList username. En reads their public list; they don't need to sign in."
+              : "What they've seen and loved, and what to call them."}
+          </p>
+
+          <div className="fade-up delay-3" style={{ maxWidth: 560, margin: "0 auto" }}>
+            {kind === "mal" ? (
+              <input
+                ref={ref}
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                onKeyDown={submitOnEnter(submit)}
+                aria-label="Their MyAnimeList username"
+                placeholder="their username"
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
+                className="meh-note-input"
+              />
+            ) : (
+              <>
+                <input
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  aria-label="Their name (optional)"
+                  placeholder="their name"
+                  className="meh-note-input"
+                />
+                <textarea
+                  ref={ref}
+                  value={list}
+                  onChange={(event) => setList(event.target.value)}
+                  onKeyDown={submitOnEnter(submit, { requireModifier: true })}
+                  aria-label="Anime they've watched and loved, separated by commas or new lines"
+                  rows={3}
+                  className="serif-display"
+                  placeholder="Frieren, Mushishi, Your Name..."
+                  style={{ width: "100%", fontSize: 24, textAlign: "center", lineHeight: 1.4, color: "var(--bone)", resize: "none", fontWeight: 300, marginTop: 28 }}
+                />
+                <hr className="hairline" style={{ marginTop: 8 }} />
+              </>
+            )}
+          </div>
+
+          <div className="fade-up delay-4" style={{ marginTop: 64 }}>
+            <button className="btn-link" onClick={submit} disabled={!ready} style={{ transition: "opacity 0.4s ease" }}>
+              {checking ? "Reading their list…" : "Continue"}
+            </button>
+            <div style={{ marginTop: 20 }}>
+              <button className="btn-quiet" onClick={() => setKind(kind === "mal" ? "manual" : "mal")}>
+                {kind === "mal" ? "or — type what they've loved instead" : "or — use their MyAnimeList"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// "For two", step two: tonight's mood, for both of them.
+function ScreenTogetherMood({ onLog, name, mood, setMood, onSubmit, onSurprise, onChangePartner }) {
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => ref.current?.focus(), 600);
+    return () => clearTimeout(t);
+  }, []);
+
+  return (
+    <div className="app-frame">
+      <Chrome onLog={onLog} />
+      <div className="app-stage">
+        <div className="column" style={{ textAlign: "center" }}>
+          <div className="eyebrow fade-up">{name === "them" ? "The two of you" : `You and ${name}`}</div>
+          <h2
+            className="serif-display fade-up delay-1"
+            style={{ fontSize: 44, margin: "32px 0 14px", fontWeight: 300 }}
+          >
+            What are you two in the mood for?
+          </h2>
+          <p
+            className="fade-up delay-2"
+            style={{ color: "var(--bone-3)", fontSize: 15, marginBottom: 64, fontStyle: "italic" }}
+          >
+            En reads both lists and picks one for the two of you.
+          </p>
+
+          <div className="fade-up delay-3" style={{ position: "relative", maxWidth: 560, margin: "0 auto" }}>
+            <textarea
+              ref={ref}
+              value={mood}
+              onChange={(event) => setMood(event.target.value)}
+              onKeyDown={submitOnEnter(() => mood.trim() && onSubmit())}
+              aria-label="What are you two in the mood for?"
+              rows={2}
+              className="serif-display"
+              placeholder="something we'll both talk about after"
+              style={{ width: "100%", fontSize: 26, textAlign: "center", lineHeight: 1.4, color: "var(--bone)", resize: "none", fontWeight: 300 }}
+            />
+            <hr className="hairline" style={{ marginTop: 8 }} />
+          </div>
+
+          <div className="fade-up delay-4" style={{ marginTop: 64 }}>
+            <button className="btn-link" onClick={onSubmit} disabled={!mood.trim()} style={{ transition: "opacity 0.4s ease" }}>
+              Let En choose for two
+            </button>
+            <div style={{ marginTop: 20 }}>
+              <button className="btn-quiet" onClick={onSurprise}>
+                or — surprise us
+              </button>
+            </div>
+            <div style={{ marginTop: 12 }}>
+              <button className="btn-quiet" onClick={onChangePartner}>
+                or — watching with someone else
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ScreenThinking({ onLog, status, mood, watchedCount, mode }) {
   const [phase, setPhase] = useState(0);
   const lines = useMemo(() => {
@@ -1440,7 +1737,7 @@ const NOT_TONIGHT_REASONS = [
   ["just not it", ""]
 ];
 
-function ScreenReveal({ nav, entry, isNewPick, canMarkSeen }) {
+function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight }) {
   const pick = entry.recommendation;
   const [settled, setSettled] = useState("");
   const [choosingReason, setChoosingReason] = useState(false);
@@ -1491,7 +1788,9 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen }) {
 
           <div className="reveal-scroll__copy ink-bloom delay-3">
             <div className="eyebrow shu">
-              {pick.mode === "choose"
+              {pick.mode === "together"
+                ? `・ for you and ${pick.partner_name || "them"}`
+                : pick.mode === "choose"
                 ? `・ over ${pick.chooseAgainst?.join(", ") || "the rest"}`
                 : pick.verdict === "yes"
                   ? `・ yes — ${pick.queried_title}`
@@ -1565,7 +1864,7 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen }) {
                       </button>
                     </div>
                   )}
-                  {canMarkSeen && (
+                  {canPassTonight && (
                     <div style={{ marginTop: 8 }}>
                       {choosingReason ? (
                         <div className="answer-controls" role="group" aria-label="Why not tonight?" style={{ marginTop: 0 }}>
@@ -1888,6 +2187,14 @@ function ScreenHistory({ nav, history, source }) {
                       chose · from a shortlist
                     </div>
                   )}
+                  {entry.mode === "together" && (
+                    <div
+                      className="meta"
+                      style={{ marginTop: 10, fontSize: 9.5, letterSpacing: "0.16em", color: "var(--bone-4)" }}
+                    >
+                      for two · with {entry.partner_name || "them"}
+                    </div>
+                  )}
                   {entry.answered_from === "myanimelist" && (
                     <div
                       className="meta"
@@ -2012,6 +2319,14 @@ function ScreenHistory({ nav, history, source }) {
   );
 }
 
+function partnerName(partner) {
+  return partner?.kind === "mal" ? partner.username : partner?.name?.trim() || "them";
+}
+
+function possessive(name) {
+  return name === "them" ? "their" : `${name}'s`;
+}
+
 function readSession(key) {
   try {
     return sessionStorage.getItem(key) || "";
@@ -2110,12 +2425,12 @@ async function askUntilValid({ label, ask, validate }) {
   return null;
 }
 
-async function askForAllowedRecommendation({ mood, signals, candidateList, memory, unwatchedTitles }) {
+async function askForAllowedRecommendation({ mood, signals, candidateList, memory, unwatchedTitles, ask = askEn, label = "recommendation" }) {
   const modelCandidates = candidateList.map(toModelCandidate);
   const result = await askUntilValid({
-    label: "recommendation",
+    label,
     ask: (previousAttemptRejected) =>
-      askEn({ mood, ...signals, candidateList: modelCandidates, previousAttemptRejected }),
+      ask({ mood, ...signals, candidateList: modelCandidates, previousAttemptRejected }),
     validate: (recommendation) => validateRecommendation(recommendation, candidateList, memory, unwatchedTitles)
   });
 

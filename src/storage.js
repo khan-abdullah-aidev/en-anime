@@ -4,6 +4,7 @@ const OAUTH_KEY = "en.oauth";
 const MANUAL_LIST_KEY = "en.manualList";
 const TASTE_PROFILE_KEY = "en.tasteProfile";
 const RECOMMENDATION_MEMORY_KEY = "en.recommendationMemory";
+const PARTNER_KEY = "en.partner";
 
 export function loadTokens() {
   return readJson(TOKEN_KEY, null);
@@ -125,6 +126,17 @@ export function removeRecommendationFromMemory(recommendation) {
   );
   saveRecommendationMemoryCache(next);
   return next;
+}
+
+// "For two": who the user last watched with -
+// { kind: "mal", username } or { kind: "manual", name, list }.
+export function loadPartner() {
+  const partner = readJson(PARTNER_KEY, null);
+  return partner?.kind === "mal" || partner?.kind === "manual" ? partner : null;
+}
+
+export function savePartner(partner) {
+  localStorage.setItem(PARTNER_KEY, JSON.stringify(partner));
 }
 
 export function loadManualList() {

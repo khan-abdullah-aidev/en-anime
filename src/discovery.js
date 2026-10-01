@@ -1,7 +1,7 @@
 import { aniListRequest, resolveAnimeOnAniList } from "./anilist.js";
 import { buildCandidatePool, createExclusionCheck, isStillExcluded } from "./recommendationEngine.js";
 import { streamingLinks } from "./streaming.js";
-import { normalizeTitleForCompare, parseManualTitles, uniqueTitles } from "./titleUtils.js";
+import { animeTitleKeys, normalizeTitleForCompare, parseManualTitles, uniqueTitles } from "./titleUtils.js";
 
 // Candidates come from all of AniList rather than a fixed list:
 //  - "similar": what fans of the user's highest-rated shows recommend,
@@ -121,6 +121,119 @@ export async function buildOpenCandidatePool({ mood = "", passedOver = [], list,
   return { ...assemble({}), constraints, constraintsRelaxed: true };
 }
 
+// "For two": one pool for two people. Seeds come from both people's
+// favorites (five each); nothing either has seen gets in, though a show on
+// the other person's plan-to-watch list is allowed and flagged; and sequels
+// are left out entirely, since a continuation only works if both finished
+// the first part. Titles that fans of BOTH people's favorites recommend rank
+// highest.
+export async function buildTogetherPool({ mood = "", passedOver = [], you, partner, recentPatterns, limit = POOL_LIMIT }) {
+  const { constraints, discoveryMood } = buildRequestFilters({ mood, passedOver });
+  const tasteProfile = combineTasteProfiles(you.tasteProfile, partner.tasteProfile);
+  let fetched = null;
+  try {
+    const [yourSeeds, theirSeeds] = await Promise.all([
+      selectSeeds({ list: you.list, history: you.history }),
+      selectSeeds({ list: partner.list, history: [] })
+    ]);
+    const half = (seeds, owner) => ({ by: seeds.by, seeds: seeds.seeds.slice(0, 5).map((seed) => ({ ...seed, owner })) });
+    const [yourGroups, theirGroups, discovery] = await Promise.all([
+      fetchSeedRecommendations(half(yourSeeds, "you")),
+      fetchSeedRecommendations(half(theirSeeds, "partner")),
+      fetchDiscovery({
+        favorites: toAniListFilters(tasteProfile.favoriteGenres),
+        mood: moodFilters(discoveryMood),
+        since: (new Date().getFullYear() - 2) * 10000 + 101,
+        constraints
+      })
+    ]);
+    const resolvedIds = (seeds) => (seeds.by === "anilistId" ? seeds.seeds.map((seed) => seed.anilistId) : []);
+    fetched = {
+      seedGroups: [...yourGroups, ...theirGroups],
+      discovery,
+      context: buildTogetherContext({
+        you,
+        partner,
+        yourWatchedAnilistIds: resolvedIds(yourSeeds),
+        theirWatchedAnilistIds: resolvedIds(theirSeeds)
+      })
+    };
+  } catch (error) {
+    console.warn("[En] AniList discovery failed; using the curated catalog instead", error.message);
+  }
+
+  const assemble = (activeConstraints) => {
+    const pool = fetched ? rankPool({ ...fetched, tasteProfile, mood: discoveryMood, constraints: activeConstraints, limit }) : [];
+    if (pool.length >= MIN_POOL) return { candidates: pool, source: "anilist" };
+
+    const context = fetched?.context || buildTogetherContext({ you, partner });
+    const catalog = buildCandidatePool({ mood: discoveryMood, tasteProfile, recentPatterns, memory: you.memory, limit: limit * 2 })
+      .filter((candidate) => meetsConstraints(candidate, activeConstraints) && !seenByPartner(candidate, context));
+    const taken = new Set(pool.map((candidate) => normalizeTitleForCompare(candidate.title)));
+    const merged = [...pool, ...catalog.filter((candidate) => !taken.has(normalizeTitleForCompare(candidate.title)))].slice(0, limit);
+    return { candidates: merged, source: pool.length ? "anilist+catalog" : "catalog" };
+  };
+
+  const result = assemble(constraints);
+  if (!Object.keys(constraints).length || result.candidates.length >= MIN_CONSTRAINED_POOL) {
+    return { ...result, constraints };
+  }
+  return { ...assemble({}), constraints, constraintsRelaxed: true };
+}
+
+export function buildTogetherContext({ you, partner, yourWatchedAnilistIds = [], theirWatchedAnilistIds = [] }) {
+  const context = buildUserContext({ list: you.list, history: you.history, memory: you.memory, watchedAnilistIds: yourWatchedAnilistIds });
+  const partnerSeenIds = new Set();
+  const partnerPlanIds = new Set();
+  const partnerSeenKeys = new Set();
+
+  if (Array.isArray(partner.list)) {
+    for (const entry of partner.list) {
+      if (entry.my_list_status?.status === "plan_to_watch") {
+        if (entry.id) partnerPlanIds.add(entry.id);
+        continue;
+      }
+      if (entry.id) partnerSeenIds.add(entry.id);
+      animeTitleKeys(entry).forEach((key) => partnerSeenKeys.add(key));
+    }
+  } else {
+    parseManualTitles(partner.list)
+      .map(normalizeTitleForCompare)
+      .filter(Boolean)
+      .forEach((key) => partnerSeenKeys.add(key));
+  }
+  theirWatchedAnilistIds.forEach((id) => context.excludedAnilistIds.add(id));
+
+  return { ...context, partnerSeenIds, partnerPlanIds, partnerSeenKeys, allowContinuations: false };
+}
+
+// Genres both people favor come first; what either one dislikes is avoided,
+// unless it's something both favor.
+export function combineTasteProfiles(yours = {}, theirs = {}) {
+  const mine = yours.favoriteGenres || [];
+  const other = theirs.favoriteGenres || [];
+  const otherKeys = new Set(other.map(normalizeTitleForCompare));
+  const shared = mine.filter((genre) => otherKeys.has(normalizeTitleForCompare(genre)));
+  const interleaved = [];
+  for (let i = 0; i < Math.max(mine.length, other.length); i += 1) {
+    if (mine[i]) interleaved.push(mine[i]);
+    if (other[i]) interleaved.push(other[i]);
+  }
+  const sharedKeys = new Set(shared.map(normalizeTitleForCompare));
+  return {
+    ...yours,
+    favoriteGenres: uniqueTitles([...shared, ...interleaved]).slice(0, 8),
+    dislikedTropes: uniqueTitles([...(yours.dislikedTropes || []), ...(theirs.dislikedTropes || [])])
+      .filter((trope) => !sharedKeys.has(normalizeTitleForCompare(trope)))
+  };
+}
+
+function seenByPartner(candidate, context) {
+  if (candidate.malId && context.partnerSeenIds?.has(candidate.malId)) return true;
+  return Boolean(context.partnerSeenKeys?.size) &&
+    candidateTitles(candidate).some((title) => context.partnerSeenKeys.has(normalizeTitleForCompare(title)));
+}
+
 // Hard limits read from the mood ("a film", "something short", "airing now",
 // "a 90s classic"). Patterns are deliberately narrow: "after a long day" must
 // not turn into "only long series".
@@ -214,6 +327,8 @@ export function toModelCandidate(candidate) {
     tags: candidate.tags?.length ? candidate.tags : candidate.themes,
     score: candidate.score,
     becauseYouLiked: candidate.because?.length ? candidate.because.slice(0, 3) : null,
+    becauseTheyLiked: candidate.becauseThem?.length ? candidate.becauseThem.slice(0, 3) : null,
+    onTheirPlanToWatch: candidate.onTheirPlanToWatch || null,
     continues: candidate.continues || null,
     airing: candidate.status === "RELEASING" || null,
     pacing: candidate.pacing,
@@ -421,11 +536,12 @@ export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfil
   const merged = new Map();
   const add = (candidate, source, extra = {}) => {
     if (!candidate?.anilistId || !isUsable(candidate)) return;
-    const entry = merged.get(candidate.anilistId) || { ...candidate, sources: new Set(), becauseWeights: new Map(), similarity: 0 };
+    const entry = merged.get(candidate.anilistId) || { ...candidate, sources: new Set(), becauseWeights: new Map(), becauseOwners: new Map(), similarity: 0 };
     entry.sources.add(source);
     if (extra.seed) {
       entry.similarity += extra.seed.weight * Math.log1p(Math.max(0, extra.rating || 0));
       entry.becauseWeights.set(extra.seed.title, (entry.becauseWeights.get(extra.seed.title) || 0) + extra.rating);
+      entry.becauseOwners.set(extra.seed.title, extra.seed.owner || "you");
     }
     merged.set(candidate.anilistId, entry);
   };
@@ -450,19 +566,30 @@ export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfil
 
     const labels = [...entry.genres, ...entry.tags].map(normalizeTitleForCompare);
     const count = (set) => labels.filter((label) => set.has(label)).length;
+    const owners = new Set(entry.becauseOwners.values());
+    // For two: fans of both people's favorites pointing here is the best sign.
+    const bothLiked = owners.has("you") && owners.has("partner");
+    const onTheirPlanToWatch = Boolean(entry.malId && context.partnerPlanIds?.has(entry.malId));
     const rankScore =
       entry.similarity +
       1.5 * count(favorite) -
       2.5 * count(disliked) +
       2.5 * count(moodKeys) +
       (Number.isFinite(entry.score) ? (entry.score - 70) / 6 : 0) +
-      (continuation.continues ? 2 : 0);
+      (continuation.continues ? 2 : 0) +
+      (bothLiked ? 3 : 0) +
+      (onTheirPlanToWatch ? 2 : 0);
 
+    const because = [...entry.becauseWeights.entries()].sort((a, b) => b[1] - a[1]).map(([title]) => title);
     ranked.push({
       ...entry,
       sources: [...entry.sources],
-      because: [...entry.becauseWeights.entries()].sort((a, b) => b[1] - a[1]).map(([title]) => title),
+      because: because.filter((title) => entry.becauseOwners.get(title) !== "partner"),
+      becauseThem: because.filter((title) => entry.becauseOwners.get(title) === "partner"),
+      bothLiked,
+      onTheirPlanToWatch,
       becauseWeights: undefined,
+      becauseOwners: undefined,
       continues: continuation.continues || null,
       rankScore: Math.round(rankScore * 100) / 100
     });
@@ -497,6 +624,7 @@ function isUsable(candidate) {
 function isExcludedCandidate(candidate, context) {
   if (candidate.malId && context.listIds.has(candidate.malId)) return true;
   if (context.excludedAnilistIds.has(candidate.anilistId)) return true;
+  if (seenByPartner(candidate, context)) return true;
   return candidateTitles(candidate).some((title) => context.isExcludedTitle(title));
 }
 
@@ -506,6 +634,7 @@ function isExcludedCandidate(candidate, context) {
 // stories never get this far; isUsable drops them.)
 function continuationOf(candidate, context) {
   if (!candidate.prequels?.length) return { ok: true };
+  if (context.allowContinuations === false) return { ok: false };
   const finished = candidate.prequels.find((prequel) =>
     (prequel.malId && context.completedIds.has(prequel.malId)) ||
     context.completedAnilistIds.has(prequel.anilistId) ||

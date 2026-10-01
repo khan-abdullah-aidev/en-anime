@@ -17,6 +17,16 @@ export async function fetchAnimeList(accessToken) {
   return sortByRecent(payload.data || []);
 }
 
+// "For two": the other person's public list, by MAL username.
+export async function fetchPartnerList(username) {
+  const response = await fetch(`/api/mal-user-list?${new URLSearchParams({ user: username })}`);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || "Could not read their MyAnimeList list.");
+  }
+  return sortByRecent(payload.data || []);
+}
+
 export class MalAuthError extends Error {
   constructor(message) {
     super(message);

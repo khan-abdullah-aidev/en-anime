@@ -7,7 +7,7 @@ const INTEGER = { type: "INTEGER" };
 const PICK_FIELDS = ["title", "title_jp", "year", "episodes", "genre", "reason", "log_line"];
 
 export function buildResponseSchema(kind, payload) {
-  if (kind === "recommend") {
+  if (kind === "recommend" || kind === "together") {
     return pickSchema(titlesFrom(payload.candidateList));
   }
   if (kind === "choose") {

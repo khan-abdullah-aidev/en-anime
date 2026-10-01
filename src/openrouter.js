@@ -15,6 +15,18 @@ export async function askEn(payload) {
   return recommendation;
 }
 
+// "For two": same JSON as a recommendation, with the partner's history added.
+export async function askEnTogether(payload) {
+  const userPayload = { ...payload, mood: payload.mood || "Surprise us" };
+  debugLog("[En debug] exact together LLM user payload", userPayload);
+  const content = await requestEn("together", userPayload);
+
+  const recommendation = parseRecommendation(content);
+  debugLog("[En debug] together LLM raw response text", content);
+  debugLog("[En debug] together LLM parsed recommendation", recommendation);
+  return recommendation;
+}
+
 export async function askEnVerdict(payload) {
   const userPayload = { ...payload, mood: payload.mood || "" };
   debugLog("[En debug] exact verdict LLM user payload", userPayload);
