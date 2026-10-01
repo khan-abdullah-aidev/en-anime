@@ -1,13 +1,7 @@
 const MAL_SEARCH_URL = "https://api.myanimelist.net/v2/anime";
 
 export default async function handler(req, res) {
-  setCorsHeaders(res, "GET, OPTIONS");
-
-  if (req.method === "OPTIONS") {
-    res.status(204).end();
-    return;
-  }
-
+  // Same-origin only: no CORS headers, so other sites' scripts can't call this.
   if (req.method !== "GET") {
     writeJson(res, 405, { error: "Method not allowed" });
     return;
@@ -91,11 +85,6 @@ function writeJson(res, statusCode, body) {
   res.status(statusCode).json(body);
 }
 
-function setCorsHeaders(res, methods) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.setHeader("Access-Control-Allow-Methods", methods);
-}
 
 function hasImage(node) {
   return Boolean(node?.main_picture?.large || node?.main_picture?.medium);
