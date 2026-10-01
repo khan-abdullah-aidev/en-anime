@@ -20,3 +20,20 @@ export async function kvCommand(config, command) {
   }
   return payload.result;
 }
+
+// Several commands in one round trip (Upstash's /pipeline). Returns each
+// command's result in order; a failed command throws.
+export async function kvPipeline(config, commands) {
+  const response = await fetch(`${config.url}/pipeline`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(commands)
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !Array.isArray(payload)) {
+    throw new Error(payload?.error || `Storage request failed (${response.status}).`);
+  }
+  const failed = payload.find((item) => item?.error);
+  if (failed) throw new Error(failed.error);
+  return payload.map((item) => item.result);
+}

@@ -5,6 +5,8 @@ import { defineConfig, devices } from "@playwright/test";
 // never touch real accounts. Not part of `npm test`, which Vercel runs on
 // every build without a browser.
 const PORT = 5199;
+// A stand-in for Upstash, so /api/room and /api/sync work in the tests.
+const STORAGE_PORT = 5198;
 
 export default defineConfig({
   testDir: "e2e",
@@ -15,12 +17,21 @@ export default defineConfig({
     baseURL: `http://localhost:${PORT}`,
     trace: "retain-on-failure"
   },
-  webServer: {
-    command: `npx vite --port ${PORT} --strictPort`,
-    url: `http://localhost:${PORT}`,
-    reuseExistingServer: !process.env.CI,
-    timeout: 60000
-  },
+  webServer: [
+    {
+      command: `node e2e/fake-upstash-server.js`,
+      url: `http://localhost:${STORAGE_PORT}`,
+      env: { PORT: String(STORAGE_PORT) },
+      reuseExistingServer: false
+    },
+    {
+      command: `npx vite --port ${PORT} --strictPort`,
+      url: `http://localhost:${PORT}`,
+      env: { KV_REST_API_URL: `http://localhost:${STORAGE_PORT}`, KV_REST_API_TOKEN: "e2e" },
+      reuseExistingServer: false,
+      timeout: 60000
+    }
+  ],
   projects: [
     { name: "desktop", use: { ...devices["Desktop Chrome"] } },
     // A phone, with reduced motion on: the path without screen transitions.

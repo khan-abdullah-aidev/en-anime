@@ -11,7 +11,14 @@ const PICK_FIELDS = ["title", "title_jp", "year", "episodes", "genre", "reason",
 export function buildResponseSchema(kind, payload) {
   if (kind === "mood") return moodSchema();
   if (kind === "recommend" || kind === "together") {
-    return pickSchema(titlesFrom(payload.candidateList));
+    const schema = pickSchema(titlesFrom(payload.candidateList));
+    // From two phones, the partner gets the reason addressed to them.
+    if (kind === "together" && payload.bothPerspectives) {
+      schema.properties.reason_for_them = STRING;
+      schema.properties.log_line_for_them = STRING;
+      schema.required = [...schema.required, "reason_for_them", "log_line_for_them"];
+    }
+    return schema;
   }
   if (kind === "choose") {
     return pickSchema(titlesFrom(payload.queriedTitles));

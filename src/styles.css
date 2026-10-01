@@ -693,3 +693,43 @@ h2[tabindex="-1"]:focus { outline: none; }
   user-select: all;
 }
 .suggestion-note .btn-quiet { padding: 0 0 0 4px; }
+
+/* ——— For two, from two phones ——— */
+.room-link {
+  border: 1px solid var(--hairline-strong);
+  color: var(--bone-2);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  margin: 0 auto;
+  max-width: 520px;
+  padding: 14px 16px;
+  user-select: all;
+  word-break: break-all;
+}
+.room-waiting {
+  align-items: center;
+  display: inline-flex;
+  gap: 10px;
+  margin-top: 28px;
+}
+.room-mood {
+  color: var(--bone);
+  font-size: 24px;
+  font-weight: 300;
+  line-height: 1.4;
+  margin: 0 auto;
+  max-width: 520px;
+  resize: none;
+  text-align: center;
+  width: 100%;
+}
+.room-form { margin: 0 auto; max-width: 560px; }
+.room-form .eyebrow { margin-bottom: 10px; }
+.room-form__note {
+  color: var(--bone-2);
+  font-family: var(--serif);
+  font-size: 18px;
+  font-style: italic;
+  margin: 0;
+}

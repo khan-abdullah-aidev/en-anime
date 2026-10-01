@@ -38,19 +38,23 @@ const CUES = {
 };
 const NON_LATIN = /[^\u0000-\u024f\s\d\p{P}\p{S}]/u;
 
-export async function readMood(mood, { passedOver = [] } = {}) {
+// partnerMood: the other person's mood, from two phones (see rooms.js).
+export async function readMood(mood, { passedOver = [], partnerMood = "" } = {}) {
   const text = String(mood || "").trim().slice(0, 500);
-  if (!text) return null;
+  const theirs = String(partnerMood || "").trim().slice(0, 500);
+  if (!text && !theirs) return null;
   const reasons = [...new Set(passedOver.map((pass) => pass.reason).filter(Boolean))].sort();
-  const key = `${text.toLowerCase().replace(/\s+/g, " ")}|${reasons.join(",")}`;
+  const squash = (value) => value.toLowerCase().replace(/\s+/g, " ");
+  const key = `${squash(text)}|${squash(theirs)}|${reasons.join(",")}`;
 
   const cached = readCache(key);
   if (cached) return cached;
 
   try {
-    const content = await withTimeout(requestEn("mood", { mood: text, ...(reasons.length ? { passedOver: reasons } : {}) }), TIMEOUT_MS);
-    const reading = parseMoodReading(content, { mood: text, passedOver: reasons });
-    debugLog("[En debug] mood reading", { mood: text, reasons, reading });
+    const payload = { mood: text, ...(theirs ? { partnerMood: theirs } : {}), ...(reasons.length ? { passedOver: reasons } : {}) };
+    const content = await withTimeout(requestEn("mood", payload), TIMEOUT_MS);
+    const reading = parseMoodReading(content, { mood: [text, theirs].filter(Boolean).join(" / "), passedOver: reasons });
+    debugLog("[En debug] mood reading", { mood: text, partnerMood: theirs, reasons, reading });
     if (reading) writeCache(key, reading);
     return reading;
   } catch (error) {

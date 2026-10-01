@@ -60,7 +60,11 @@ function modelAnswer(body, moodReading) {
     episodes: pick.episodes || 12,
     genre: (pick.genres || ["Drama"]).slice(0, 2).join(", "),
     reason: "You loved Mushishi. This one moves at the same pace.",
-    log_line: "The same pace."
+    log_line: "The same pace.",
+    // From two phones, the other person gets it addressed to them.
+    ...(payload.bothPerspectives
+      ? { reason_for_them: `You loved Barakamon. ${payload.userName || "They"} loved Mushishi. This sits between.`, log_line_for_them: "Somewhere between." }
+      : {})
   };
 }
 

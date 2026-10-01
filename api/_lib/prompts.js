@@ -134,6 +134,7 @@ ${HISTORY_RULES}
 partner.tasteProfile is computed from the partner's history the same way tasteProfile is from the user's. feedbackHistory is only the user's.
 
 The pick has to work for both of them, not just one. Weight what both score highly. Avoid what either one dropped or scored low, even if the other loved it. When a mood is given, it's for the two of them, and it decides what tonight is for.
+partner.mood, when present, is what the partner said they're in the mood for, in their own words, from their own phone; mood is then the user's alone. The two count equally. When they pull different ways, find what sits between them, and say so in one plain clause.
 
 candidateList is drawn from across AniList and already filtered: nothing either of them has watched, nothing En has recommended the user before, and no sequels. becauseYouLiked names the user's highly rated titles whose fans recommend this one; becauseTheyLiked does the same for the partner. A title with both is the strongest kind of candidate, because it reaches both of them through something each already loves. onTheirPlanToWatch means the partner saved it to watch. airing means it's still coming out weekly. If constraints is present, those are hard limits from the mood and every candidate meets them; if constraintsRelaxed is true, nothing met all of them, so say so plainly in one short clause.
 ${PASSED_OVER_RULES}
@@ -147,8 +148,9 @@ ${VOICE_RULES}
 - The example lines here show tone only, not content. Never reuse their wording.
 - Tone sample for reason: "You gave Mushishi a nine. Sam dropped Chainsaw Man at episode four. This one is quiet enough for you and moves enough for Sam."
 - log_line must be a separate single quiet line distilled from the same observation, not a summary. It should stand alone.
+- If bothPerspectives is true, the partner reads this pick on their own phone. Also write reason_for_them and log_line_for_them: the same pick explained to the partner, addressing them as "you" and the user by userName (if it's empty, "they"), with the same facts and the same rules.
 
-The JSON shape must be exactly:
+The JSON shape must be exactly (reason_for_them and log_line_for_them only when bothPerspectives is true):
 {
   "title": "string",
   "title_jp": "string",
@@ -156,7 +158,9 @@ The JSON shape must be exactly:
   "episodes": number,
   "genre": "string",
   "reason": "string",
-  "log_line": "string"
+  "log_line": "string",
+  "reason_for_them": "string",
+  "log_line_for_them": "string"
 }`;
 
 // Tonight's mood, in the user's words, turned into what to search AniList
@@ -169,6 +173,7 @@ Return strict JSON only.
 - A word that isn't on those lists is useless, however apt: there is no "Melancholy", "Atmospheric", "Relaxing" or "Slow Paced". Find the nearest names that are on them.
 - Read the feeling, not just the words. "rain on a Tuesday" asks for something quiet and a little melancholy (Slice of Life, Drama, Iyashikei). "my brain is fried" asks for something light and easy to follow (Comedy, Slice of Life, Episodic). "I need to feel something" asks for emotional weight (Drama, Tragedy). "something like a long train ride" asks for travel, landscapes and a slow pace (Travel, Rural, Iyashikei).
 - avoidGenres / avoidTags: ONLY what the mood itself says no to, with words like no, not, nothing, without, can't, don't, instead of, tired of ("nothing scary" rules out Horror; "no romance" rules out Romance; "I can't do gore" rules out Gore). Never infer avoidances from the feeling: a quiet mood does not rule out Action, a sad one does not rule out Comedy. Usually these are empty. avoidGenres may also use Ecchi; avoidTags may also use ${AVOID_TAGS.filter((tag) => !MOOD_TAGS.includes(tag)).join(", ")}.
+- partnerMood, when present, is what the other person watching said, from their own phone. Read both together: genres, tags and the reading are for the evening the two of them share, somewhere between the two moods. Either one's "no" counts.
 - passedOver, when present, lists why the user turned down picks tonight: "too heavy" means go lighter than the mood alone suggests (and you may avoid Tragedy), "too light" means go heavier, "too long" means shorter. Adjust for it.
 - length, era and airing are limits, and almost every mood has none: then length and era are "any" and airing is false. Tiredness, sadness or a wish for something easy is not a limit, and "a long train ride" is about the feeling, not the length.
   - length: "film" only when they ask for a film or movie; "tonight" when they want to finish it tonight; "short" when they ask for something short; "long" when they ask for a long series to sink into; otherwise "any".

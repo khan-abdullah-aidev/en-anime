@@ -6,6 +6,10 @@ describe("routes", () => {
   it("round-trips every screen that has an address", () => {
     for (const view of Object.values(VIEW)) {
       if (view === VIEW.THINKING) continue;
+      if (view === VIEW.ROOM) {
+        assert.deepEqual(parsePath(pathFor(view, "Abc_123-xyz")), { view, roomId: "Abc_123-xyz" });
+        continue;
+      }
       const entryId = view === VIEW.REVEAL || view === VIEW.FEEDBACK ? "abc-123" : undefined;
       assert.deepEqual(parsePath(pathFor(view, entryId)), entryId ? { view, entryId } : { view });
     }

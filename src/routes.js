@@ -16,7 +16,8 @@ export const VIEW = {
   TOGETHER: "together",
   TOGETHER_MOOD: "together_mood",
   USERNAME: "username",
-  KNOWS: "knows"
+  KNOWS: "knows",
+  ROOM: "room"
 };
 
 const PATHS = {
@@ -49,19 +50,25 @@ export const PARENT = {
   [VIEW.TOGETHER]: VIEW.MOOD,
   [VIEW.TOGETHER_MOOD]: VIEW.TOGETHER,
   [VIEW.USERNAME]: VIEW.LANDING,
-  [VIEW.KNOWS]: VIEW.HISTORY
+  [VIEW.KNOWS]: VIEW.HISTORY,
+  [VIEW.ROOM]: VIEW.MOOD
 };
 
 // The thinking screen has no address of its own: it sits on top of the page
 // that started the request, so a reload mid-request lands back there.
-export function pathFor(view, entryId) {
-  if (view === VIEW.REVEAL) return `/pick/${encodeURIComponent(entryId)}`;
-  if (view === VIEW.FEEDBACK) return `/pick/${encodeURIComponent(entryId)}/seen`;
+// id is the pick for REVEAL / FEEDBACK, and the room for ROOM ("For two,
+// from two phones": the link that gets sent is /with/<room>).
+export function pathFor(view, id) {
+  if (view === VIEW.ROOM) return `/with/${encodeURIComponent(id)}`;
+  if (view === VIEW.REVEAL) return `/pick/${encodeURIComponent(id)}`;
+  if (view === VIEW.FEEDBACK) return `/pick/${encodeURIComponent(id)}/seen`;
   return PATHS[view] || "/";
 }
 
 export function parsePath(pathname) {
   const clean = String(pathname || "/").replace(/\/+$/, "") || "/";
+  const room = clean.match(/^\/with\/([A-Za-z0-9_-]+)$/);
+  if (room) return { view: VIEW.ROOM, roomId: room[1] };
   const pick = clean.match(/^\/pick\/([^/]+)(\/seen)?$/);
   if (pick) {
     return { view: pick[2] ? VIEW.FEEDBACK : VIEW.REVEAL, entryId: decodeURIComponent(pick[1]) };

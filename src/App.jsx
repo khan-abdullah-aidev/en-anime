@@ -76,6 +76,19 @@ import { normalizeSnapshot } from "./syncMerge.js";
 import { sharePick } from "./shareCard.js";
 import { askAgainAfter, findCurrentPending, findReviewEntries, isAwaitingAnswer } from "./reviewQueue.js";
 import { readMood } from "./moodReading.js";
+import {
+  createRoom,
+  fetchRoom,
+  loadMyName,
+  loadRoom,
+  newRoomKey,
+  partnerListFromRoom,
+  roomLink,
+  saveMyName,
+  saveRoom,
+  trimListForRoom,
+  updateRoom
+} from "./rooms.js";
 
 // Lets the header (wordmark, "← back") reach navigation without threading
 // it through every screen.
@@ -95,7 +108,7 @@ function resolveRoute(target, { initial = false, sessionIds = new Set() } = {}) 
     if (!hasInput) return { view: VIEW.LANDING };
     return findReviewEntries(loadHistory(), sessionIds).length ? { view: VIEW.PENDING } : { view: VIEW.MOOD };
   };
-  const { view, entryId, titles } = target || {};
+  const { view, entryId, titles, roomId } = target || {};
 
   // A request can't survive a reload or back/forward; land where it started.
   if (!view || view === VIEW.THINKING) return home();
@@ -105,6 +118,8 @@ function resolveRoute(target, { initial = false, sessionIds = new Set() } = {}) 
     return loadHistory().some((entry) => entry.id === entryId) ? { view, entryId } : { view: VIEW.HISTORY };
   }
   if (view === VIEW.HISTORY || view === VIEW.MANUAL || view === VIEW.USERNAME) return { view };
+  // Someone opening a "two phones" link may not use En yet.
+  if (view === VIEW.ROOM) return roomId ? { view, roomId } : home();
   if (!hasInput) return { view: VIEW.LANDING };
   if (view === VIEW.SHORTLIST_MOOD && !titles?.length) return { view: VIEW.SHORTLIST };
   if (view === VIEW.TOGETHER_MOOD && !loadPartner()) return { view: VIEW.TOGETHER };
@@ -120,15 +135,15 @@ function initialRoute() {
 
 // Pushes or replaces a browser-history entry for a screen and returns its
 // position, which is how "← back" knows whether there's anywhere to go.
-function writeHistory(method, { view, entryId = null, titles }) {
+function writeHistory(method, { view, entryId = null, titles, roomId = null }) {
   // Remember how far down the page you were, so "back" returns there.
   if (method === "push" && window.history.state) {
     window.history.replaceState({ ...window.history.state, scrollY: window.scrollY }, "");
   }
   const currentIdx = window.history.state?.idx ?? 0;
   const idx = method === "push" ? currentIdx + 1 : currentIdx;
-  const url = view === VIEW.THINKING ? window.location.pathname : pathFor(view, entryId);
-  const state = { view, entryId, ...(titles ? { titles } : {}), idx };
+  const url = view === VIEW.THINKING ? window.location.pathname : pathFor(view, view === VIEW.ROOM ? roomId : entryId);
+  const state = { view, entryId, ...(titles ? { titles } : {}), ...(roomId ? { roomId } : {}), idx };
   window.history[method === "push" ? "pushState" : "replaceState"](state, "", url);
   return idx;
 }
@@ -156,6 +171,11 @@ export default function App() {
   const [thinkingMood, setThinkingMood] = useState("");
   // How En heard tonight's mood ("quiet and a little sad"), once it has.
   const [heardMood, setHeardMood] = useState("");
+  // "For two, from two phones": the room on screen, and what the server says.
+  const [roomId, setRoomId] = useState(initial.roomId || null);
+  const [room, setRoom] = useState({ status: "idle" });
+  const [joiningRoom, setJoiningRoom] = useState(false);
+  const roomBusy = useRef(false);
   const [error, setError] = useState("");
   // What the user has told En directly (preferences.js).
   const [preferences, setPreferences] = useState(() => loadPreferences());
@@ -272,6 +292,26 @@ export default function App() {
       });
   }, [tokens?.access_token, mode]);
 
+  // A room on screen (or a pick from one, just handed over) is checked every
+  // few seconds while the tab is visible.
+  const pollRoomId =
+    view === VIEW.ROOM ? roomId : view === VIEW.REVEAL && revealEntry?.room_id && sessionEntryIds.current.has(revealEntry.id) ? revealEntry.room_id : null;
+  useEffect(() => {
+    if (!pollRoomId) return undefined;
+    let stopped = false;
+    let timer;
+    const tick = async () => {
+      if (stopped) return;
+      if (document.visibilityState === "visible") await refreshRoom(pollRoomId);
+      if (!stopped) timer = setTimeout(tick, ROOM_POLL_MS);
+    };
+    tick();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [pollRoomId]);
+
   // "What En knows about you" reads the list when it opens.
   useEffect(() => {
     if (view !== VIEW.KNOWS) return undefined;
@@ -316,19 +356,20 @@ export default function App() {
   }, []);
 
   // In-app navigation: one browser-history entry per screen.
-  function go(nextView, { replace = false, entryId = null, titles } = {}) {
+  function go(nextView, { replace = false, entryId = null, titles, roomId = null } = {}) {
     setError("");
     if (nextView !== VIEW.THINKING) activeRequest.current += 1;
-    const route = { view: nextView, entryId, titles };
+    const route = { view: nextView, entryId, titles, roomId };
     showRoute(route, writeHistory(replace ? "replace" : "push", route));
   }
 
   // Screen changes cross-fade where the browser supports it (the View
   // Transitions API), with the wordmark holding still. The new screen is
   // rendered synchronously inside the transition so it's captured complete.
-  function showRoute({ view: nextView, entryId, titles }, idx, { scrollY = 0, animate = true } = {}) {
+  function showRoute({ view: nextView, entryId, titles, roomId: nextRoomId }, idx, { scrollY = 0, animate = true } = {}) {
     const apply = () => {
       if (entryId) setRevealEntryId(entryId);
+      if (nextRoomId) setRoomId(nextRoomId);
       if (titles) setShortlistTitles(titles);
       setRouteIdx(idx);
       setView(nextView);
@@ -480,8 +521,8 @@ export default function App() {
 
   // Reads the mood (see moodReading.js) while the list loads, and says how
   // it was heard on the thinking screen as soon as that's back.
-  function hearMood(requestId, moodText) {
-    return readMood(moodText, { passedOver: passedOverTonight() }).then((reading) => {
+  function hearMood(requestId, moodText, { partnerMood = "" } = {}) {
+    return readMood(moodText, { passedOver: passedOverTonight(), partnerMood }).then((reading) => {
       if (isCurrent(requestId) && reading?.reading) setHeardMood(reading.reading);
       return reading;
     });
@@ -578,10 +619,10 @@ export default function App() {
 
   // Candidates from all of AniList (see discovery.js), or the curated
   // catalog if AniList can't be reached.
-  async function findCandidates({ mood, list, signals, memory, partner: other, includeResume = false, moodReading = null }) {
+  async function findCandidates({ mood, list, signals, memory, partner: other, includeResume = false, moodReading = null, alsoExcluded = [] }) {
     const passedOver = passedOverTonight();
     const { excludedGenres, mutedSeeds } = loadPreferences();
-    const exclude = exclusionFilter(excludedGenres);
+    const exclude = exclusionFilter([...new Set([...excludedGenres, ...alsoExcluded])]);
     const { candidates, source, constraints, constraintsRelaxed } = other
       ? await buildTogetherPool({
           mood,
@@ -649,6 +690,7 @@ export default function App() {
     setHistory(appendHistory(entry));
     setStatus("");
     go(VIEW.REVEAL, { replace: true, entryId: entry.id });
+    return entry;
   }
 
   function handleRequestError(requestId, requestError) {
@@ -1024,6 +1066,18 @@ export default function App() {
   function handleNotTonight(reason) {
     if (!revealEntry) return;
     answerEntry(revealEntry, "not-tonight", { reason });
+    if (revealEntry.room_id) {
+      const local = loadRoom(revealEntry.room_id);
+      if (local?.role === "guest") {
+        // The choosing happens on their phone: tell it, and wait for the next one.
+        updateRoom(revealEntry.room_id, { action: "pass", key: local.key, pass: { pickId: revealEntry.room_pick_id, reason } })
+          .catch((roomError) => setError(roomError.message));
+        go(VIEW.ROOM, { replace: true, roomId: revealEntry.room_id });
+      } else {
+        handleRoomPick(revealEntry.room_id, { replace: true });
+      }
+      return;
+    }
     if (revealEntry.mode === "together") handleTogether(revealEntry.request_mood ?? "", { replace: true });
     else handleConsider(revealEntry.request_mood ?? "", { replace: true });
   }
@@ -1085,6 +1139,216 @@ export default function App() {
     setMalList([]);
     malListCache.current = null;
     go(VIEW.LANDING);
+  }
+
+  // ---------- For two, from two phones ----------
+  // One phone (the host's) makes a link and does the choosing; the other
+  // joins with its own list and mood. Both poll the room (api/room.js) while
+  // it's on screen: the host to start once the other person is in and to
+  // re-pick when they pass, the guest to show each pick as it arrives.
+
+  async function handleCreateRoom(name) {
+    setError("");
+    saveMyName(name);
+    try {
+      const { id, hostKey } = await createRoom({ hostName: name.trim() });
+      saveRoom(id, { role: "host", key: hostKey, hostName: name.trim() });
+      setRoom({ status: "idle" });
+      go(VIEW.ROOM, { roomId: id });
+    } catch (roomError) {
+      setError(roomError.code === "not_configured" ? "Picking from two phones needs En's storage, which isn't set up here." : roomError.message);
+    }
+  }
+
+  async function refreshRoom(id) {
+    const local = loadRoom(id);
+    try {
+      const data = await fetchRoom(id, local?.role === "host" ? { hostKey: local.key } : {});
+      setRoom({ status: "ready", id, data });
+      reactToRoom(id, data);
+    } catch (roomError) {
+      setRoom({ status: roomError.code === "gone" ? "gone" : "error", id, error: roomError.message });
+    }
+  }
+
+  function reactToRoom(id, data) {
+    const local = loadRoom(id);
+    if (!local) return;
+    const latest = data.picks.at(-1);
+    if (local.role === "host") {
+      if (!latest && local.ready && data.guest && !roomBusy.current && viewRef.current === VIEW.ROOM) {
+        handleRoomPick(id);
+        return;
+      }
+      // They passed on the pick that's showing: pick again, for both.
+      const pass = latest && data.passes.find((item) => item.pickId === latest.id && !local.handledPasses.includes(item.pickId));
+      if (pass && !roomBusy.current) {
+        saveRoom(id, { handledPasses: [...local.handledPasses, pass.pickId] });
+        const shown = loadHistory().find((entry) => entry.id === latest.id);
+        if (shown?.state === "unrated") answerEntry(shown, "not-tonight", { reason: pass.reason });
+        setNotice({
+          kind: "info",
+          text: `${data.guest?.name || "They"} passed on ${latest.recommendation.title}${pass.reason ? ` (${pass.reason})` : ""}. Finding another.`
+        });
+        handleRoomPick(id, { replace: viewRef.current === VIEW.REVEAL });
+      }
+      return;
+    }
+    if (latest && !local.seenPickIds.includes(latest.id)) receiveRoomPick(id, data, latest, local);
+  }
+
+  // The host's phone picks, from both lists and both moods, and posts it.
+  async function handleRoomPick(id, { replace = false } = {}) {
+    const local = loadRoom(id);
+    if (!local?.key || roomBusy.current) return;
+    roomBusy.current = true;
+    const requestId = beginThinking(local.hostMood || "", { replace });
+    const say = (text) => isCurrent(requestId) && setStatus(text);
+    try {
+      const data = await fetchRoom(id, { hostKey: local.key });
+      if (!data.guest?.list) throw new Error("They haven't joined yet.");
+      const guest = data.guest;
+      const name = guest.name || "them";
+      const heard = hearMood(requestId, local.hostMood || guest.mood, { partnerMood: local.hostMood ? guest.mood : "" });
+      const { list, signals, memory, unwatchedTitles } = await loadEnContext();
+      say(`Reading ${possessive(name)} list`);
+      const partnerList = partnerListFromRoom(guest);
+      const partnerTaste = buildTasteProfile({ malList: partnerList, feedbackHistory: [] });
+      say("Looking for something you'd both like");
+      const { candidates: candidateList, steering } = await findCandidates({
+        mood: [local.hostMood, guest.mood].filter(Boolean).join(" "),
+        list,
+        signals,
+        memory,
+        partner: { list: partnerList, tasteProfile: partnerTaste },
+        moodReading: await heard,
+        alsoExcluded: guest.excludedGenres || []
+      });
+      say("Considering");
+
+      const rec = await askForAllowedRecommendation({
+        mood: local.hostMood || "",
+        signals: {
+          ...signals,
+          ...steering,
+          partner: {
+            name: name === "them" ? "" : name,
+            ...(guest.mood ? { mood: guest.mood } : {}),
+            watchHistory: buildWatchHistoryDigest(partnerList),
+            tasteProfile: partnerTaste
+          },
+          userName: local.hostName || "",
+          bothPerspectives: true
+        },
+        candidateList,
+        memory,
+        unwatchedTitles,
+        ask: askEnTogether,
+        label: "together"
+      });
+      const pick = await withImage({ ...rec, mode: "together", partner_name: name }, [rec.title_jp]);
+      const entry = revealPick(requestId, pick, {
+        mood: `for two, with ${name}`,
+        request_mood: local.hostMood || "",
+        mode: "together",
+        partner_name: name,
+        room_id: id
+      });
+      // The host's own log entry id doubles as the pick's id in the room.
+      if (entry) await updateRoom(id, { action: "pick", key: local.key, pick: { id: entry.id, recommendation: pick } });
+    } catch (roomError) {
+      handleRequestError(requestId, roomError);
+    } finally {
+      roomBusy.current = false;
+    }
+  }
+
+  async function handleRoomReady(id, mood) {
+    const local = saveRoom(id, { hostMood: mood.trim(), ready: true });
+    try {
+      await updateRoom(id, { action: "host", key: local.key, hostMood: mood.trim() });
+    } catch {
+      // Their phone just won't show your mood; the pick doesn't need it there.
+    }
+    refreshRoom(id);
+  }
+
+  // The other person's side: their own list (however they keep it) and mood.
+  async function handleJoinRoom(id, { name, mood, source }) {
+    setError("");
+    setJoiningRoom(true);
+    try {
+      const list =
+        source.kind === "own"
+          ? await fetchOwnList()
+          : source.kind === "typed"
+            ? source.list.trim()
+            : await fetchPublicList({ kind: source.kind, username: source.username.trim() });
+      if (Array.isArray(list) ? !list.length : !String(list).trim()) {
+        throw new Error("That list is empty, so En has nothing to read.");
+      }
+      const local = loadRoom(id)?.key ? loadRoom(id) : saveRoom(id, { role: "guest", key: newRoomKey() });
+      const seenTitles = loadHistory()
+        .filter((entry) => entry.feedback === "good" || entry.feedback === "meh")
+        .map((entry) => entry.recommendation.title)
+        .slice(0, 200);
+      await updateRoom(id, {
+        action: "join",
+        key: local.key,
+        name: name.trim(),
+        mood: mood.trim(),
+        list: trimListForRoom(list),
+        seenTitles,
+        excludedGenres: loadPreferences().excludedGenres
+      });
+      saveMyName(name);
+      saveRoom(id, { role: "guest", guestName: name.trim(), guestMood: mood.trim(), joined: true });
+      // Someone new to En keeps the list they just used, for next time.
+      if (!hasRecommendationInput()) {
+        if (source.kind === "typed") {
+          saveManualList(list);
+          setManualList(list);
+          chooseMode("manual");
+        } else if (source.kind === "mal" || source.kind === "anilist") {
+          saveListSource({ kind: source.kind, username: source.username.trim() });
+          chooseMode("username");
+        }
+      }
+      await refreshRoom(id);
+    } catch (roomError) {
+      setError(roomError.message);
+    } finally {
+      setJoiningRoom(false);
+    }
+  }
+
+  // A pick arrived from the host's phone: into this person's own log, with
+  // the reason written to them.
+  function receiveRoomPick(id, data, latest, local) {
+    saveRoom(id, { seenPickIds: [...local.seenPickIds, latest.id] });
+    const previous = loadHistory().find((entry) => entry.room_id === id && entry.state === "unrated" && sessionEntryIds.current.has(entry.id));
+    if (previous) answerEntry(previous, "not-tonight");
+    const host = data.hostName || "them";
+    const { reason_for_them: reasonForThem, log_line_for_them: lineForThem, ...rec } = latest.recommendation;
+    const pick = { ...rec, reason: reasonForThem || rec.reason, log_line: lineForThem || rec.log_line, mode: "together", partner_name: host };
+    recordRecommendedAnime(pick, "recommended");
+    const entry = {
+      id: crypto.randomUUID(),
+      date: new Date().toISOString(),
+      recommendation: pick,
+      note: "",
+      feedback: "",
+      state: "unrated",
+      mood: `for two, with ${host}`,
+      request_mood: local.guestMood || "",
+      mode: "together",
+      partner_name: host,
+      room_id: id,
+      room_pick_id: latest.id
+    };
+    sessionEntryIds.current.add(entry.id);
+    setHistory(appendHistory(entry));
+    go(VIEW.REVEAL, { replace: viewRef.current === VIEW.REVEAL, entryId: entry.id });
   }
 
   // ---------- preferences ----------
@@ -1341,6 +1605,9 @@ export default function App() {
     clearHistory: handleClearHistory,
     disconnect: handleDisconnect,
     knows: () => go(VIEW.KNOWS),
+    createRoom: handleCreateRoom,
+    roomReady: handleRoomReady,
+    joinRoom: handleJoinRoom,
     share: handleShare,
     toggleMalSync: () => changePreferences({ malSync: loadPreferences().malSync === "on" ? "off" : "on" }),
     syncOn: handleSyncOn,
@@ -1427,6 +1694,21 @@ export default function App() {
             partner={partner}
             checking={checkingPartner}
             onSubmit={handlePartnerSubmit}
+            onCreateRoom={handleCreateRoom}
+            myName={loadMyName() || loadListSource()?.username || ""}
+          />
+        )}
+        {view === VIEW.ROOM && roomId && (
+          <ScreenRoom
+            key={roomId}
+            nav={nav}
+            roomId={roomId}
+            room={room.id === roomId ? room : { status: "loading" }}
+            local={loadRoom(roomId)}
+            history={history}
+            joining={joiningRoom}
+            ownList={hasRecommendationInput() ? (mode === "username" ? sourceLabel(loadListSource()) : mode === "manual" ? "typed" : "MyAnimeList") : ""}
+            myName={loadMyName() || loadListSource()?.username || ""}
           />
         )}
         {view === VIEW.TOGETHER_MOOD && partner && (
@@ -2121,15 +2403,27 @@ function ScreenUsername({ onLog, source, checking, onSubmit }) {
   );
 }
 
-// "For two", step one: whose list to read alongside the user's.
-function ScreenTogether({ onLog, partner, checking, onSubmit }) {
+// "For two", step one: whose list to read alongside the user's, or a link
+// so they can add it themselves from their own phone.
+function ScreenTogether({ onLog, partner, checking, onSubmit, onCreateRoom, myName }) {
   const [kind, setKind] = useState(partner?.kind || "mal");
   const [username, setUsername] = useState(partner?.kind === "mal" ? partner.username : "");
   const [name, setName] = useState(partner?.kind === "manual" ? partner.name : "");
   const [list, setList] = useState(partner?.kind === "manual" ? partner.list : "");
+  const [me, setMe] = useState(myName || "");
+  const [creating, setCreating] = useState(false);
   const ref = useRef(null);
-  const ready = !checking && (kind === "mal" ? username.trim() : list.trim());
-  const submit = () => ready && onSubmit({ kind, username, name, list });
+  const ready = !checking && !creating && (kind === "mal" ? username.trim() : kind === "manual" ? list.trim() : true);
+  const submit = async () => {
+    if (!ready) return;
+    if (kind === "link") {
+      setCreating(true);
+      await onCreateRoom(me);
+      setCreating(false);
+      return;
+    }
+    onSubmit({ kind, username, name, list });
+  };
 
   useEffect(() => {
     const t = setTimeout(() => ref.current?.focus(), 600);
@@ -2154,7 +2448,9 @@ function ScreenTogether({ onLog, partner, checking, onSubmit }) {
           >
             {kind === "mal"
               ? "Their MyAnimeList username. En reads their public list; they don't need to sign in."
-              : "What they've seen and loved, and what to call them."}
+              : kind === "manual"
+                ? "What they've seen and loved, and what to call them."
+                : "Send them a link. They add their own list and mood on their phone, and you both get the same pick."}
           </p>
 
           <div className="fade-up delay-3" style={{ maxWidth: 560, margin: "0 auto" }}>
@@ -2171,7 +2467,7 @@ function ScreenTogether({ onLog, partner, checking, onSubmit }) {
                 spellCheck={false}
                 className="meh-note-input"
               />
-            ) : (
+            ) : kind === "manual" ? (
               <>
                 <input
                   value={name}
@@ -2193,22 +2489,332 @@ function ScreenTogether({ onLog, partner, checking, onSubmit }) {
                 />
                 <hr className="hairline" style={{ marginTop: 8 }} />
               </>
+            ) : (
+              <input
+                ref={ref}
+                value={me}
+                onChange={(event) => setMe(event.target.value)}
+                onKeyDown={submitOnEnter(submit)}
+                aria-label="Your name, so they know who's asking"
+                placeholder="your name, so they know who's asking"
+                maxLength={40}
+                className="meh-note-input"
+              />
             )}
           </div>
 
           <div className="fade-up delay-4" style={{ marginTop: 64 }}>
             <button className="btn-link" onClick={submit} disabled={!ready} style={{ transition: "opacity 0.4s ease" }}>
-              {checking ? "Reading their list…" : "Continue"}
+              {kind === "link" ? (creating ? "Making the link…" : "Make the link") : checking ? "Reading their list…" : "Continue"}
             </button>
-            <div style={{ marginTop: 20 }}>
-              <button className="btn-quiet" onClick={() => setKind(kind === "mal" ? "manual" : "mal")}>
-                {kind === "mal" ? "or — type what they've loved instead" : "or — use their MyAnimeList"}
-              </button>
-            </div>
+            {kind === "link" ? (
+              <div style={{ marginTop: 20 }}>
+                <button className="btn-quiet" onClick={() => setKind("mal")}>
+                  or — add their list myself
+                </button>
+              </div>
+            ) : (
+              <>
+                <div style={{ marginTop: 20 }}>
+                  <button className="btn-quiet" onClick={() => setKind(kind === "mal" ? "manual" : "mal")}>
+                    {kind === "mal" ? "or — type what they've loved instead" : "or — use their MyAnimeList"}
+                  </button>
+                </div>
+                <div style={{ marginTop: 12 }}>
+                  <button className="btn-quiet" onClick={() => setKind("link")}>
+                    or — send them a link, from their own phone
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
     </div>
+  );
+}
+
+// "For two, from two phones": the link's page. The host shares it and says
+// what they're in the mood for; the other person adds their list and mood;
+// the pick then shows up on both (see the room handlers in App).
+function ScreenRoom({ nav, roomId, room, local, history, joining, ownList, myName }) {
+  if (room.status === "gone" || room.status === "error") {
+    return (
+      <RoomFrame nav={nav} eyebrow="For two">
+        <h2 className="serif-display fade-up delay-1" style={{ fontSize: 40, margin: "32px 0 14px", fontWeight: 300 }}>
+          {room.status === "gone" ? "This link has run out" : "En couldn't open the link"}
+        </h2>
+        <p className="fade-up delay-2" style={{ color: "var(--bone-3)", fontSize: 15, fontStyle: "italic" }}>
+          {room.status === "gone" ? "Links last twelve hours. Ask for a new one, or pick something on your own." : room.error}
+        </p>
+        <div className="fade-up delay-3" style={{ marginTop: 48 }}>
+          <button className="btn-link" onClick={nav.newRecommendation}>
+            Pick something on my own
+          </button>
+        </div>
+      </RoomFrame>
+    );
+  }
+  if (room.status !== "ready") {
+    return (
+      <RoomFrame nav={nav} eyebrow="For two">
+        <h2 className="visually-hidden">Opening the link</h2>
+        <div className="breathe" aria-hidden="true" style={{ marginTop: 40 }}>
+          <span className="dot" style={{ width: 8, height: 8 }}></span>
+        </div>
+        <p className="meta" role="status" style={{ marginTop: 24 }}>
+          Opening the link…
+        </p>
+      </RoomFrame>
+    );
+  }
+  return local?.role === "host" ? (
+    <RoomHost nav={nav} roomId={roomId} data={room.data} local={local} history={history} />
+  ) : (
+    <RoomGuest nav={nav} roomId={roomId} data={room.data} local={local} history={history} joining={joining} ownList={ownList} myName={myName} />
+  );
+}
+
+function RoomFrame({ nav, eyebrow, children }) {
+  return (
+    <div className="app-frame">
+      <Chrome onLog={nav.log} />
+      <div className="app-stage">
+        <div className="column" style={{ textAlign: "center" }}>
+          <div className="eyebrow fade-up">{eyebrow}</div>
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RoomHost({ nav, roomId, data, local, history }) {
+  const [mood, setMood] = useState(local.hostMood || "");
+  const [copied, setCopied] = useState("");
+  const link = roomLink(roomId);
+  const guest = data.guest;
+  const latest = data.picks.at(-1);
+  const pickEntry = latest && history.find((entry) => entry.id === latest.id);
+  const them = guest?.name || "They";
+
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopied("copied");
+    } catch {
+      setCopied("select the link and copy it");
+    }
+    setTimeout(() => setCopied(""), 2500);
+  }
+
+  async function shareLink() {
+    try {
+      await navigator.share({ title: "En", text: "Pick something to watch with me on En", url: link });
+    } catch {
+      // closed the share sheet; nothing to do
+    }
+  }
+
+  return (
+    <RoomFrame nav={nav} eyebrow="For two, from two phones">
+      <h2 className="serif-display fade-up delay-1" style={{ fontSize: 40, margin: "32px 0 14px", fontWeight: 300 }}>
+        {guest ? `${them} ${guest.name ? "is" : "are"} in` : "Send them this link"}
+      </h2>
+      <p className="fade-up delay-2" style={{ color: "var(--bone-3)", fontSize: 15, fontStyle: "italic", lineHeight: 1.6 }}>
+        {guest
+          ? guest.mood
+            ? `They're in the mood for “${guest.mood}”.`
+            : "They didn't say what they're in the mood for."
+          : "They open it on their phone and add their own list and mood. En picks one for both of you."}
+      </p>
+
+      {!pickEntry && (
+        <div className="fade-up delay-3" style={{ marginTop: 36 }}>
+          <div className="room-link" aria-label="The link to send">{link}</div>
+          <div className="log-panel__actions" style={{ justifyContent: "center" }}>
+            <button className="btn-quiet" onClick={copyLink}>
+              {copied || "copy the link"}
+            </button>
+            {typeof navigator.share === "function" && (
+              <button className="btn-quiet" onClick={shareLink}>
+                share it
+              </button>
+            )}
+          </div>
+          {!guest && (
+            <p className="meta room-waiting" role="status">
+              <span className="dot breathe" aria-hidden="true"></span> waiting for them to open it
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="fade-up delay-4" style={{ marginTop: 48 }}>
+        {pickEntry ? (
+          <>
+            <p style={{ color: "var(--bone-2)", fontSize: 18, fontStyle: "italic", margin: "0 0 24px" }}>
+              En picked {pickEntry.recommendation.title} for you both.
+            </p>
+            <button className="btn-link" onClick={() => nav.openPick(pickEntry.id)}>
+              See it
+            </button>
+          </>
+        ) : local.ready ? (
+          <p className="meta" role="status">
+            {guest ? "Choosing…" : "Ready. En will choose as soon as they're in."}
+          </p>
+        ) : (
+          <>
+            <textarea
+              value={mood}
+              onChange={(event) => setMood(event.target.value)}
+              onKeyDown={submitOnEnter(() => nav.roomReady(roomId, mood))}
+              aria-label="What are you in the mood for? Optional."
+              rows={2}
+              className="serif-display room-mood"
+              placeholder="what are you in the mood for?"
+            />
+            <hr className="hairline" style={{ margin: "8px auto 40px", maxWidth: 520 }} />
+            <button className="btn-link" onClick={() => nav.roomReady(roomId, mood)}>
+              {guest ? "Let En choose for two" : "I'm ready"}
+            </button>
+          </>
+        )}
+      </div>
+    </RoomFrame>
+  );
+}
+
+function RoomGuest({ nav, roomId, data, local, history, joining, ownList, myName }) {
+  const host = data.hostName || "Someone";
+  const hostShort = data.hostName || "them";
+  const [source, setSource] = useState(ownList ? "own" : "mal");
+  const [username, setUsername] = useState("");
+  const [list, setList] = useState("");
+  const [name, setName] = useState(myName || "");
+  const [mood, setMood] = useState(local?.guestMood || "");
+  const latest = data.picks.at(-1);
+  const pickEntry = latest && history.find((entry) => entry.room_pick_id === latest.id);
+  const passed = pickEntry?.state === "not_tonight";
+
+  if (!local?.joined) {
+    const ready = !joining && (source === "own" || (source === "typed" ? list.trim() : username.trim()));
+    const send = () => ready && nav.joinRoom(roomId, { name, mood, source: { kind: source, username, list } });
+    const site = source === "anilist" ? "AniList" : "MyAnimeList";
+    return (
+      <RoomFrame nav={nav} eyebrow="For two">
+        <h2 className="serif-display fade-up delay-1" style={{ fontSize: 40, margin: "32px 0 14px", fontWeight: 300 }}>
+          {host} wants to pick something to watch with you
+        </h2>
+        <p className="fade-up delay-2" style={{ color: "var(--bone-3)", fontSize: 15, fontStyle: "italic", lineHeight: 1.6, marginBottom: 48 }}>
+          Add your list and your mood. En reads both of you and picks one.
+        </p>
+
+        <div className="fade-up delay-3 room-form">
+          <div className="eyebrow">Your list</div>
+          {source === "own" ? (
+            <p className="room-form__note">En will read your {ownList === "typed" ? "list" : `${ownList} list`}.</p>
+          ) : source === "typed" ? (
+            <>
+              <textarea
+                value={list}
+                onChange={(event) => setList(event.target.value)}
+                aria-label="Anime you've watched and loved, separated by commas or new lines"
+                rows={2}
+                className="serif-display room-mood"
+                placeholder="Frieren, Mushishi, Your Name..."
+              />
+              <hr className="hairline" style={{ margin: "8px auto 0", maxWidth: 520 }} />
+            </>
+          ) : (
+            <input
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              aria-label={`Your ${site} username`}
+              placeholder={`your ${site} username`}
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              className="meh-note-input"
+            />
+          )}
+          <div className="log-panel__actions" style={{ justifyContent: "center" }}>
+            {[
+              ...(ownList ? [["own", "my En list"]] : []),
+              ["mal", "MyAnimeList"],
+              ["anilist", "AniList"],
+              ["typed", "type it"]
+            ]
+              .filter(([value]) => value !== source)
+              .map(([value, label]) => (
+                <button key={value} className="btn-quiet" onClick={() => setSource(value)}>
+                  or — {label}
+                </button>
+              ))}
+          </div>
+
+          <div className="eyebrow" style={{ marginTop: 36 }}>Your name</div>
+          <input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            aria-label={`What should ${hostShort} call you?`}
+            placeholder={`what should ${hostShort} call you?`}
+            maxLength={40}
+            className="meh-note-input"
+          />
+
+          <div className="eyebrow" style={{ marginTop: 36 }}>Tonight</div>
+          <textarea
+            value={mood}
+            onChange={(event) => setMood(event.target.value)}
+            onKeyDown={submitOnEnter(send)}
+            aria-label="What are you in the mood for? Optional."
+            rows={2}
+            className="serif-display room-mood"
+            placeholder="what are you in the mood for?"
+          />
+          <hr className="hairline" style={{ margin: "8px auto 0", maxWidth: 520 }} />
+        </div>
+
+        <div className="fade-up delay-4" style={{ marginTop: 48 }}>
+          <button className="btn-link" onClick={send} disabled={!ready} style={{ transition: "opacity 0.4s ease" }}>
+            {joining ? "Reading your list…" : `Send to ${hostShort}`}
+          </button>
+          <p className="meta" style={{ marginTop: 24, fontSize: 11, lineHeight: 1.6 }}>
+            Your list goes to En for this pick only, and is deleted within twelve hours.
+          </p>
+        </div>
+      </RoomFrame>
+    );
+  }
+
+  return (
+    <RoomFrame nav={nav} eyebrow="For two">
+      <h2 className="serif-display fade-up delay-1" style={{ fontSize: 40, margin: "32px 0 14px", fontWeight: 300 }}>
+        {pickEntry && !passed ? `En picked ${pickEntry.recommendation.title}` : passed ? `Told ${hostShort}` : `${host} is choosing`}
+      </h2>
+      <p className="fade-up delay-2" style={{ color: "var(--bone-3)", fontSize: 15, fontStyle: "italic", lineHeight: 1.6 }}>
+        {pickEntry && !passed
+          ? "For the two of you."
+          : passed
+            ? "En is choosing another, for both of you."
+            : data.hostMood
+              ? `You said “${local.guestMood || "nothing in particular"}”. ${hostShort} said “${data.hostMood}”. En is reading both lists.`
+              : `En has your list. It picks once ${hostShort} says what they're in the mood for.`}
+      </p>
+      <div className="fade-up delay-3" style={{ marginTop: 48 }}>
+        {pickEntry && !passed ? (
+          <button className="btn-link" onClick={() => nav.openPick(pickEntry.id)}>
+            See it
+          </button>
+        ) : (
+          <div className="breathe" aria-hidden="true">
+            <span className="dot" style={{ width: 8, height: 8 }}></span>
+          </div>
+        )}
+      </div>
+    </RoomFrame>
   );
 }
 
@@ -3524,6 +4130,8 @@ function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre
 
 // En's answer -> the MyAnimeList change it asks for (api/mal-status.js).
 const MAL_ACTION_FOR = { good: "good", meh: "meh", later: "later", watching: "tonight" };
+
+const ROOM_POLL_MS = 3000;
 
 const MAL_STATUS_NAMES = {
   watching: "watching",

@@ -207,3 +207,69 @@ test("answers reach MyAnimeList, even for picks saved without a MAL id", async (
   await expect(page.getByRole("status").filter({ hasText: "Your MyAnimeList already has Odd Taxi as plan to watch, so En left it." })).toBeVisible();
   expect(updates[1]).toMatchObject({ malId: 46102, action: "later" });
 });
+
+test("two phones, one pick: a link, both lists and moods, the same pick on each", async ({ browser }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "it's two browsers already; one run is enough");
+  const baseURL = testInfo.project.use.baseURL;
+  const host = await (await browser.newContext({ baseURL })).newPage();
+  const guest = await (await browser.newContext({ baseURL })).newPage();
+  const hostLog = await stubServices(host);
+  await stubServices(guest);
+  await seed(host, typedList);
+
+  // The host makes the link.
+  await host.goto("/together");
+  await host.getByRole("button", { name: "or — send them a link, from their own phone" }).click();
+  await host.getByLabel("Your name, so they know who's asking").fill("Abdullah");
+  await host.getByRole("button", { name: "Make the link" }).click();
+  await expect(host).toHaveURL(/\/with\/[A-Za-z0-9_-]{20}$/);
+  await expect(host.getByRole("heading", { name: "Send them this link" })).toBeVisible();
+  const link = await host.locator(".room-link").textContent();
+  expect(link).toBe(host.url());
+
+  // Someone new to En opens it and adds their own list and mood.
+  await guest.goto(link);
+  await expect(guest.getByRole("heading", { name: "Abdullah wants to pick something to watch with you" })).toBeVisible();
+  await guest.getByRole("button", { name: "or — type it" }).click();
+  await guest.getByLabel(/Anime you've watched and loved/).fill("Barakamon, Yuru Camp");
+  await guest.getByLabel("What should Abdullah call you?").fill("Sam");
+  await guest.getByLabel("What are you in the mood for? Optional.").fill("something funny");
+  await guest.getByRole("button", { name: "Send to Abdullah" }).click();
+  await expect(guest.getByRole("heading", { name: "Abdullah is choosing" })).toBeVisible();
+
+  // The host sees them arrive, says their own mood, and En picks for both.
+  await expect(host.getByRole("heading", { name: "Sam is in" })).toBeVisible({ timeout: 10000 });
+  await expect(host.getByText("They're in the mood for “something funny”.")).toBeVisible();
+  await host.getByLabel("What are you in the mood for? Optional.").fill("rain on a tuesday");
+  await host.getByRole("button", { name: "Let En choose for two" }).click();
+  await expect(host).toHaveURL(/\/pick\//);
+
+  const together = () => hostLog.en.filter((body) => body.kind === "together").map((body) => body.payload);
+  expect(together()[0]).toMatchObject({ mood: "rain on a tuesday", userName: "Abdullah", bothPerspectives: true, partner: { name: "Sam", mood: "something funny" } });
+  expect(hostLog.en.find((body) => body.kind === "mood").payload).toMatchObject({ mood: "rain on a tuesday", partnerMood: "something funny" });
+  const title = together()[0].candidateList[0].title;
+  await expect(host.getByRole("heading", { level: 1 })).toHaveText(title);
+  await expect(host.getByText("You loved Mushishi. This one moves at the same pace.")).toBeVisible();
+
+  // The same pick on the other phone, explained to them.
+  await expect(guest).toHaveURL(/\/pick\//, { timeout: 10000 });
+  await expect(guest.getByRole("heading", { level: 1 })).toHaveText(title);
+  await expect(guest.getByText("You loved Barakamon. Abdullah loved Mushishi. This sits between.")).toBeVisible();
+  await expect(guest.getByText("・ for you and Abdullah")).toBeVisible();
+
+  // Their "not tonight" reaches the host's phone, which picks again for both.
+  await guest.getByRole("button", { name: "or — not tonight" }).click();
+  await guest.getByRole("button", { name: "too heavy" }).click();
+  await expect(guest.getByRole("heading", { name: "Told Abdullah" })).toBeVisible();
+  await expect(host.getByRole("status").filter({ hasText: "Sam passed on" })).toBeVisible({ timeout: 10000 });
+  await expect.poll(() => together().length, { timeout: 15000 }).toBe(2);
+  expect(together()[1].passedOverTonight).toEqual([{ title, reason: "too heavy" }]);
+  const second = together()[1].candidateList[0].title;
+  expect(second).not.toBe(title);
+  await expect(host.getByRole("heading", { level: 1 })).toHaveText(second);
+  await expect(guest.getByRole("heading", { level: 1 })).toHaveText(second, { timeout: 10000 });
+
+  // Each phone keeps it in its own log.
+  await guest.getByRole("button", { name: "LOG" }).click();
+  await expect(guest.getByText("for two · with Abdullah").first()).toBeVisible();
+});
