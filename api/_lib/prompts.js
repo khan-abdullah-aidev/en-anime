@@ -1,5 +1,6 @@
 // System prompts live server-side so the endpoint only runs En-shaped requests
 // and the Gemini key never reaches the browser.
+import { AVOID_TAGS, MOOD_GENRES, MOOD_TAGS } from "../../src/moodVocabulary.js";
 
 const HISTORY_RULES = `watchHistory is the user's own history. After tonight's mood, it is your strongest signal.
 - If watchHistory.source is "myanimelist": summary has their status counts and average score. recent is their latest list activity, newest first, with status, score and progress (episodes watched / total). favorites are their highest-scored titles. dropped are recent drops and how far they got before stopping. lowRated are shows they finished but scored low. inProgress is what they're watching or have on hold right now. A missing score means unscored.
@@ -163,28 +164,29 @@ The JSON shape must be exactly:
 const MOOD_PROMPT = `You are En's ear. The user said how they feel tonight, or what they're in the mood for, in their own words (mood). Translate it into what to search AniList for.
 Return strict JSON only.
 
-- genres: up to 3 AniList genres that fit what the mood asks for. tags: up to 4 AniList tags. Use only names from the allowed lists.
-- Read the feeling, not just the words. "rain on a Tuesday" asks for something quiet and a little melancholy. "my brain is fried" asks for something light and easy to follow. "I need to feel something" asks for emotional weight. "something like a long train ride" asks for travel, landscapes and a slow pace.
-- Choose what the mood asks for, not what it mentions: "nothing scary" is not a request for Horror.
-- avoidGenres / avoidTags: what the mood rules out, plainly or clearly ("nothing sad", "not another isekai", "I can't do gore tonight"). Empty when nothing is ruled out.
-- passedOver, when present, lists why the user turned down picks tonight: "too heavy" means go lighter than the mood alone suggests, "too light" means go heavier, "too long" means shorter. Adjust for it.
-- Limits only when the mood plainly states one; otherwise null. film: true only when they ask for a film or movie. maxEpisodes: "something I can finish tonight" is 4, "short" is 13. minEpisodes: "something long to sink into" is 24. airing: true only for shows airing now. yearMin / yearMax only for an era they name ("from the 90s" is 1990 to 1999, "an old one" is a yearMax of 2005).
+- genres: up to 3 genres, only from this list: ${MOOD_GENRES.join(", ")}.
+- tags: up to 4 tags, only from this list, spelled exactly as written: ${MOOD_TAGS.join(", ")}.
+- A word that isn't on those lists is useless, however apt: there is no "Melancholy", "Atmospheric", "Relaxing" or "Slow Paced". Find the nearest names that are on them.
+- Read the feeling, not just the words. "rain on a Tuesday" asks for something quiet and a little melancholy (Slice of Life, Drama, Iyashikei). "my brain is fried" asks for something light and easy to follow (Comedy, Slice of Life, Episodic). "I need to feel something" asks for emotional weight (Drama, Tragedy). "something like a long train ride" asks for travel, landscapes and a slow pace (Travel, Rural, Iyashikei).
+- avoidGenres / avoidTags: ONLY what the mood itself says no to, with words like no, not, nothing, without, can't, don't, instead of, tired of ("nothing scary" rules out Horror; "no romance" rules out Romance; "I can't do gore" rules out Gore). Never infer avoidances from the feeling: a quiet mood does not rule out Action, a sad one does not rule out Comedy. Usually these are empty. avoidGenres may also use Ecchi; avoidTags may also use ${AVOID_TAGS.filter((tag) => !MOOD_TAGS.includes(tag)).join(", ")}.
+- passedOver, when present, lists why the user turned down picks tonight: "too heavy" means go lighter than the mood alone suggests (and you may avoid Tragedy), "too light" means go heavier, "too long" means shorter. Adjust for it.
+- Limits only when the mood states one outright; otherwise leave them out. Tiredness, sadness or a wish for something easy is not a limit. film: true only when they ask for a film or movie. maxEpisodes: "something I can finish tonight" is 4, "short" is 13. minEpisodes: "something long to sink into" is 24. airing: true only when they ask for something airing now. yearMin / yearMax only for an era they name ("from the 90s" is 1990 to 1999, "an old one" is a yearMax of 2005).
 - reading: 2 to 6 lowercase words that finish the sentence "Tonight sounds ..." and describe the feeling, like "quiet and a little sad" or "loud, fast, no thinking". No titles, no genre names.
-- If the mood says nothing about what to watch, return empty lists, null limits and an empty reading.
+- If the mood says nothing about what to watch, return empty lists, no limits and an empty reading.
 
-The JSON shape must be exactly:
+The JSON shape must be exactly (leave a limit out, or null, when the mood doesn't state it):
 {
   "reading": "string",
   "genres": ["string"],
   "tags": ["string"],
   "avoidGenres": ["string"],
   "avoidTags": ["string"],
-  "film": boolean | null,
-  "maxEpisodes": number | null,
-  "minEpisodes": number | null,
-  "airing": boolean | null,
-  "yearMin": number | null,
-  "yearMax": number | null
+  "film": boolean,
+  "maxEpisodes": number,
+  "minEpisodes": number,
+  "airing": boolean,
+  "yearMin": number,
+  "yearMax": number
 }`;
 
 export const PROMPTS = {

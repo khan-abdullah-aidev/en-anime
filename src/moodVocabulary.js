@@ -14,7 +14,7 @@ export const MOOD_TAGS = [
   "Episodic", "Anthology", "Slapstick", "Parody", "Satire", "Surreal Comedy", "Noir", "Cute Girls Doing Cute Things",
   "Cute Boys Doing Cute Things", "Revenge", "Survival", "Rehabilitation", "Conspiracy", "Class Struggle",
   // who
-  "Anti-Hero", "Ensemble Cast", "Elderly Protagonist", "Female Protagonist", "Primarily Adult Cast", "Primarily Child Cast",
+  "Anti-Hero", "Ensemble Cast", "Elderly Protagonist", "Female Protagonist", "Male Protagonist", "Primarily Adult Cast", "Primarily Child Cast",
   "Detective", "Robots", "Artificial Intelligence", "Aliens", "Ghost", "Vampire", "Samurai", "Ninja", "Witch",
   "Dragons", "Gods", "Pirates", "Zombie", "Idol", "Delinquents", "Teacher", "Hikikomori",
   // where and when
@@ -34,4 +34,11 @@ export const MOOD_TAGS = [
   "Baseball", "Basketball", "Boxing", "Cycling", "Football", "Ice Sports", "Swimming", "Tennis", "Table Tennis", "Volleyball",
   // who it's for
   "Josei", "Seinen", "Shoujo", "Shounen", "Kids"
+];
+
+// A mood can also rule out things it would never ask for.
+export const AVOID_GENRES = [...MOOD_GENRES, "Ecchi"];
+export const AVOID_TAGS = [
+  ...MOOD_TAGS,
+  "Gore", "Female Harem", "Male Harem", "Mixed Gender Harem", "Full CGI", "Bullying", "Suicide", "Torture", "Slavery"
 ];

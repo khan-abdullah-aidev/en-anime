@@ -3,7 +3,8 @@ import { after, beforeEach, describe, it } from "node:test";
 import { parseMoodReading, readMood } from "../src/moodReading.js";
 import { buildOpenCandidatePool, buildRequestFilters, buildUserContext, moodTerms, rankPool, toCandidate } from "../src/discovery.js";
 import { buildRecommendationMemory } from "../src/recommendationEngine.js";
-import { MOOD_GENRES, MOOD_TAGS } from "../src/moodVocabulary.js";
+import { AVOID_GENRES, MOOD_GENRES, MOOD_TAGS } from "../src/moodVocabulary.js";
+import { PROMPTS } from "../api/_lib/prompts.js";
 import { buildResponseSchema } from "../api/_lib/schemas.js";
 import handler from "../api/en.js";
 import { aniListMedia, json, withFetch } from "./fixtures.js";
@@ -47,6 +48,16 @@ describe("reading tonight's mood", () => {
     assert.deepEqual(parsed.genres, ["Comedy"]);
     assert.equal(parsed.maxEpisodes, null);
     assert.equal(parsed.minEpisodes, null);
+  });
+
+  it("only lets the reading rule things out, or set limits, when the mood says so", () => {
+    const eager = JSON.stringify(reading({ avoidGenres: ["Action"], avoidTags: ["Gore"], maxEpisodes: 13, yearMax: 2005, film: true, airing: true }));
+    const quiet = parseMoodReading(eager, { mood: "rain on a tuesday" });
+    assert.deepEqual([quiet.avoidGenres, quiet.avoidTags, quiet.maxEpisodes, quiet.yearMax, quiet.film, quiet.airing], [[], [], null, null, false, false]);
+    const said = parseMoodReading(eager, { mood: "nothing gory, a short 90s film that's airing" });
+    assert.deepEqual([said.avoidGenres, said.avoidTags, said.maxEpisodes, said.yearMax, said.film, said.airing], [["Action"], ["Gore"], 13, 2005, true, true]);
+    assert.deepEqual(parseMoodReading(eager, { mood: "rain on a tuesday", passedOver: ["too heavy"] }).avoidTags, ["Gore"], "a pass reason is a reason to steer away");
+    assert.equal(parseMoodReading(eager, { mood: "静かなものが見たい" }).maxEpisodes, 13, "other languages are taken as read");
   });
 
   it("returns nothing for an answer that says nothing, or isn't JSON", () => {
@@ -134,11 +145,13 @@ describe("api/en mood", () => {
     process.env = saved;
   });
 
-  it("constrains the answer to AniList's names", () => {
+  it("holds genres to AniList's names, and lists the tags in the prompt (a tag enum made the schema too big)", () => {
     const schema = buildResponseSchema("mood", { mood: "x" });
     assert.deepEqual(schema.properties.genres.items.enum, MOOD_GENRES);
-    assert.deepEqual(schema.properties.tags.items.enum, MOOD_TAGS);
-    assert.equal(schema.properties.maxEpisodes.nullable, true);
+    assert.deepEqual(schema.properties.avoidGenres.items.enum, AVOID_GENRES);
+    assert.equal(schema.properties.tags.items.enum, undefined);
+    assert.ok(!JSON.stringify(schema).includes("nullable"));
+    assert.ok(MOOD_TAGS.every((tag) => PROMPTS.mood.includes(tag)));
   });
 
   it("goes to the lighter model first, since it's on the way to the pick", async () => {
