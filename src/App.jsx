@@ -23,6 +23,7 @@ import {
 import {
   buildCandidatePool,
   buildRecommendationMemory,
+  buildUnwatchedTitles,
   deterministicRecommendation,
   findBlockedEvidenceTitle,
   findCandidateByRecommendation,
@@ -181,6 +182,7 @@ export default function App() {
     return {
       list,
       memory,
+      unwatchedTitles: buildUnwatchedTitles({ malList: list, history }),
       signals: {
         watchHistory: buildWatchHistoryDigest(list),
         tasteProfile,
@@ -239,7 +241,7 @@ export default function App() {
     lastMood.current = nextMood;
     beginThinking();
     try {
-      const { signals, memory } = await loadEnContext();
+      const { signals, memory, unwatchedTitles } = await loadEnContext();
       setStatus("Listening to tonight");
       const candidateList = buildCandidatePool({
         mood: nextMood,
@@ -249,7 +251,7 @@ export default function App() {
       });
       console.log("[En debug] candidate count", candidateList.length);
 
-      const rec = await askForAllowedRecommendation({ mood: nextMood, signals, candidateList, memory });
+      const rec = await askForAllowedRecommendation({ mood: nextMood, signals, candidateList, memory, unwatchedTitles });
       const pick = await withImage(rec, [rec.title_jp]);
       revealPick(pick, { mood: nextMood || "Surprise me" });
     } catch (considerError) {
@@ -1728,7 +1730,7 @@ function hasRecommendationInput() {
 // rethrown straight away instead of being papered over by a fallback.
 async function askUntilValid({ label, ask, validate }) {
   let previousAttemptRejected;
-  let lastError = "";
+  const failures = [];
 
   for (let attempt = 1; attempt <= MAX_RECOMMENDATION_ATTEMPTS; attempt += 1) {
     try {
@@ -1738,25 +1740,25 @@ async function askUntilValid({ label, ask, validate }) {
       if (validation.ok) {
         return { answer, validation };
       }
-      lastError = validation.error;
+      failures.push(`attempt ${attempt}: rejected "${answer?.title || ""}" - ${validation.error}`);
       previousAttemptRejected = { title: answer?.title || "", reason: validation.error };
     } catch (error) {
       if (isEnConfigError(error)) throw error;
-      lastError = error.message;
+      failures.push(`attempt ${attempt}: ${error.message}`);
       console.warn(`[En debug] ${label} attempt failed`, { attempt, error });
     }
   }
 
-  console.warn(`[En debug] ${label} fell back after ${MAX_RECOMMENDATION_ATTEMPTS} attempts`, lastError);
+  console.warn(`[En] ${label} fell back after ${MAX_RECOMMENDATION_ATTEMPTS} attempts:\n${failures.join("\n")}`);
   return null;
 }
 
-async function askForAllowedRecommendation({ mood, signals, candidateList, memory }) {
+async function askForAllowedRecommendation({ mood, signals, candidateList, memory, unwatchedTitles }) {
   const result = await askUntilValid({
     label: "recommendation",
     ask: (previousAttemptRejected) =>
       askEn({ mood, ...signals, candidateList, previousAttemptRejected }),
-    validate: (recommendation) => validateRecommendation(recommendation, candidateList, memory)
+    validate: (recommendation) => validateRecommendation(recommendation, candidateList, memory, unwatchedTitles)
   });
 
   return result
@@ -1957,7 +1959,7 @@ function countStatuses(list) {
   }, {});
 }
 
-function validateRecommendation(recommendation, candidateList, memory) {
+function validateRecommendation(recommendation, candidateList, memory, unwatchedTitles) {
   const required = ["title", "title_jp", "year", "episodes", "genre", "reason", "log_line"];
   const missing = required.find((key) => recommendation?.[key] === undefined || recommendation?.[key] === null || recommendation?.[key] === "");
   if (missing) {
@@ -1975,7 +1977,7 @@ function validateRecommendation(recommendation, candidateList, memory) {
 
   const blockedEvidenceTitle = findBlockedEvidenceTitle(
     `${recommendation.reason} ${recommendation.log_line}`,
-    memory
+    unwatchedTitles
   );
   if (blockedEvidenceTitle) {
     return {

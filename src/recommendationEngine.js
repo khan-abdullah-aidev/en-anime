@@ -123,16 +123,42 @@ export function buildExcludedTitlesFromMemory(memory) {
   ]);
 }
 
+// Titles a reason must not cite as taste evidence because the user hasn't
+// watched them: their current plan-to-watch list and En picks saved for
+// later. Built fresh from the live list on every request. The persisted
+// memory never drops a title, so a show that was plan-to-watch months ago and
+// has since been finished (often a favorite) used to stay "unwatched" forever,
+// and every reason that named it was rejected.
+export function buildUnwatchedTitles({ malList, history = [] }) {
+  const watchedKeys = new Set();
+  const unwatched = [];
+
+  for (const entry of Array.isArray(malList) ? malList : []) {
+    const titles = extractMalTitles(entry);
+    if (entry.my_list_status?.status === "plan_to_watch") {
+      unwatched.push(...titles);
+    } else {
+      titles.forEach((title) => watchedKeys.add(normalizeTitleForCompare(title)));
+    }
+  }
+
+  for (const entry of history) {
+    const titles = [entry.recommendation?.title, entry.recommendation?.title_jp].filter(Boolean);
+    if (entry.state === "pending") {
+      unwatched.push(...titles);
+    } else if (entry.feedback === "good" || entry.feedback === "meh") {
+      titles.forEach((title) => watchedKeys.add(normalizeTitleForCompare(title)));
+    }
+  }
+
+  return uniqueTitles(unwatched).filter((title) => !watchedKeys.has(normalizeTitleForCompare(title)));
+}
+
 // Comparing with spaces stripped made short titles and synonyms ("K", "DB")
 // match inside almost any sentence, which rejected otherwise valid
 // recommendations. Titles now have to appear as whole words.
-export function findBlockedEvidenceTitle(text, memory) {
-  const blockedTitles = uniqueTitles([
-    ...(memory?.watchlisted || []),
-    ...(memory?.pending || [])
-  ]);
-
-  return blockedTitles.find((title) => mentionsTitle(text, title)) || "";
+export function findBlockedEvidenceTitle(text, unwatchedTitles = []) {
+  return uniqueTitles(unwatchedTitles).find((title) => mentionsTitle(text, title)) || "";
 }
 
 function mentionsTitle(text, title) {
