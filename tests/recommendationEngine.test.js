@@ -5,7 +5,8 @@ import {
   buildRecommendationMemory,
   buildUnwatchedTitles,
   deterministicRecommendation,
-  findBlockedEvidenceTitle
+  findBlockedEvidenceTitle,
+  isStillExcluded
 } from "../src/recommendationEngine.js";
 import { buildTasteProfile } from "../src/tasteProfile.js";
 import { MAL_LIST } from "./fixtures.js";
@@ -74,5 +75,31 @@ describe("unwatched titles a reason must not cite", () => {
       { state: "rated", feedback: "good", recommendation: { title: "Mushishi" } }
     ];
     assert.deepEqual(buildUnwatchedTitles({ malList: "Odd Taxi", history }), ["Haibane Renmei"]);
+  });
+});
+
+describe("passed-over picks (not tonight)", () => {
+  const day = 24 * 60 * 60 * 1000;
+  const entry = (title, state, daysAgo) => ({
+    id: title,
+    state,
+    date: new Date(Date.now() - daysAgo * day).toISOString(),
+    ...(state === "not_tonight" ? { not_tonight_at: new Date(Date.now() - daysAgo * day).toISOString() } : {}),
+    recommendation: { title }
+  });
+
+  it("stay out of new pools for 60 days, then come back", () => {
+    assert.equal(isStillExcluded(entry("A", "not_tonight", 10)), true);
+    assert.equal(isStillExcluded(entry("A", "not_tonight", 61)), false);
+    assert.equal(isStillExcluded(entry("A", "rated", 400)), true, "real answers never expire");
+  });
+
+  it("rebuilds the recommended list from the log, so cooled-down and deleted picks drop out", () => {
+    const memory = buildRecommendationMemory({
+      malList: [],
+      history: [entry("Recent Pass", "not_tonight", 3), entry("Old Pass", "not_tonight", 90), entry("Rated", "rated", 200)],
+      existingMemory: { recommended: ["Old Pass", "Deleted From Log"] }
+    });
+    assert.deepEqual(memory.recommended, ["Recent Pass", "Rated"]);
   });
 });

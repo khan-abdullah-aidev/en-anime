@@ -143,10 +143,11 @@ function isWatchedTasteEntry(entry) {
   return status !== "plan_to_watch" && status !== "watching";
 }
 
-// Unrated entries are picks the user hasn't answered about yet - no signal.
+// Unrated entries are picks the user hasn't answered about yet, and "not
+// tonight" says nothing about the show - neither is a taste signal.
 export function compactFeedbackHistory(history = [], limit = 12) {
   return history
-    .filter((entry) => entry.state !== "unrated")
+    .filter((entry) => entry.state !== "unrated" && entry.state !== "not_tonight")
     .slice(0, limit)
     .map((entry) => ({
     title: entry.recommendation?.title || "",

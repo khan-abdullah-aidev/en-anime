@@ -209,6 +209,24 @@ button:focus-visible {
 }
 .answer-current { color: var(--shu); }
 
+.watch-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  justify-content: center;
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  margin: 6px 0 0;
+}
+.watch-links a {
+  color: var(--bone-2);
+  text-decoration: underline;
+  text-decoration-color: var(--hairline-strong);
+  text-underline-offset: 4px;
+}
+.watch-links a:hover,
+.watch-links a:focus-visible { color: var(--bone); }
+
 /* ——— Landing ——— */
 .landing-title {
   font-size: 76px;

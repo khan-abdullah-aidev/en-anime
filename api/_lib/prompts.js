@@ -11,7 +11,10 @@ If previousAttemptRejected is present, your last answer was rejected by En's che
 
 const ESTIMATE_RULES = `tasteProfile numbers like darknessTolerance and pacingPreference are ESTIMATES inferred from the few of the user's titles that overlap a small curated catalog, not something the user said. tasteProfile.estimateBasis is how many titles they came from; when it's 0 or small, they're sitting at a bland default and mean almost nothing. Never describe these numbers as a "stated preference," something the user "said," or anything the user asserted — they didn't. Treat them as the weakest signal you have, well below mood, watchHistory and feedbackHistory.`;
 
-const CANDIDATE_RULES = `candidateList is drawn from across AniList, not a fixed list: titles that fans of the user's highest-rated shows recommend, top titles in the genres they score highest, titles matching tonight's mood, and strong recent releases. It is already filtered: nothing on the user's list, nothing En has recommended before, and no sequels to shows they haven't finished. Each entry has genres, tags and an AniList score (out of 100). becauseYouLiked names the user's own highly rated titles whose fans recommend this one, which is a concrete, nameable link to their history. continues means it's the next part of a show they finished. Neither is a reason by itself: the mood still decides what tonight is for.`;
+const CANDIDATE_RULES = `candidateList is drawn from across AniList, not a fixed list: titles that fans of the user's highest-rated shows recommend, top titles in the genres they score highest, titles matching tonight's mood, and strong recent releases. It is already filtered: nothing on the user's list, nothing En has recommended before, and no sequels to shows they haven't finished. Each entry has genres, tags and an AniList score (out of 100). becauseYouLiked names the user's own highly rated titles whose fans recommend this one, which is a concrete, nameable link to their history. continues means it's the next part of a show they finished. airing means it's still coming out weekly. Neither is a reason by itself: the mood still decides what tonight is for.
+If constraints is present, those are hard limits read from the mood (formats, maxEpisodes/minEpisodes, status, yearMin/yearMax) and every candidate already meets them. If constraintsRelaxed is true, nothing met all of them: say so plainly in one short clause, then pick the closest fit.`;
+
+const PASSED_OVER_RULES = `passedOverTonight lists picks En already showed the user tonight that they passed on, with why (too long, too heavy, too light, or not feeling it). Move away from that reason: too long means shorter, too heavy means lighter, too light means weightier. Don't mention those titles, and don't apologize for them.`;
 
 const VOICE_RULES = `- Write like someone who notices things but does not announce that they notice.
 - No metaphors.
@@ -29,6 +32,7 @@ Use watchHistory, tonight's mood, and feedbackHistory. When a mood is given, it 
 ${HISTORY_RULES}
 ${ESTIMATE_RULES}
 ${CANDIDATE_RULES}
+${PASSED_OVER_RULES}
 candidateList is the only pool you may pick from. "title" must exactly match the title of one candidateList entry.
 Never cite a title the user hasn't watched as evidence of their taste.
 
@@ -71,6 +75,7 @@ Decide:
 - If it's a clear mismatch even accounting for mood (tone, pacing, franchise fatigue, repeats something they just watched or dropped): verdict is "no". "title" must be a DIFFERENT anime whose title exactly matches a candidateList entry. "queried_title" is the title En is vetoing.
 
 ${CANDIDATE_RULES}
+${PASSED_OVER_RULES}
 
 Reasoning requirements:
 - reason must be 2-4 short sentences maximum.

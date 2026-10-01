@@ -33,7 +33,7 @@ import {
   compactFeedbackHistory,
   summarizeRecentPatterns
 } from "./tasteProfile.js";
-import { buildWatchHistoryDigest, describeQueriedTitle } from "./watchHistory.js";
+import { answersFromList, buildWatchHistoryDigest, describeQueriedTitle } from "./watchHistory.js";
 import { buildOpenCandidatePool, toModelCandidate } from "./discovery.js";
 import { normalizeTitleForCompare, titleMatchesAnime } from "./titleUtils.js";
 import { resolveAnimeOnAniList } from "./anilist.js";
@@ -114,6 +114,9 @@ export default function App() {
   // picks from earlier visits, never one the user was just handed.
   const sessionEntryIds = useRef(new Set());
   const malListCache = useRef(null);
+  // The screen showing right now, for async work that finishes later.
+  const viewRef = useRef(view);
+  viewRef.current = view;
   // Bumped whenever the user leaves a request (back, LOG, ...). A late answer
   // from an abandoned request is dropped instead of popping up a pick.
   const activeRequest = useRef(0);
@@ -147,6 +150,17 @@ export default function App() {
   useEffect(() => {
     writeSession(MOOD_DRAFT_KEY, mood);
   }, [mood]);
+
+  // Picks the user has since completed or dropped on MyAnimeList don't need a
+  // "did you watch it?" question; check the list in the background on open.
+  useEffect(() => {
+    if (!tokens?.access_token || !loadHistory().some(isAwaitingAnswer)) return;
+    fetchAnimeListWithRefresh()
+      .then(applyListAnswers)
+      .catch(() => {
+        // Not worth an error here; the next request will surface it.
+      });
+  }, []);
 
   useEffect(() => {
     if (window.location.pathname !== "/callback" || handledCallback.current) return;
@@ -236,6 +250,7 @@ export default function App() {
   // Returns an id for the request; anything it does after an await checks
   // isCurrent(id) first, because the user may have navigated away meanwhile.
   function beginThinking(moodText, { replace = false } = {}) {
+    passOverUnanswered();
     setStatus(mode === "manual" ? "Reading what you told En" : "Reading your history");
     setThinkingMood(moodText || "");
     go(VIEW.THINKING, { replace });
@@ -247,12 +262,49 @@ export default function App() {
     return requestId === activeRequest.current;
   }
 
+  // Asking for another pick means tonight's unanswered ones were passed over.
+  // They're logged as "not tonight": no "did you watch it?" next visit, and
+  // they can come back after a cooldown instead of being banned for good.
+  // A pick marked "watch it tonight" is left alone.
+  function passOverUnanswered() {
+    const passed = loadHistory().filter((entry) =>
+      sessionEntryIds.current.has(entry.id) && entry.state === "unrated" && !entry.watch_tonight
+    );
+    passed.forEach((entry) => answerEntry(entry, "not-tonight"));
+  }
+
+  function passedOverTonight() {
+    return loadHistory()
+      .filter((entry) => sessionEntryIds.current.has(entry.id) && entry.state === "not_tonight")
+      .map((entry) => ({ title: entry.recommendation.title, reason: entry.pass_reason || "", episodes: entry.recommendation.episodes }));
+  }
+
+  // Records answers read off the user's MAL list (see answersFromList).
+  function applyListAnswers(list) {
+    const answers = answersFromList({ list, history: loadHistory() });
+    if (!answers.length) return;
+    const byId = new Map(loadHistory().map((entry) => [entry.id, entry]));
+    for (const { id, answer, reflection } of answers) {
+      const entry = byId.get(id);
+      if (entry) answerEntry(entry, answer, { reflection });
+    }
+    debugLog("[En debug] answered from MyAnimeList", answers);
+
+    // If the "did you watch it?" screen is up, skip what MAL just answered.
+    if (viewRef.current === VIEW.PENDING) {
+      const remaining = findReviewEntries(loadHistory(), sessionEntryIds.current).map((entry) => entry.id);
+      setPendingReviewIds(remaining);
+      if (!remaining.length) go(VIEW.MOOD, { replace: true });
+    }
+  }
+
   // Everything En knows about the user, gathered once per request. The log is
   // read from storage rather than state so an answer saved a moment ago (e.g.
   // "I've already seen it" right before asking again) is included.
   async function loadEnContext() {
     const list = mode === "manual" ? manualList : await fetchAnimeListWithRefresh();
     setMalList(Array.isArray(list) ? list : []);
+    applyListAnswers(list);
     const history = loadHistory();
 
     const tasteProfile = buildTasteProfile({
@@ -291,16 +343,24 @@ export default function App() {
   // Candidates from all of AniList (see discovery.js), or the curated
   // catalog if AniList can't be reached.
   async function findCandidates({ mood, list, signals, memory }) {
-    const { candidates, source } = await buildOpenCandidatePool({
+    const passedOver = passedOverTonight();
+    const { candidates, source, constraints, constraintsRelaxed } = await buildOpenCandidatePool({
       mood,
+      passedOver,
       list,
       history: loadHistory(),
       tasteProfile: signals.tasteProfile,
       recentPatterns: signals.recentPatterns,
       memory
     });
-    debugLog("[En debug] candidate pool", { source, count: candidates.length });
-    return candidates;
+    debugLog("[En debug] candidate pool", { source, count: candidates.length, constraints, constraintsRelaxed });
+    // Only sent when there's something to say, to keep the payload lean.
+    const steering = {
+      ...(Object.keys(constraints || {}).length ? { constraints } : {}),
+      ...(constraintsRelaxed ? { constraintsRelaxed: true } : {}),
+      ...(passedOver.length ? { passedOverTonight: passedOver.map(({ title, reason }) => ({ title, reason: reason || "not feeling it" })) } : {})
+    };
+    return { candidates, steering };
   }
 
   async function describeQueriedTitles(titles, list) {
@@ -365,10 +425,10 @@ export default function App() {
     try {
       const { list, signals, memory, unwatchedTitles } = await loadEnContext();
       say("Looking through everything you haven't seen");
-      const candidateList = await findCandidates({ mood: nextMood, list, signals, memory });
+      const { candidates: candidateList, steering } = await findCandidates({ mood: nextMood, list, signals, memory });
       say("Listening to tonight");
 
-      const rec = await askForAllowedRecommendation({ mood: nextMood, signals, candidateList, memory, unwatchedTitles });
+      const rec = await askForAllowedRecommendation({ mood: nextMood, signals: { ...signals, ...steering }, candidateList, memory, unwatchedTitles });
       const pick = await withImage(rec, [rec.title_jp]);
       revealPick(requestId, pick, { mood: nextMood || "Surprise me", request_mood: nextMood });
     } catch (considerError) {
@@ -456,7 +516,7 @@ export default function App() {
       const { list, memory, signals } = await loadEnContext();
       say("Weighing it against your history");
       const queriedTitles = [text];
-      const [queriedTitleHistory, candidateList] = await Promise.all([
+      const [queriedTitleHistory, { candidates: candidateList, steering }] = await Promise.all([
         describeQueriedTitles(queriedTitles, list),
         findCandidates({ mood: moodText, list, signals, memory })
       ]);
@@ -465,7 +525,7 @@ export default function App() {
         queriedTitles,
         queriedTitleHistory,
         mood: moodText,
-        signals,
+        signals: { ...signals, ...steering },
         candidateList,
         memory
       });
@@ -532,9 +592,18 @@ export default function App() {
 
   // Applies a "how was it?" answer to a logged pick: from the return-visit
   // question, the log, or a reopened pick.
-  function answerEntry(entry, answer, { note = "", seenBefore = false } = {}) {
+  function answerEntry(entry, answer, { note = "", seenBefore = false, reflection = "", reason = "" } = {}) {
     let patch;
-    if (answer === "later") {
+    if (answer === "not-tonight") {
+      patch = {
+        feedback: "",
+        feedback_note: "",
+        state: "not_tonight",
+        not_tonight_at: new Date().toISOString(),
+        pass_reason: reason,
+        note: reason ? `not tonight · ${reason}.` : "not tonight."
+      };
+    } else if (answer === "later") {
       patch = { feedback: "", feedback_note: "", state: "pending", note: "waiting in the watchlist" };
     } else if (answer === "pass") {
       patch = { feedback: "", feedback_note: "", state: "skipped", note: "passed on it." };
@@ -543,7 +612,8 @@ export default function App() {
         feedback: answer,
         state: "rated",
         feedback_note: note.trim(),
-        note: makeUserReflection(answer, note),
+        note: reflection || makeUserReflection(answer, note),
+        ...(reflection ? { answered_from: "myanimelist" } : {}),
         ...(seenBefore ? { seen_before: true } : {})
       };
     }
@@ -567,6 +637,18 @@ export default function App() {
 
   // "I've already seen it": keep how it landed as a taste signal, then ask
   // again with the mood that produced this pick (the title is already banned).
+  function handleWatchTonight() {
+    if (revealEntry) setHistory(updateHistoryEntry(revealEntry.id, { watch_tonight: true }));
+  }
+
+  // "Not tonight": log why, then ask again with the same mood. The reason
+  // steers the next pick ("too long" -> shorter, "too heavy" -> lighter).
+  function handleNotTonight(reason) {
+    if (!revealEntry) return;
+    answerEntry(revealEntry, "not-tonight", { reason });
+    handleConsider(revealEntry.request_mood ?? "", { replace: true });
+  }
+
   function handleSeenFeedback(feedback, feedbackNote = "") {
     if (!revealEntry) return;
     answerEntry(revealEntry, feedback, { note: feedbackNote, seenBefore: true });
@@ -659,6 +741,8 @@ export default function App() {
     saveForLater: handleSaveForLater,
     seenIt: () => revealEntry && go(VIEW.FEEDBACK, { entryId: revealEntry.id }),
     seenFeedback: handleSeenFeedback,
+    watchTonight: handleWatchTonight,
+    notTonight: handleNotTonight,
     pendingAnswer: handlePendingAnswer,
     answer: handleAnswer,
     openPick: (id) => go(VIEW.REVEAL, { entryId: id }),
@@ -1349,9 +1433,17 @@ function ScreenThinking({ onLog, status, mood, watchedCount, mode }) {
   );
 }
 
+const NOT_TONIGHT_REASONS = [
+  ["too long", "too long"],
+  ["too heavy", "too heavy"],
+  ["too light", "too light"],
+  ["just not it", ""]
+];
+
 function ScreenReveal({ nav, entry, isNewPick, canMarkSeen }) {
   const pick = entry.recommendation;
   const [settled, setSettled] = useState("");
+  const [choosingReason, setChoosingReason] = useState(false);
 
   return (
     <div className="app-frame reveal-a-frame">
@@ -1385,6 +1477,16 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen }) {
             >
               {formatAnimeMeta(pick)}
             </p>
+            {pick.watch_links?.length ? (
+              <p className="meta watch-links">
+                <span title="From AniList; availability varies by region">streams on</span>
+                {pick.watch_links.map((link) => (
+                  <a key={link.site} href={link.url} target="_blank" rel="noopener noreferrer">
+                    {link.site}
+                  </a>
+                ))}
+              </p>
+            ) : null}
           </div>
 
           <div className="reveal-scroll__copy ink-bloom delay-3">
@@ -1436,7 +1538,13 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen }) {
                 </p>
               ) : (
                 <>
-                  <button className="btn-link" onClick={() => setSettled("tonight")}>
+                  <button
+                    className="btn-link"
+                    onClick={() => {
+                      nav.watchTonight();
+                      setSettled("tonight");
+                    }}
+                  >
                     Watch it tonight
                   </button>
                   <div style={{ marginTop: 20 }}>
@@ -1455,6 +1563,24 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen }) {
                       <button className="btn-quiet" onClick={nav.seenIt}>
                         or — I've already seen it
                       </button>
+                    </div>
+                  )}
+                  {canMarkSeen && (
+                    <div style={{ marginTop: 8 }}>
+                      {choosingReason ? (
+                        <div className="answer-controls" role="group" aria-label="Why not tonight?" style={{ marginTop: 0 }}>
+                          <span className="meta answer-controls__prompt">why not?</span>
+                          {NOT_TONIGHT_REASONS.map(([label, reason]) => (
+                            <button key={label} className="btn-quiet" onClick={() => nav.notTonight(reason)}>
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <button className="btn-quiet" onClick={() => setChoosingReason(true)}>
+                          or — not tonight
+                        </button>
+                      )}
                     </div>
                   )}
                 </>
@@ -1595,6 +1721,8 @@ function PastPickAnswer({ entry, onAnswer }) {
         ? "Not rated yet."
         : entry.state === "skipped"
           ? "You passed on it."
+          : entry.state === "not_tonight"
+            ? `You passed on it that night${entry.pass_reason ? ` (${entry.pass_reason})` : ""}.`
           : entry.feedback === "good"
             ? "You said it was good."
             : "You said meh.";
@@ -1736,6 +1864,8 @@ function ScreenHistory({ nav, history, source }) {
                         ? "○ unrated"
                         : entry.state === "skipped"
                           ? "— passed"
+                          : entry.state === "not_tonight"
+                            ? "— not tonight"
                           : entry.feedback === "good"
                             ? "・ good"
                             : entry.feedback === "meh"
@@ -1756,6 +1886,14 @@ function ScreenHistory({ nav, history, source }) {
                       style={{ marginTop: 10, fontSize: 9.5, letterSpacing: "0.16em", color: "var(--bone-4)" }}
                     >
                       chose · from a shortlist
+                    </div>
+                  )}
+                  {entry.answered_from === "myanimelist" && (
+                    <div
+                      className="meta"
+                      style={{ marginTop: 10, fontSize: 9.5, letterSpacing: "0.16em", color: "var(--bone-4)" }}
+                    >
+                      from MyAnimeList
                     </div>
                   )}
                   {entry.seen_before && (
@@ -1814,7 +1952,7 @@ function ScreenHistory({ nav, history, source }) {
                       {stripMarkdown(entry.recommendation.log_line || entry.recommendation.reason)}
                     </em>
                   </p>
-                  {(entry.state === "rated" || entry.state === "skipped") && entry.note && (
+                  {["rated", "skipped", "not_tonight"].includes(entry.state) && entry.note && (
                     <p
                       style={{
                         marginTop: 18,
@@ -2037,7 +2175,8 @@ function applyResolvedMeta(pick, meta) {
     year: meta.year ?? pick.year,
     episodes: meta.episodes ?? pick.episodes,
     genre: meta.genre || pick.genre,
-    image_url: meta.image_url || pick.image_url || ""
+    image_url: meta.image_url || pick.image_url || "",
+    watch_links: meta.watch_links?.length ? meta.watch_links : pick.watch_links || []
   };
 }
 
@@ -2219,6 +2358,7 @@ function mergeCandidateMeta(recommendation, candidate) {
     episodes: candidate.episodes,
     genre: candidate.genre,
     image_url: candidate.image_url || recommendation.image_url || "",
+    watch_links: candidate.watchLinks || [],
     // Saved with the pick so later pools can exclude it by id, not just name.
     ...(candidate.anilistId ? { anilistId: candidate.anilistId } : {}),
     ...(candidate.malId ? { malId: candidate.malId } : {})

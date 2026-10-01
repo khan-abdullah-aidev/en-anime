@@ -1,5 +1,6 @@
 import { aniListRequest, resolveAnimeOnAniList } from "./anilist.js";
-import { buildCandidatePool, createExclusionCheck } from "./recommendationEngine.js";
+import { buildCandidatePool, createExclusionCheck, isStillExcluded } from "./recommendationEngine.js";
+import { streamingLinks } from "./streaming.js";
 import { normalizeTitleForCompare, parseManualTitles, uniqueTitles } from "./titleUtils.js";
 
 // Candidates come from all of AniList rather than a fixed list:
@@ -13,11 +14,13 @@ import { normalizeTitleForCompare, parseManualTitles, uniqueTitles } from "./tit
 
 const POOL_LIMIT = 60;
 const MIN_POOL = 8;
+// Below this, the mood's hard limits are relaxed rather than failing.
+const MIN_CONSTRAINED_POOL = 3;
 const SEED_LIMIT = 10;
 const RECS_PER_SEED = 12;
 const SEED_CACHE_TTL_MS = 3 * 24 * 60 * 60 * 1000;
 const DISCOVERY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const CACHE_KEY = "en.discoveryCache";
+const CACHE_KEY = "en.discoveryCache.v2"; // v2 adds streaming links
 const CACHE_MAX_ENTRIES = 8;
 const REQUEST_TIMEOUT_MS = 9000;
 
@@ -72,38 +75,130 @@ const MOOD_HINTS = [
 const MEDIA_FIELDS = `id idMal title { romaji english native } synonyms format status episodes isAdult
   startDate { year } genres averageScore popularity coverImage { extraLarge large }
   tags { name rank isMediaSpoiler isGeneralSpoiler }
-  relations { edges { relationType(version: 2) node { id idMal type title { romaji english } } } }`;
-const DISCOVERY_FILTER = "type: ANIME, isAdult: false, format_in: [TV, TV_SHORT, MOVIE, ONA, OVA], status_in: [FINISHED, RELEASING]";
+  relations { edges { relationType(version: 2) node { id idMal type title { romaji english } } } }
+  externalLinks { site url type }`;
+const DEFAULT_FORMATS = ["TV", "TV_SHORT", "MOVIE", "ONA", "OVA"];
 
-export async function buildOpenCandidatePool({ mood = "", list, history = [], tasteProfile, recentPatterns, memory, limit = POOL_LIMIT }) {
-  let pool = [];
+export async function buildOpenCandidatePool({ mood = "", passedOver = [], list, history = [], tasteProfile, recentPatterns, memory, limit = POOL_LIMIT }) {
+  const { constraints, discoveryMood } = buildRequestFilters({ mood, passedOver });
+  let fetched = null;
   try {
     const seeds = await selectSeeds({ list, history });
     const filters = {
       favorites: toAniListFilters(tasteProfile?.favoriteGenres || []),
-      mood: moodFilters(mood),
-      since: (new Date().getFullYear() - 2) * 10000 + 101
+      mood: moodFilters(discoveryMood),
+      since: (new Date().getFullYear() - 2) * 10000 + 101,
+      constraints
     };
     const [seedGroups, discovery] = await Promise.all([fetchSeedRecommendations(seeds), fetchDiscovery(filters)]);
     // In manual mode the typed favorites were resolved to exact AniList ids,
     // which is a far better "already watched" signal than their typed names.
     const watchedAnilistIds = seeds.by === "anilistId" ? seeds.seeds.map((seed) => seed.anilistId) : [];
-    const context = buildUserContext({ list, history, memory, watchedAnilistIds });
-    pool = rankPool({ seedGroups, discovery, context, tasteProfile, mood, limit });
+    fetched = { seedGroups, discovery, context: buildUserContext({ list, history, memory, watchedAnilistIds }) };
   } catch (error) {
     console.warn("[En] AniList discovery failed; using the curated catalog instead", error.message);
   }
 
-  if (pool.length >= MIN_POOL) {
-    return { candidates: pool, source: "anilist" };
+  const assemble = (activeConstraints) => {
+    const pool = fetched ? rankPool({ ...fetched, tasteProfile, mood: discoveryMood, constraints: activeConstraints, limit }) : [];
+    if (pool.length >= MIN_POOL) return { candidates: pool, source: "anilist" };
+
+    // AniList unreachable or the open pool came back thin: top up with the
+    // curated catalog so a recommendation can still be made.
+    const catalog = buildCandidatePool({ mood: discoveryMood, tasteProfile, recentPatterns, memory, limit: limit * 2 })
+      .filter((candidate) => meetsConstraints(candidate, activeConstraints));
+    const taken = new Set(pool.map((candidate) => normalizeTitleForCompare(candidate.title)));
+    const merged = [...pool, ...catalog.filter((candidate) => !taken.has(normalizeTitleForCompare(candidate.title)))].slice(0, limit);
+    return { candidates: merged, source: pool.length ? "anilist+catalog" : "catalog" };
+  };
+
+  const result = assemble(constraints);
+  if (!Object.keys(constraints).length || result.candidates.length >= MIN_CONSTRAINED_POOL) {
+    return { ...result, constraints };
+  }
+  // Nothing (or almost nothing) meets every limit: relax them rather than
+  // fail, and let the model say so.
+  return { ...assemble({}), constraints, constraintsRelaxed: true };
+}
+
+// Hard limits read from the mood ("a film", "something short", "airing now",
+// "a 90s classic"). Patterns are deliberately narrow: "after a long day" must
+// not turn into "only long series".
+export function parseConstraints(mood) {
+  const text = ` ${String(mood || "").toLowerCase()} `;
+  const constraints = {};
+
+  if (/\b(film|films|movie|movies)\b/.test(text)) constraints.formats = ["MOVIE"];
+
+  const under = text.match(/\b(under|less than|fewer than|at most|no more than|max(?:imum)?)\s+(\d{1,3})\s*(?:ep|eps|episodes)\b/);
+  if (under) {
+    const strict = ["under", "less than", "fewer than"].includes(under[1]);
+    constraints.maxEpisodes = Math.max(1, Number(under[2]) - (strict ? 1 : 0));
+  } else if (/\b(short|quick|one sitting|bite[- ]sized|few episodes)\b/.test(text)) {
+    constraints.maxEpisodes = 13;
+  } else if (/\b(long (?:series|show|one|anime)|something long|to sink into|binge|bingeable)\b/.test(text)) {
+    constraints.minEpisodes = 24;
   }
 
-  // AniList unreachable or the open pool came back thin: top up with the
-  // curated catalog so a recommendation can still be made.
-  const catalog = buildCandidatePool({ mood, tasteProfile, recentPatterns, memory, limit });
-  const taken = new Set(pool.map((candidate) => normalizeTitleForCompare(candidate.title)));
-  const merged = [...pool, ...catalog.filter((candidate) => !taken.has(normalizeTitleForCompare(candidate.title)))];
-  return { candidates: merged.slice(0, limit), source: pool.length ? "anilist+catalog" : "catalog" };
+  if (/\b(airing|currently airing|this season|ongoing|weekly)\b/.test(text)) constraints.status = "RELEASING";
+
+  const nineteen = text.match(/\b(?:19)?([5-9]0)'?s\b/);
+  const twenty = text.match(/\b20([0-2])0'?s\b/);
+  if (twenty || nineteen) {
+    const start = twenty ? 2000 + Number(twenty[1]) * 10 : 1900 + Number(nineteen[1]);
+    constraints.yearMin = start;
+    constraints.yearMax = start + 9;
+  } else if (/\b(classic|retro|old[- ]school|vintage|older)\b/.test(text)) {
+    constraints.yearMax = 2005;
+  } else if (/\b(recent|latest|this year|newer|brand new)\b/.test(text)) {
+    constraints.yearMin = new Date().getFullYear() - 3;
+  }
+
+  return constraints;
+}
+
+// Tonight's limits: the mood's, plus whatever "not tonight" reasons rule out.
+export function buildRequestFilters({ mood = "", passedOver = [] }) {
+  const constraints = parseConstraints(mood);
+  let discoveryMood = mood;
+  for (const pass of passedOver) {
+    if (pass.reason === "too long") {
+      // A 12-episode show was too long: go to films / very short; a long
+      // series was too long: anything up to a single cour.
+      constraints.maxEpisodes = Math.min(constraints.maxEpisodes ?? Infinity, (pass.episodes || 0) > 13 ? 13 : 2);
+    } else if (pass.reason === "too heavy") {
+      discoveryMood += " lighthearted gentle";
+    } else if (pass.reason === "too light") {
+      discoveryMood += " heavy dark";
+    }
+  }
+  return { constraints, discoveryMood: discoveryMood.trim() };
+}
+
+export function meetsConstraints(candidate, constraints = {}) {
+  const format = candidate.format || (candidate.episodes === 1 ? "MOVIE" : "TV");
+  const status = candidate.status || "FINISHED";
+  const episodes = Number(candidate.episodes) || 0;
+  if (constraints.formats && !constraints.formats.includes(format)) return false;
+  if (constraints.maxEpisodes != null && !(episodes && episodes <= constraints.maxEpisodes)) return false;
+  if (constraints.minEpisodes != null && !(episodes >= constraints.minEpisodes)) return false;
+  if (constraints.status && status !== constraints.status) return false;
+  if (constraints.yearMin != null && !(candidate.year >= constraints.yearMin)) return false;
+  if (constraints.yearMax != null && !(candidate.year <= constraints.yearMax)) return false;
+  return true;
+}
+
+// The AniList filter for discovery queries, with the hard limits applied by
+// AniList itself so "a film" fetches films instead of filtering a TV-heavy
+// list down to nothing. Values only ever come from parseConstraints.
+function discoveryFilter(constraints = {}) {
+  const parts = ["type: ANIME", "isAdult: false", `format_in: [${(constraints.formats || DEFAULT_FORMATS).join(", ")}]`];
+  parts.push(constraints.status ? `status: ${constraints.status}` : "status_in: [FINISHED, RELEASING]");
+  if (constraints.maxEpisodes != null) parts.push(`episodes_lesser: ${constraints.maxEpisodes + 1}`);
+  if (constraints.minEpisodes != null) parts.push(`episodes_greater: ${constraints.minEpisodes - 1}`);
+  if (constraints.yearMin != null) parts.push(`startDate_greater: ${constraints.yearMin * 10000}`);
+  if (constraints.yearMax != null) parts.push(`startDate_lesser: ${(constraints.yearMax + 1) * 10000}`);
+  return parts.join(", ");
 }
 
 // What the model sees for each candidate: enough to judge fit and to name a
@@ -120,6 +215,7 @@ export function toModelCandidate(candidate) {
     score: candidate.score,
     becauseYouLiked: candidate.because?.length ? candidate.because.slice(0, 3) : null,
     continues: candidate.continues || null,
+    airing: candidate.status === "RELEASING" || null,
     pacing: candidate.pacing,
     darkness: candidate.darkness
   });
@@ -210,35 +306,52 @@ async function fetchSeedRecommendations({ by, seeds }) {
 
 // ---------- discovery ----------
 
-async function fetchDiscovery({ favorites, mood, since }) {
+async function fetchDiscovery({ favorites, mood, since, constraints = {} }) {
+  const filter = discoveryFilter(constraints);
+  const airing = constraints.status === "RELEASING";
+  // New and airing shows often have no score yet, so for "airing now" sort
+  // by what's trending instead of demanding a score.
+  const quality = (minScore, minPopularity) =>
+    airing ? "popularity_greater: 2000, sort: [TRENDING_DESC]" : `averageScore_greater: ${minScore}, popularity_greater: ${minPopularity}, sort: [SCORE_DESC]`;
+  const page = (alias, perPage, extra) => `${alias}: Page(perPage: ${perPage}) { media(${filter}, ${extra}) { ${MEDIA_FIELDS} } }`;
+
+  // AniList's genre_in / tag_in match media that have ALL the listed values,
+  // so each genre or tag gets its own query (same request) to mean "any of".
+  // Names only ever come from the fixed lists above, never from user text.
   const aliases = [];
-  const variables = { since };
-  const declare = ["$since: FuzzyDateInt"];
-
-  if (favorites.genres.length) {
-    declare.push("$favGenres: [String]");
-    variables.favGenres = favorites.genres.slice(0, 3);
-    aliases.push(`genre: Page(perPage: 50) { media(${DISCOVERY_FILTER}, genre_in: $favGenres, averageScore_greater: 72, popularity_greater: 15000, sort: [SCORE_DESC]) { ${MEDIA_FIELDS} } }`);
+  favorites.genres.slice(0, 2).forEach((genre, index) => {
+    aliases.push(page(`genre${index}`, 25, `genre_in: [${JSON.stringify(genre)}], ${quality(72, 15000)}`));
+  });
+  favorites.tags.slice(0, 1).forEach((tag, index) => {
+    aliases.push(page(`genreTag${index}`, 20, `tag_in: [${JSON.stringify(tag)}], ${quality(70, 8000)}`));
+  });
+  const moodTerms = [
+    ...mood.tags.map((tag) => `tag_in: [${JSON.stringify(tag)}]`),
+    ...mood.genres.map((genre) => `genre_in: [${JSON.stringify(genre)}]`)
+  ].slice(0, 3);
+  moodTerms.forEach((term, index) => {
+    aliases.push(page(`mood${index}`, 20, `${term}, ${quality(68, 5000)}`));
+  });
+  // A year limit already decides the era, so "recent releases" would only
+  // contradict it.
+  if (constraints.yearMin == null && constraints.yearMax == null) {
+    aliases.push(page("recent", 40, `startDate_greater: ${since}, ${quality(74, 10000)}`));
   }
-  if (mood.tags.length) {
-    declare.push("$moodTags: [String]");
-    variables.moodTags = mood.tags;
-    aliases.push(`mood: Page(perPage: 40) { media(${DISCOVERY_FILTER}, tag_in: $moodTags, averageScore_greater: 68, popularity_greater: 5000, sort: [SCORE_DESC]) { ${MEDIA_FIELDS} } }`);
-  } else if (mood.genres.length) {
-    declare.push("$moodGenres: [String]");
-    variables.moodGenres = mood.genres;
-    aliases.push(`mood: Page(perPage: 40) { media(${DISCOVERY_FILTER}, genre_in: $moodGenres, averageScore_greater: 70, popularity_greater: 8000, sort: [SCORE_DESC]) { ${MEDIA_FIELDS} } }`);
+  if (!aliases.length) {
+    aliases.push(page("genre0", 50, quality(72, 15000)));
   }
-  aliases.push(`recent: Page(perPage: 40) { media(${DISCOVERY_FILTER}, startDate_greater: $since, averageScore_greater: 74, popularity_greater: 10000, sort: [SCORE_DESC]) { ${MEDIA_FIELDS} } }`);
 
-  const cacheKey = `disc:${JSON.stringify(variables)}`;
+  const query = `query { ${aliases.join("\n")} }`;
+  const cacheKey = `disc:${hashString(query)}`;
   const cached = readCache(cacheKey, DISCOVERY_CACHE_TTL_MS);
   if (cached) return cached;
 
-  const data = await aniListRequest(`query (${declare.join(", ")}) { ${aliases.join("\n")} }`, variables, { timeoutMs: REQUEST_TIMEOUT_MS });
-  const result = Object.fromEntries(
-    ["genre", "mood", "recent"].map((key) => [key, (data?.[key]?.media || []).map(toCandidate)])
-  );
+  const data = await aniListRequest(query, {}, { timeoutMs: REQUEST_TIMEOUT_MS });
+  const result = { genre: [], mood: [], recent: [] };
+  for (const [alias, value] of Object.entries(data || {})) {
+    const source = alias.startsWith("mood") ? "mood" : alias.startsWith("recent") ? "recent" : "genre";
+    result[source].push(...(value?.media || []).map(toCandidate));
+  }
   writeCache(cacheKey, result);
   return result;
 }
@@ -292,7 +405,7 @@ export function buildUserContext({ list, history = [], memory, watchedAnilistIds
   const completedAnilistIds = new Set(watchedAnilistIds);
   for (const entry of history) {
     const rec = entry.recommendation || {};
-    if (rec.anilistId) excludedAnilistIds.add(rec.anilistId);
+    if (rec.anilistId && isStillExcluded(entry)) excludedAnilistIds.add(rec.anilistId);
     if (entry.feedback === "good") {
       if (rec.malId) completedIds.add(rec.malId);
       if (rec.anilistId) completedAnilistIds.add(rec.anilistId);
@@ -304,7 +417,7 @@ export function buildUserContext({ list, history = [], memory, watchedAnilistIds
   return { listIds, completedIds, completedAnilistIds, excludedAnilistIds, manualKeys, isExcludedTitle: createExclusionCheck(memory) };
 }
 
-export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfile = {}, mood = "", limit = POOL_LIMIT }) {
+export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfile = {}, mood = "", constraints = {}, limit = POOL_LIMIT }) {
   const merged = new Map();
   const add = (candidate, source, extra = {}) => {
     if (!candidate?.anilistId || !isUsable(candidate)) return;
@@ -331,7 +444,7 @@ export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfil
 
   const ranked = [];
   for (const entry of merged.values()) {
-    if (isExcludedCandidate(entry, context)) continue;
+    if (isExcludedCandidate(entry, context) || !meetsConstraints(entry, constraints)) continue;
     const continuation = continuationOf(entry, context);
     if (!continuation.ok) continue;
 
@@ -425,6 +538,7 @@ export function toCandidate(media) {
     score: media.averageScore ?? null,
     popularity: media.popularity || 0,
     image_url: media.coverImage?.extraLarge || media.coverImage?.large || "",
+    watchLinks: streamingLinks(media.externalLinks),
     isAdult: Boolean(media.isAdult),
     // AniList links recap films and side-story specials to their parent with
     // PARENT; real sequels link back with PREQUEL.
@@ -465,6 +579,13 @@ function writeCache(key, data) {
   } catch {
     // localStorage full or unavailable (private mode, tests); just don't cache
   }
+}
+
+// Short stable key for a query string (djb2), so cache keys stay small.
+function hashString(value) {
+  let hash = 5381;
+  for (let i = 0; i < value.length; i += 1) hash = ((hash << 5) + hash + value.charCodeAt(i)) | 0;
+  return (hash >>> 0).toString(36);
 }
 
 function scoreOf(entry) {

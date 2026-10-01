@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildWatchHistoryDigest, describeQueriedTitle } from "../src/watchHistory.js";
+import { answersFromList, buildWatchHistoryDigest, describeQueriedTitle } from "../src/watchHistory.js";
 import { buildTasteProfile, compactFeedbackHistory } from "../src/tasteProfile.js";
 import { MAL_LIST, malEntry } from "./fixtures.js";
 
@@ -103,5 +103,58 @@ describe("taste profile", () => {
       { state: "rated", feedback: "good", recommendation: { title: "C" } }
     ]);
     assert.deepEqual(feedback.map((entry) => [entry.title, entry.feedback]), [["B", "skipped"], ["C", "good"]]);
+  });
+});
+
+describe("answering 'did you watch it?' from the MAL list", () => {
+  const list = [
+    malEntry(100, "Loved It", "completed", 9, ["Drama"]),
+    malEntry(101, "Middling", "completed", 5, ["Drama"]),
+    malEntry(102, "No Score", "completed", 0, ["Drama"]),
+    malEntry(103, "Gave Up", "dropped", 3, ["Drama"], { watched: 4 }),
+    malEntry(104, "Still Watching", "watching", 0, ["Drama"], { watched: 2 }),
+    malEntry(105, "Haibane Renmei", "completed", 8, ["Drama"])
+  ];
+  const awaiting = (id, title, extra = {}) => ({ id, state: "unrated", recommendation: { title, ...extra } });
+
+  it("turns completions into good (or meh well below their average) and drops into meh", () => {
+    const answers = answersFromList({
+      list,
+      history: [
+        awaiting("a", "Loved It", { malId: 100 }),
+        awaiting("b", "Middling", { malId: 101 }),
+        awaiting("c", "No Score", { malId: 102 }),
+        awaiting("d", "Gave Up", { malId: 103 }),
+        awaiting("e", "Still Watching", { malId: 104 })
+      ]
+    });
+    assert.deepEqual(answers, [
+      { id: "a", answer: "good", reflection: "finished it on MyAnimeList · 9/10." },
+      { id: "b", answer: "meh", reflection: "finished it on MyAnimeList · 5/10." },
+      { id: "c", answer: "good", reflection: "finished it on MyAnimeList." },
+      { id: "d", answer: "meh", reflection: "dropped it on MyAnimeList at episode 4." }
+    ]);
+  });
+
+  it("matches by title when the pick has no MAL id, and leaves answered picks alone", () => {
+    const answers = answersFromList({
+      list,
+      history: [awaiting("x", "Haibane Renmei"), { id: "y", state: "rated", feedback: "good", recommendation: { title: "Loved It", malId: 100 } }]
+    });
+    assert.deepEqual(answers.map((answer) => answer.id), ["x"]);
+  });
+
+  it("does nothing for a manual list", () => {
+    assert.deepEqual(answersFromList({ list: "Loved It", history: [awaiting("a", "Loved It")] }), []);
+  });
+});
+
+describe("feedback sent to the model", () => {
+  it("leaves out 'not tonight' passes, which say nothing about the show", () => {
+    const feedback = compactFeedbackHistory([
+      { state: "not_tonight", recommendation: { title: "A" } },
+      { state: "rated", feedback: "meh", recommendation: { title: "B" } }
+    ]);
+    assert.deepEqual(feedback.map((entry) => entry.title), ["B"]);
   });
 });

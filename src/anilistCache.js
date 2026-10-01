@@ -1,6 +1,6 @@
-// v2 entries carry malId/title_romaji; v1 entries are dropped on first write.
-const CACHE_KEY = "en.anilistCache.v2";
-const LEGACY_CACHE_KEY = "en.anilistCache";
+// v3 entries carry streaming links; older versions are dropped on first write.
+const CACHE_KEY = "en.anilistCache.v3";
+const LEGACY_CACHE_KEYS = ["en.anilistCache", "en.anilistCache.v2"];
 const CACHE_TTL_MS = 21 * 24 * 60 * 60 * 1000;
 
 export function readAniListCache(key) {
@@ -32,7 +32,7 @@ function persistCache(cache) {
     Object.entries(cache).filter(([, entry]) => now - entry.cachedAt <= CACHE_TTL_MS)
   );
   try {
-    localStorage.removeItem(LEGACY_CACHE_KEY);
+    LEGACY_CACHE_KEYS.forEach((key) => localStorage.removeItem(key));
     localStorage.setItem(CACHE_KEY, JSON.stringify(pruned));
   } catch {
     // localStorage full or unavailable; skip caching for this write

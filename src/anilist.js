@@ -1,5 +1,6 @@
 import { normalizeTitleForCompare } from "./titleUtils.js";
 import { readAniListCache, writeAniListCache } from "./anilistCache.js";
+import { streamingLinks } from "./streaming.js";
 
 const ANILIST_URL = "https://graphql.anilist.co";
 const REQUEST_TIMEOUT_MS = 6000;
@@ -24,6 +25,7 @@ const SEARCH_QUERY = `query ($search: String) {
       episodes
       genres
       coverImage { extraLarge large }
+      externalLinks { site url type }
     }
   }
 }`;
@@ -118,6 +120,7 @@ function toAniListResult(media) {
     episodes: media.episodes ?? null,
     genre: (media.genres || []).slice(0, 2).join(", "),
     genres: media.genres || [],
-    image_url: media.coverImage?.extraLarge || media.coverImage?.large || ""
+    image_url: media.coverImage?.extraLarge || media.coverImage?.large || "",
+    watch_links: streamingLinks(media.externalLinks)
   };
 }

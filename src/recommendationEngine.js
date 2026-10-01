@@ -1,9 +1,13 @@
 import { ANIME_CATALOG } from "./animeCatalog.js";
 import { normalizeTitleForCompare, parseManualTitles, titleMatchesAnime, uniqueTitles } from "./titleUtils.js";
 
-// in_progress mirrors what's currently watching/on hold on MAL, so unlike the
-// other buckets it is rebuilt from the list each time rather than accumulated.
+// in_progress mirrors what's currently watching/on hold on MAL, and
+// recommended mirrors En's log, so unlike the other buckets both are rebuilt
+// each time rather than accumulated.
 const MEMORY_BUCKETS = ["recommended", "completed", "rejected", "watchlisted", "pending", "in_progress"];
+// A pick the user passed over ("not tonight", or asked again instead) isn't
+// a verdict on the show, so it comes back into the pool after this long.
+export const NOT_TONIGHT_COOLDOWN_MS = 60 * 24 * 60 * 60 * 1000;
 const TOKEN_STOPWORDS = new Set(["of", "the", "a", "an", "and", "in", "to", "for", "with", "or"]);
 // MAL genre names that mean the same thing as the catalog's own tags.
 const TOKEN_ALIASES = { iyashikei: "healing", suspense: "thriller" };
@@ -15,6 +19,7 @@ export function buildRecommendationMemory({ malList, history = [], existingMemor
   if (Array.isArray(malList)) {
     memory.in_progress = [];
   }
+  memory.recommended = [];
 
   for (const entry of Array.isArray(malList) ? malList : []) {
     const status = entry.my_list_status?.status;
@@ -36,7 +41,9 @@ export function buildRecommendationMemory({ malList, history = [], existingMemor
 
   for (const entry of history) {
     const titles = [entry.recommendation?.title, entry.recommendation?.title_jp].filter(Boolean);
-    memory.recommended = uniqueTitles([...memory.recommended, ...titles]);
+    if (isStillExcluded(entry)) {
+      memory.recommended = uniqueTitles([...memory.recommended, ...titles]);
+    }
     if (entry.state === "pending") {
       memory.pending = uniqueTitles([...memory.pending, ...titles]);
       memory.watchlisted = uniqueTitles([...memory.watchlisted, ...titles]);
@@ -50,6 +57,13 @@ export function buildRecommendationMemory({ malList, history = [], existingMemor
   }
 
   return memory;
+}
+
+// Whether a logged pick should still keep its title out of new pools.
+export function isStillExcluded(entry, now = Date.now()) {
+  if (entry?.state !== "not_tonight") return true;
+  const since = Date.parse(entry.not_tonight_at || entry.date || "") || 0;
+  return now - since < NOT_TONIGHT_COOLDOWN_MS;
 }
 
 export function buildCandidatePool({

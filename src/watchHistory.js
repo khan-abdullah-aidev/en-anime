@@ -108,6 +108,48 @@ export function describeQueriedTitle({ asked, resolved, list, history = [] }) {
   });
 }
 
+// Answers "did you watch it?" from the user's MAL list instead of asking: a
+// pick they've since completed is good (or meh, if they scored it well below
+// their usual), one they dropped is meh. Matched by MAL id, else by title.
+export function answersFromList({ list, history = [] }) {
+  if (!Array.isArray(list) || !list.length) return [];
+
+  const scored = list.filter((entry) => statusOf(entry) === "completed" && scoreOf(entry) > 0);
+  const average = scored.length ? scored.reduce((sum, entry) => sum + scoreOf(entry), 0) / scored.length : null;
+  const byId = new Map(list.map((entry) => [entry.id, entry]));
+  const byTitle = new Map();
+  for (const entry of list) {
+    for (const key of animeTitleKeys(entry)) if (!byTitle.has(key)) byTitle.set(key, entry);
+  }
+
+  const answers = [];
+  for (const logged of history) {
+    if (logged.state !== "unrated" && logged.state !== "pending") continue;
+    const rec = logged.recommendation || {};
+    const match = (rec.malId && byId.get(rec.malId)) || animeTitleKeys(rec).map((key) => byTitle.get(key)).find(Boolean);
+    if (!match) continue;
+
+    const status = statusOf(match);
+    const score = scoreOf(match);
+    if (status === "completed") {
+      const good = !score || score >= (average ? average - 1 : 6);
+      answers.push({
+        id: logged.id,
+        answer: good ? "good" : "meh",
+        reflection: score ? `finished it on MyAnimeList · ${score}/10.` : "finished it on MyAnimeList."
+      });
+    } else if (status === "dropped") {
+      const watched = Number(match.my_list_status?.num_episodes_watched) || 0;
+      answers.push({
+        id: logged.id,
+        answer: "meh",
+        reflection: watched ? `dropped it on MyAnimeList at episode ${watched}.` : "dropped it on MyAnimeList."
+      });
+    }
+  }
+  return answers;
+}
+
 function describeRecent(entry) {
   const status = statusOf(entry);
   return compact({
