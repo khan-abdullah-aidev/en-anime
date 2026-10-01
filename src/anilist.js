@@ -76,7 +76,9 @@ export async function aniListRequest(query, variables = {}, { timeoutMs = REQUES
     });
 
     if (!response.ok) {
-      throw new Error(`AniList request failed (${response.status}).`);
+      // AniList explains errors in the body ("Private User", "User not found").
+      const detail = (await response.json().catch(() => null))?.errors?.[0]?.message;
+      throw new Error(`AniList request failed (${response.status})${detail ? `: ${detail}` : "."}`);
     }
 
     const payload = await response.json();

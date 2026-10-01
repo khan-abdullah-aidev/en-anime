@@ -5,6 +5,8 @@ const MANUAL_LIST_KEY = "en.manualList";
 const TASTE_PROFILE_KEY = "en.tasteProfile";
 const RECOMMENDATION_MEMORY_KEY = "en.recommendationMemory";
 const PARTNER_KEY = "en.partner";
+const LIST_SOURCE_KEY = "en.listSource";
+const ACTIVE_MODE_KEY = "en.activeMode";
 
 export function loadTokens() {
   return readJson(TOKEN_KEY, null);
@@ -137,6 +139,30 @@ export function loadPartner() {
 
 export function savePartner(partner) {
   localStorage.setItem(PARTNER_KEY, JSON.stringify(partner));
+}
+
+// Username sign-in: { kind: "mal" | "anilist", username }.
+export function loadListSource() {
+  const source = readJson(LIST_SOURCE_KEY, null);
+  return (source?.kind === "mal" || source?.kind === "anilist") && source.username ? source : null;
+}
+
+export function saveListSource(source) {
+  localStorage.setItem(LIST_SOURCE_KEY, JSON.stringify(source));
+}
+
+export function clearListSource() {
+  localStorage.removeItem(LIST_SOURCE_KEY);
+}
+
+// Which way in the user picked last ("mal" login, "username", "manual"), so
+// someone with more than one set up comes back to the one they chose.
+export function loadActiveMode() {
+  return localStorage.getItem(ACTIVE_MODE_KEY) || "";
+}
+
+export function saveActiveMode(mode) {
+  localStorage.setItem(ACTIVE_MODE_KEY, mode);
 }
 
 export function loadManualList() {

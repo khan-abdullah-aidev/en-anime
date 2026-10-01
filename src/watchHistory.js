@@ -85,6 +85,7 @@ export function describeQueriedTitle({ asked, resolved, list, history = [] }) {
   } else if (Array.isArray(list)) {
     const entry =
       (resolved?.malId && list.find((item) => item.id === resolved.malId)) ||
+      (resolved?.anilistId && list.find((item) => item.anilistId === resolved.anilistId)) ||
       list.find(matchesKeys);
     onList = entry
       ? compact({
@@ -111,12 +112,13 @@ export function describeQueriedTitle({ asked, resolved, list, history = [] }) {
 // Answers "did you watch it?" from the user's MAL list instead of asking: a
 // pick they've since completed is good (or meh, if they scored it well below
 // their usual), one they dropped is meh. Matched by MAL id, else by title.
-export function answersFromList({ list, history = [] }) {
+export function answersFromList({ list, history = [], sourceName = "MyAnimeList" }) {
   if (!Array.isArray(list) || !list.length) return [];
 
   const scored = list.filter((entry) => statusOf(entry) === "completed" && scoreOf(entry) > 0);
   const average = scored.length ? scored.reduce((sum, entry) => sum + scoreOf(entry), 0) / scored.length : null;
-  const byId = new Map(list.map((entry) => [entry.id, entry]));
+  const byId = new Map(list.filter((entry) => entry.id).map((entry) => [entry.id, entry]));
+  const byAniListId = new Map(list.filter((entry) => entry.anilistId).map((entry) => [entry.anilistId, entry]));
   const byTitle = new Map();
   for (const entry of list) {
     for (const key of animeTitleKeys(entry)) if (!byTitle.has(key)) byTitle.set(key, entry);
@@ -126,7 +128,10 @@ export function answersFromList({ list, history = [] }) {
   for (const logged of history) {
     if (logged.state !== "unrated" && logged.state !== "pending") continue;
     const rec = logged.recommendation || {};
-    const match = (rec.malId && byId.get(rec.malId)) || animeTitleKeys(rec).map((key) => byTitle.get(key)).find(Boolean);
+    const match =
+      (rec.malId && byId.get(rec.malId)) ||
+      (rec.anilistId && byAniListId.get(rec.anilistId)) ||
+      animeTitleKeys(rec).map((key) => byTitle.get(key)).find(Boolean);
     if (!match) continue;
 
     const status = statusOf(match);
@@ -136,14 +141,14 @@ export function answersFromList({ list, history = [] }) {
       answers.push({
         id: logged.id,
         answer: good ? "good" : "meh",
-        reflection: score ? `finished it on MyAnimeList · ${score}/10.` : "finished it on MyAnimeList."
+        reflection: score ? `finished it on ${sourceName} · ${score}/10.` : `finished it on ${sourceName}.`
       });
     } else if (status === "dropped") {
       const watched = Number(match.my_list_status?.num_episodes_watched) || 0;
       answers.push({
         id: logged.id,
         answer: "meh",
-        reflection: watched ? `dropped it on MyAnimeList at episode ${watched}.` : "dropped it on MyAnimeList."
+        reflection: watched ? `dropped it on ${sourceName} at episode ${watched}.` : `dropped it on ${sourceName}.`
       });
     }
   }

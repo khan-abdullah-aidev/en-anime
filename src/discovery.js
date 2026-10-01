@@ -1,5 +1,5 @@
 import { aniListRequest, resolveAnimeOnAniList } from "./anilist.js";
-import { buildCandidatePool, createExclusionCheck, isStillExcluded } from "./recommendationEngine.js";
+import { NOT_TONIGHT_COOLDOWN_MS, buildCandidatePool, createExclusionCheck, isStillExcluded } from "./recommendationEngine.js";
 import { streamingLinks } from "./streaming.js";
 import { animeTitleKeys, normalizeTitleForCompare, parseManualTitles, uniqueTitles } from "./titleUtils.js";
 
@@ -21,7 +21,11 @@ const RECS_PER_SEED = 12;
 const SEED_CACHE_TTL_MS = 3 * 24 * 60 * 60 * 1000;
 const DISCOVERY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const CACHE_KEY = "en.discoveryCache.v2"; // v2 adds streaming links
-const CACHE_MAX_ENTRIES = 8;
+// Each seed's recommendations are cached on their own (so rotating seeds
+// doesn't refetch the ones already seen), hence room for a few dozen.
+const CACHE_MAX_ENTRIES = 60;
+// No single favorite may supply more of the pool's "similar" slots than this.
+const MAX_PER_SEED = 6;
 const REQUEST_TIMEOUT_MS = 9000;
 
 const ALLOWED_FORMATS = new Set(["TV", "TV_SHORT", "MOVIE", "ONA", "OVA"]);
@@ -79,7 +83,18 @@ const MEDIA_FIELDS = `id idMal title { romaji english native } synonyms format s
   externalLinks { site url type }`;
 const DEFAULT_FORMATS = ["TV", "TV_SHORT", "MOVIE", "ONA", "OVA"];
 
-export async function buildOpenCandidatePool({ mood = "", passedOver = [], list, history = [], tasteProfile, recentPatterns, memory, limit = POOL_LIMIT }) {
+export async function buildOpenCandidatePool({ mood = "", passedOver = [], list, history = [], tasteProfile, recentPatterns, memory, includeResume = false, limit = POOL_LIMIT }) {
+  const pool = await buildFreshPool({ mood, passedOver, list, history, tasteProfile, recentPatterns, memory, limit });
+  if (!includeResume) return pool;
+  // A couple of shows they started and set aside ride along; the model picks
+  // one only when finishing it suits tonight better than anything new.
+  const resume = resumeCandidates({ list, history }).filter((candidate) =>
+    meetsConstraints({ ...candidate, episodes: candidate.resume.remaining }, pool.constraintsRelaxed ? {} : pool.constraints)
+  );
+  return { ...pool, candidates: [...pool.candidates, ...resume] };
+}
+
+async function buildFreshPool({ mood = "", passedOver = [], list, history = [], tasteProfile, recentPatterns, memory, limit = POOL_LIMIT }) {
   const { constraints, discoveryMood } = buildRequestFilters({ mood, passedOver });
   let fetched = null;
   try {
@@ -179,6 +194,70 @@ export async function buildTogetherPool({ mood = "", passedOver = [], you, partn
     return { ...result, constraints };
   }
   return { ...assemble({}), constraints, constraintsRelaxed: true };
+}
+
+// "Pick up where you left off": shows the user is watching or put on hold,
+// started (some progress, not finished), untouched for a few weeks, and not
+// suggested (or passed over) recently. Best-loved and furthest-along first.
+const RESUME_LIMIT = 2;
+const RESUME_STALE_MS = 21 * 24 * 60 * 60 * 1000;
+const RESUME_REPEAT_MS = 30 * 24 * 60 * 60 * 1000;
+
+export function resumeCandidates({ list, history = [], now = Date.now() }) {
+  if (!Array.isArray(list)) return [];
+
+  const recent = new Set();
+  for (const entry of history) {
+    if (entry.mode !== "resume") continue;
+    const since = Date.parse(entry.not_tonight_at || entry.date || "") || 0;
+    const window = entry.state === "not_tonight" ? NOT_TONIGHT_COOLDOWN_MS : RESUME_REPEAT_MS;
+    if (now - since < window) recent.add(normalizeTitleForCompare(entry.recommendation?.title));
+  }
+
+  return list
+    .filter((entry) => ["watching", "on_hold"].includes(entry.my_list_status?.status))
+    .map((entry) => {
+      const watched = Number(entry.my_list_status?.num_episodes_watched) || 0;
+      const total = Number(entry.episodes) || 0;
+      const updated = updatedAt(entry);
+      return { entry, watched, total, updated };
+    })
+    .filter(({ entry, watched, total, updated }) =>
+      watched > 0 &&
+      (!total || watched < total) &&
+      updated && now - updated >= RESUME_STALE_MS &&
+      !recent.has(normalizeTitleForCompare(entry.alternative_titles?.en || entry.title))
+    )
+    .sort((a, b) =>
+      scoreOf(b.entry) - scoreOf(a.entry) ||
+      (b.total ? b.watched / b.total : 0) - (a.total ? a.watched / a.total : 0) ||
+      b.updated - a.updated
+    )
+    .slice(0, RESUME_LIMIT)
+    .map(({ entry, watched, total, updated }) => ({
+      title: entry.alternative_titles?.en || entry.title,
+      title_jp: entry.alternative_titles?.ja || entry.title,
+      alternative_titles: { en: entry.alternative_titles?.en || null, synonyms: uniqueTitles([entry.title, ...(entry.alternative_titles?.synonyms || [])]) },
+      malId: entry.id || null,
+      anilistId: entry.anilistId || null,
+      year: entry.year ?? null,
+      episodes: entry.episodes ?? null,
+      genres: entry.genres || [],
+      genre: (entry.genres || []).slice(0, 2).join(", "),
+      tags: [],
+      image_url: entry.image_url || "",
+      sources: ["resume"],
+      because: [],
+      becauseThem: [],
+      rankScore: 0,
+      resume: {
+        status: entry.my_list_status.status === "on_hold" ? "on hold" : "watching",
+        watched,
+        total: total || null,
+        remaining: total ? total - watched : null,
+        since: new Date(updated).toISOString().slice(0, 7)
+      }
+    }));
 }
 
 export function buildTogetherContext({ you, partner, yourWatchedAnilistIds = [], theirWatchedAnilistIds = [] }) {
@@ -329,6 +408,9 @@ export function toModelCandidate(candidate) {
     becauseYouLiked: candidate.because?.length ? candidate.because.slice(0, 3) : null,
     becauseTheyLiked: candidate.becauseThem?.length ? candidate.becauseThem.slice(0, 3) : null,
     onTheirPlanToWatch: candidate.onTheirPlanToWatch || null,
+    resume: candidate.resume
+      ? { status: candidate.resume.status, stoppedAt: `${candidate.resume.watched}/${candidate.resume.total || "?"}`, since: candidate.resume.since }
+      : null,
     continues: candidate.continues || null,
     airing: candidate.status === "RELEASING" || null,
     pacing: candidate.pacing,
@@ -338,36 +420,58 @@ export function toModelCandidate(candidate) {
 
 // ---------- seeds ----------
 
-export async function selectSeeds({ list, history = [] }) {
+// Which of the user's shows to start from. The three most recent good
+// finishes always seed (that's what they're into now); the rest are drawn at
+// random, weighted by how much they loved them, from a wider bench of
+// favorites, so back-to-back pools don't all grow from the same few shows.
+export async function selectSeeds({ list, history = [], random = Math.random }) {
   const likedPicks = history.filter((entry) => entry.feedback === "good" && entry.recommendation);
 
   if (Array.isArray(list)) {
-    const completed = list.filter((entry) => entry.my_list_status?.status === "completed");
+    // Lists read from AniList carry AniList ids (not every show has a MAL id).
+    const by = list.some((entry) => entry.anilistId) ? "anilistId" : "malId";
+    const idOf = (entry) => (by === "anilistId" ? entry.anilistId : entry.id);
+    const completed = list.filter((entry) => entry.my_list_status?.status === "completed" && idOf(entry));
     const scored = completed.filter((entry) => scoreOf(entry) > 0);
     const average = scored.length ? scored.reduce((sum, entry) => sum + scoreOf(entry), 0) / scored.length : null;
     const favorites = [...scored]
       .filter((entry) => scoreOf(entry) >= Math.max(average || 0, 7))
       .sort((a, b) => scoreOf(b) - scoreOf(a) || updatedAt(b) - updatedAt(a))
-      .slice(0, 7);
+      .slice(0, 24);
     const recentGood = [...completed]
       .filter((entry) => !scoreOf(entry) || scoreOf(entry) >= (average || 0))
       .sort((a, b) => updatedAt(b) - updatedAt(a))
-      .slice(0, 5);
+      .slice(0, 6);
 
-    const seeds = new Map();
-    for (const entry of [...favorites, ...recentGood]) {
-      if (seeds.size >= SEED_LIMIT || seeds.has(entry.id)) continue;
+    const weightOf = (entry) => {
       const weight = average && scoreOf(entry) ? clamp(scoreOf(entry) - average + 1, 0.5, 4) : 1;
-      const recent = Date.now() - updatedAt(entry) < 120 * 24 * 60 * 60 * 1000;
-      seeds.set(entry.id, { malId: entry.id, title: entry.alternative_titles?.en || entry.title, weight: recent ? weight * 1.25 : weight });
+      return Date.now() - updatedAt(entry) < 120 * 24 * 60 * 60 * 1000 ? weight * 1.25 : weight;
+    };
+    const seeds = new Map();
+    const add = (entry) => seeds.set(idOf(entry), {
+      [by]: idOf(entry),
+      title: entry.alternative_titles?.en || entry.title,
+      weight: weightOf(entry)
+    });
+
+    recentGood.slice(0, 3).forEach(add);
+    const bench = [...favorites, ...recentGood.slice(3)].filter((entry, index, all) =>
+      !seeds.has(idOf(entry)) && all.findIndex((other) => idOf(other) === idOf(entry)) === index
+    );
+    while (seeds.size < SEED_LIMIT && bench.length) {
+      const total = bench.reduce((sum, entry) => sum + weightOf(entry), 0);
+      let roll = random() * total;
+      const index = bench.findIndex((entry) => (roll -= weightOf(entry)) <= 0);
+      add(bench.splice(index < 0 ? bench.length - 1 : index, 1)[0]);
     }
+
     for (const entry of likedPicks) {
-      const malId = entry.recommendation.malId;
-      if (malId && !seeds.has(malId) && seeds.size < SEED_LIMIT) {
-        seeds.set(malId, { malId, title: entry.recommendation.title, weight: 1.5 });
+      const id = by === "anilistId" ? entry.recommendation.anilistId : entry.recommendation.malId;
+      if (id && !seeds.has(id) && seeds.size < SEED_LIMIT) {
+        seeds.set(id, { [by]: id, title: entry.recommendation.title, weight: 1.5 });
       }
     }
-    return { by: "malId", seeds: [...seeds.values()] };
+    return { by, seeds: [...seeds.values()] };
   }
 
   // Manual mode: resolve the typed titles on AniList (cached per title).
@@ -390,33 +494,39 @@ export async function selectSeeds({ list, history = [] }) {
 
 async function fetchSeedRecommendations({ by, seeds }) {
   if (!seeds.length) return [];
-  const ids = seeds.map((seed) => seed[by]).sort((a, b) => a - b);
-  const cacheKey = `seeds:${by}:${ids.join(",")}`;
-  const cached = readCache(cacheKey, SEED_CACHE_TTL_MS);
-  const groups = cached || await (async () => {
+  const recsById = new Map();
+  const missing = [];
+  for (const seed of seeds) {
+    const cached = readCache(`seed:${by}:${seed[by]}`, SEED_CACHE_TTL_MS);
+    if (cached) recsById.set(seed[by], cached);
+    else missing.push(seed[by]);
+  }
+
+  if (missing.length) {
     const filter = by === "malId" ? "idMal_in: $ids" : "id_in: $ids";
     const data = await aniListRequest(
       `query ($ids: [Int]) { Page(perPage: ${SEED_LIMIT}) { media(${filter}, type: ANIME) {
         id idMal
         recommendations(perPage: ${RECS_PER_SEED}, sort: [RATING_DESC]) { nodes { rating mediaRecommendation { ${MEDIA_FIELDS} } } }
       } } }`,
-      { ids },
+      { ids: missing },
       { timeoutMs: REQUEST_TIMEOUT_MS }
     );
-    const fresh = (data?.Page?.media || []).map((media) => ({
-      seedId: by === "malId" ? media.idMal : media.id,
-      recs: (media.recommendations?.nodes || [])
+    const fresh = {};
+    for (const media of data?.Page?.media || []) {
+      const id = by === "malId" ? media.idMal : media.id;
+      const recs = (media.recommendations?.nodes || [])
         .filter((node) => node.mediaRecommendation)
-        .map((node) => ({ rating: node.rating || 0, candidate: toCandidate(node.mediaRecommendation) }))
-    }));
-    writeCache(cacheKey, fresh);
-    return fresh;
-  })();
+        .map((node) => ({ rating: node.rating || 0, candidate: toCandidate(node.mediaRecommendation) }));
+      recsById.set(id, recs);
+      fresh[`seed:${by}:${id}`] = recs;
+    }
+    writeCacheEntries(fresh);
+  }
 
-  const seedById = new Map(seeds.map((seed) => [seed[by], seed]));
-  return groups
-    .filter((group) => seedById.has(group.seedId))
-    .map((group) => ({ seed: seedById.get(group.seedId), recs: group.recs }));
+  return seeds
+    .filter((seed) => recsById.has(seed[by]))
+    .map((seed) => ({ seed, recs: recsById.get(seed[by]) }));
 }
 
 // ---------- discovery ----------
@@ -509,15 +619,23 @@ export function toAniListFilters(labels) {
 export function buildUserContext({ list, history = [], memory, watchedAnilistIds = [] }) {
   const listIds = new Set();
   const completedIds = new Set();
-  if (Array.isArray(list)) {
-    for (const entry of list) {
-      if (!entry.id) continue;
-      listIds.add(entry.id);
-      if (entry.my_list_status?.status === "completed") completedIds.add(entry.id);
-    }
-  }
   const excludedAnilistIds = new Set(watchedAnilistIds);
   const completedAnilistIds = new Set(watchedAnilistIds);
+  if (Array.isArray(list)) {
+    for (const entry of list) {
+      const completed = entry.my_list_status?.status === "completed";
+      if (entry.id) {
+        listIds.add(entry.id);
+        if (completed) completedIds.add(entry.id);
+      }
+      // Lists read from AniList also carry AniList ids, which cover the
+      // shows that have no MAL id.
+      if (entry.anilistId) {
+        excludedAnilistIds.add(entry.anilistId);
+        if (completed) completedAnilistIds.add(entry.anilistId);
+      }
+    }
+  }
   for (const entry of history) {
     const rec = entry.recommendation || {};
     if (rec.anilistId && isStillExcluded(entry)) excludedAnilistIds.add(rec.anilistId);
@@ -539,7 +657,7 @@ export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfil
     const entry = merged.get(candidate.anilistId) || { ...candidate, sources: new Set(), becauseWeights: new Map(), becauseOwners: new Map(), similarity: 0 };
     entry.sources.add(source);
     if (extra.seed) {
-      entry.similarity += extra.seed.weight * Math.log1p(Math.max(0, extra.rating || 0));
+      entry.similarity += extra.seed.weight * (1 + 2 * Math.max(0, extra.relative || 0));
       entry.becauseWeights.set(extra.seed.title, (entry.becauseWeights.get(extra.seed.title) || 0) + extra.rating);
       entry.becauseOwners.set(extra.seed.title, extra.seed.owner || "you");
     }
@@ -547,7 +665,13 @@ export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfil
   };
 
   for (const group of seedGroups) {
-    for (const rec of group.recs) add(rec.candidate, "similar", { seed: group.seed, rating: rec.rating });
+    // A hugely popular show's recommendations carry ratings in the
+    // thousands; measuring each against the seed's own best keeps one famous
+    // favorite from drowning out the rest.
+    const best = Math.max(1, ...group.recs.map((rec) => rec.rating || 0));
+    for (const rec of group.recs) {
+      add(rec.candidate, "similar", { seed: group.seed, rating: rec.rating, relative: (rec.rating || 0) / best });
+    }
   }
   for (const source of ["genre", "mood", "recent"]) {
     for (const candidate of discovery[source] || []) add(candidate, source);
@@ -600,10 +724,20 @@ export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfil
   // tonight's mood and new releases aren't crowded out by "similar".
   const quotas = [["mood", 12], ["recent", 6], ["genre", 8], ["similar", 30]];
   const picked = new Map();
+  const perSeed = new Map();
   for (const [source, quota] of quotas) {
-    ranked.filter((entry) => entry.sources.includes(source) && !picked.has(entry.anilistId))
-      .slice(0, quota)
-      .forEach((entry) => picked.set(entry.anilistId, entry));
+    let taken = 0;
+    for (const entry of ranked) {
+      if (taken >= quota) break;
+      if (!entry.sources.includes(source) || picked.has(entry.anilistId)) continue;
+      if (source === "similar") {
+        const seed = entry.because[0] || entry.becauseThem[0];
+        if ((perSeed.get(seed) || 0) >= MAX_PER_SEED) continue;
+        perSeed.set(seed, (perSeed.get(seed) || 0) + 1);
+      }
+      picked.set(entry.anilistId, entry);
+      taken += 1;
+    }
   }
   for (const entry of ranked) {
     if (picked.size >= limit) break;
@@ -694,6 +828,21 @@ function readCache(key, ttlMs) {
     return entry && Date.now() - entry.cachedAt < ttlMs ? entry.data : null;
   } catch {
     return null;
+  }
+}
+
+function writeCacheEntries(entries) {
+  if (!Object.keys(entries).length) return;
+  try {
+    const cache = JSON.parse(localStorage.getItem(CACHE_KEY) || "{}");
+    const now = Date.now();
+    for (const [key, data] of Object.entries(entries)) cache[key] = { data, cachedAt: now };
+    const newest = Object.entries(cache)
+      .sort((a, b) => b[1].cachedAt - a[1].cachedAt)
+      .slice(0, CACHE_MAX_ENTRIES);
+    localStorage.setItem(CACHE_KEY, JSON.stringify(Object.fromEntries(newest)));
+  } catch {
+    // localStorage full or unavailable (private mode, tests); just don't cache
   }
 }
 

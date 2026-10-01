@@ -33,6 +33,7 @@ ${HISTORY_RULES}
 ${ESTIMATE_RULES}
 ${CANDIDATE_RULES}
 ${PASSED_OVER_RULES}
+A candidate with resume is the exception to "nothing on the user's list": it's a show they started and set aside (resume.status, resume.stoppedAt as episodes watched / total, resume.since as when they last touched it). Pick one only when finishing it suits tonight better than anything new; if you do, name where they stopped, and the reason is about why now is the time to go back.
 candidateList is the only pool you may pick from. "title" must exactly match the title of one candidateList entry.
 Never cite a title the user hasn't watched as evidence of their taste.
 

@@ -13,11 +13,15 @@ import {
   loadManualList,
   loadHistory,
   loadPartner,
+  loadListSource,
+  loadActiveMode,
   loadTasteProfileCache,
   loadTokens,
   recordRecommendedAnime,
   saveManualList,
   savePartner,
+  saveListSource,
+  saveActiveMode,
   saveRecommendationMemoryCache,
   saveTasteProfileCache,
   updateHistoryEntry
@@ -40,6 +44,7 @@ import { buildOpenCandidatePool, buildTogetherPool, toModelCandidate } from "./d
 import { normalizeTitleForCompare, titleMatchesAnime } from "./titleUtils.js";
 import { resolveAnimeOnAniList } from "./anilist.js";
 import { PARENT, VIEW, parsePath, pathFor } from "./routes.js";
+import { fetchPublicList, sourceLabel } from "./lists.js";
 import { debugLog } from "./debug.js";
 
 // Lets the header (wordmark, "← back") reach navigation without threading
@@ -69,7 +74,7 @@ function resolveRoute(target, { initial = false, sessionIds = new Set() } = {}) 
   if (view === VIEW.REVEAL || view === VIEW.FEEDBACK) {
     return loadHistory().some((entry) => entry.id === entryId) ? { view, entryId } : { view: VIEW.HISTORY };
   }
-  if (view === VIEW.HISTORY || view === VIEW.MANUAL) return { view };
+  if (view === VIEW.HISTORY || view === VIEW.MANUAL || view === VIEW.USERNAME) return { view };
   if (!hasInput) return { view: VIEW.LANDING };
   if (view === VIEW.SHORTLIST_MOOD && !titles?.length) return { view: VIEW.SHORTLIST };
   if (view === VIEW.TOGETHER_MOOD && !loadPartner()) return { view: VIEW.TOGETHER };
@@ -109,7 +114,8 @@ export default function App() {
   const [togetherMood, setTogetherMood] = useState("");
   const [checkingPartner, setCheckingPartner] = useState(false);
   const [manualList, setManualList] = useState(() => loadManualList());
-  const [mode, setMode] = useState(() => (loadTokens()?.access_token ? "mal" : loadManualList() ? "manual" : "mal"));
+  const [mode, setMode] = useState(initialMode);
+  const [checkingUsername, setCheckingUsername] = useState(false);
   const [malList, setMalList] = useState([]);
   const [pendingReviewIds, setPendingReviewIds] = useState([]);
   const [status, setStatus] = useState("");
@@ -161,8 +167,8 @@ export default function App() {
   // Picks the user has since completed or dropped on MyAnimeList don't need a
   // "did you watch it?" question; check the list in the background on open.
   useEffect(() => {
-    if (!tokens?.access_token || !loadHistory().some(isAwaitingAnswer)) return;
-    fetchAnimeListWithRefresh()
+    if (!(tokens?.access_token || mode === "username") || !loadHistory().some(isAwaitingAnswer)) return;
+    fetchOwnList()
       .then(applyListAnswers)
       .catch(() => {
         // Not worth an error here; the next request will surface it.
@@ -177,7 +183,7 @@ export default function App() {
     finishMalOauth(window.location.href)
       .then((nextTokens) => {
         setTokens(nextTokens);
-        setMode("mal");
+        chooseMode("mal");
         setStatus("");
         goHome({ replace: true });
       })
@@ -246,12 +252,55 @@ export default function App() {
     const nextValue = value.trim();
     setManualList(nextValue);
     saveManualList(nextValue);
-    setMode("manual");
+    chooseMode("manual");
     goHome();
   }
 
   function canAskEn() {
+    if (mode === "username") return Boolean(loadListSource());
     return hasRecommendationInput() && (mode === "manual" || Boolean(tokens?.access_token));
+  }
+
+  function chooseMode(nextMode) {
+    setMode(nextMode);
+    saveActiveMode(nextMode);
+  }
+
+  // The user's own list, from wherever they chose: MAL login, a public
+  // MAL/AniList username, or what they typed.
+  async function fetchOwnList() {
+    if (mode === "manual") return manualList;
+    if (mode !== "username") return fetchAnimeListWithRefresh();
+
+    const source = loadListSource();
+    const key = `${source.kind}:${source.username}`;
+    const cached = malListCache.current;
+    if (cached && cached.token === key && Date.now() - cached.fetchedAt < MAL_LIST_TTL_MS) return cached.list;
+    const list = await fetchPublicList(source);
+    malListCache.current = { token: key, list, fetchedAt: Date.now() };
+    return list;
+  }
+
+  // Reads the list once up front, so a typo'd username or a private list
+  // is caught on this screen rather than after "thinking".
+  async function handleUsernameSubmit({ kind, username }) {
+    const source = { kind, username: username.trim() };
+    if (!source.username) return;
+    setError("");
+    setCheckingUsername(true);
+    try {
+      const list = await fetchPublicList(source);
+      if (!list.length) throw new Error(`${source.username}'s list is empty, so En has nothing to read.`);
+      malListCache.current = { token: `${source.kind}:${source.username}`, list, fetchedAt: Date.now() };
+    } catch (usernameError) {
+      setCheckingUsername(false);
+      setError(usernameError.message);
+      return;
+    }
+    setCheckingUsername(false);
+    saveListSource(source);
+    chooseMode("username");
+    goHome();
   }
 
   // Returns an id for the request; anything it does after an await checks
@@ -288,12 +337,13 @@ export default function App() {
 
   // Records answers read off the user's MAL list (see answersFromList).
   function applyListAnswers(list) {
-    const answers = answersFromList({ list, history: loadHistory() });
+    const source = mode === "username" ? loadListSource() : null;
+    const answers = answersFromList({ list, history: loadHistory(), sourceName: source ? sourceLabel(source) : "MyAnimeList" });
     if (!answers.length) return;
     const byId = new Map(loadHistory().map((entry) => [entry.id, entry]));
     for (const { id, answer, reflection } of answers) {
       const entry = byId.get(id);
-      if (entry) answerEntry(entry, answer, { reflection });
+      if (entry) answerEntry(entry, answer, { reflection, answeredFrom: source?.kind === "anilist" ? "anilist" : "myanimelist" });
     }
     debugLog("[En debug] answered from MyAnimeList", answers);
 
@@ -309,7 +359,7 @@ export default function App() {
   // read from storage rather than state so an answer saved a moment ago (e.g.
   // "I've already seen it" right before asking again) is included.
   async function loadEnContext() {
-    const list = mode === "manual" ? manualList : await fetchAnimeListWithRefresh();
+    const list = await fetchOwnList();
     setMalList(Array.isArray(list) ? list : []);
     applyListAnswers(list);
     const history = loadHistory();
@@ -349,7 +399,7 @@ export default function App() {
 
   // Candidates from all of AniList (see discovery.js), or the curated
   // catalog if AniList can't be reached.
-  async function findCandidates({ mood, list, signals, memory, partner: other }) {
+  async function findCandidates({ mood, list, signals, memory, partner: other, includeResume = false }) {
     const passedOver = passedOverTonight();
     const { candidates, source, constraints, constraintsRelaxed } = other
       ? await buildTogetherPool({
@@ -366,7 +416,8 @@ export default function App() {
           history: loadHistory(),
           tasteProfile: signals.tasteProfile,
           recentPatterns: signals.recentPatterns,
-          memory
+          memory,
+          includeResume
         });
     debugLog("[En debug] candidate pool", { source, count: candidates.length, constraints, constraintsRelaxed });
     // Only sent when there's something to say, to keep the payload lean.
@@ -440,12 +491,16 @@ export default function App() {
     try {
       const { list, signals, memory, unwatchedTitles } = await loadEnContext();
       say("Looking through everything you haven't seen");
-      const { candidates: candidateList, steering } = await findCandidates({ mood: nextMood, list, signals, memory });
+      const { candidates: candidateList, steering } = await findCandidates({ mood: nextMood, list, signals, memory, includeResume: true });
       say("Listening to tonight");
 
       const rec = await askForAllowedRecommendation({ mood: nextMood, signals: { ...signals, ...steering }, candidateList, memory, unwatchedTitles });
       const pick = await withImage(rec, [rec.title_jp]);
-      revealPick(requestId, pick, { mood: nextMood || "Surprise me", request_mood: nextMood });
+      revealPick(requestId, pick, {
+        mood: nextMood || "Surprise me",
+        request_mood: nextMood,
+        ...(pick.resume ? { mode: "resume" } : {})
+      });
     } catch (considerError) {
       handleRequestError(requestId, considerError);
     }
@@ -693,14 +748,14 @@ export default function App() {
   function clearExpiredMalSession() {
     clearTokens();
     setTokens(null);
-    setMode(manualList.trim() ? "manual" : "mal");
+    setMode(loadListSource() ? "username" : manualList.trim() ? "manual" : "mal");
     setMalList([]);
     malListCache.current = null;
   }
 
   // Applies a "how was it?" answer to a logged pick: from the return-visit
   // question, the log, or a reopened pick.
-  function answerEntry(entry, answer, { note = "", seenBefore = false, reflection = "", reason = "" } = {}) {
+  function answerEntry(entry, answer, { note = "", seenBefore = false, reflection = "", reason = "", answeredFrom = "myanimelist" } = {}) {
     let patch;
     if (answer === "not-tonight") {
       patch = {
@@ -721,7 +776,7 @@ export default function App() {
         state: "rated",
         feedback_note: note.trim(),
         note: reflection || makeUserReflection(answer, note),
-        ...(reflection ? { answered_from: "myanimelist" } : {}),
+        ...(reflection ? { answered_from: answeredFrom } : {}),
         ...(seenBefore ? { seen_before: true } : {})
       };
     }
@@ -846,6 +901,7 @@ export default function App() {
     consider: handleConsider,
     shortlistStart: handleShortlistStart,
     togetherStart: () => go(VIEW.TOGETHER),
+    usernameStart: () => go(VIEW.USERNAME),
     shortlistSubmit: handleShortlistSubmit,
     shortlistDecide: handleShortlistDecide,
     saveForLater: handleSaveForLater,
@@ -869,7 +925,7 @@ export default function App() {
   const canMarkSeen = isNewPick && !revealEntry.mode;
   // "Not tonight" re-asks the same question, which works for En's own picks
   // and for picks for two.
-  const canPassTonight = isNewPick && (!revealEntry.mode || revealEntry.mode === "together");
+  const canPassTonight = isNewPick && (!revealEntry.mode || revealEntry.mode === "together" || revealEntry.mode === "resume");
 
   return (
     <NavContext.Provider value={nav}>
@@ -919,6 +975,14 @@ export default function App() {
             onSkip={() => nav.shortlistDecide(shortlistTitles, "")}
           />
         )}
+        {view === VIEW.USERNAME && (
+          <ScreenUsername
+            onLog={nav.log}
+            source={loadListSource()}
+            checking={checkingUsername}
+            onSubmit={handleUsernameSubmit}
+          />
+        )}
         {view === VIEW.TOGETHER && (
           <ScreenTogether
             key={partner ? partnerName(partner) : "new"}
@@ -965,7 +1029,8 @@ export default function App() {
           <ScreenHistory
             nav={nav}
             history={history}
-            source={mode === "manual" || !tokens?.access_token ? "manual" : "mal"}
+            source={mode === "username" ? "username" : mode === "manual" || !tokens?.access_token ? "manual" : "mal"}
+            listSource={loadListSource()}
           />
         )}
       </div>
@@ -1098,6 +1163,11 @@ function ScreenLanding({ nav, status }) {
                 I'll tell En myself
               </button>
             </div>
+            <div style={{ marginTop: 20 }}>
+              <button className="btn-quiet" onClick={nav.usernameStart}>
+                or — just my MyAnimeList / AniList username
+              </button>
+            </div>
           </div>
 
           {status ? (
@@ -1212,7 +1282,9 @@ function ScreenPending({ nav, pending }) {
               fontStyle: "italic"
             }}
           >
-            {pending.mode === "together"
+            {pending.mode === "resume"
+              ? `Did you get back to ${pending.recommendation.title}?`
+              : pending.mode === "together"
               ? `Did you and ${pending.partner_name || "them"} watch ${pending.recommendation.title}?`
               : `Did you watch ${pending.recommendation.title}?`}
           </h2>
@@ -1521,6 +1593,70 @@ function ScreenShortlistMood({ onLog, titles, mood, setMood, onSubmit, onSkip })
   );
 }
 
+// Username sign-in: a public MyAnimeList or AniList list, no login.
+function ScreenUsername({ onLog, source, checking, onSubmit }) {
+  const [kind, setKind] = useState(source?.kind || "mal");
+  const [username, setUsername] = useState(source?.username || "");
+  const ref = useRef(null);
+  const site = kind === "anilist" ? "AniList" : "MyAnimeList";
+  const ready = !checking && username.trim();
+  const submit = () => ready && onSubmit({ kind, username });
+
+  useEffect(() => {
+    const t = setTimeout(() => ref.current?.focus(), 600);
+    return () => clearTimeout(t);
+  }, [kind]);
+
+  return (
+    <div className="app-frame">
+      <Chrome onLog={onLog} />
+      <div className="app-stage">
+        <div className="column" style={{ textAlign: "center" }}>
+          <div className="eyebrow fade-up">Your list</div>
+          <h2
+            className="serif-display fade-up delay-1"
+            style={{ fontSize: 44, margin: "32px 0 14px", fontWeight: 300 }}
+          >
+            What's your username?
+          </h2>
+          <p
+            className="fade-up delay-2"
+            style={{ color: "var(--bone-3)", fontSize: 15, marginBottom: 64, fontStyle: "italic" }}
+          >
+            Your {site} username. En reads your public list; no sign-in needed.
+          </p>
+
+          <div className="fade-up delay-3" style={{ maxWidth: 560, margin: "0 auto" }}>
+            <input
+              ref={ref}
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              onKeyDown={submitOnEnter(submit)}
+              aria-label={`Your ${site} username`}
+              placeholder={`your ${site} username`}
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              className="meh-note-input"
+            />
+          </div>
+
+          <div className="fade-up delay-4" style={{ marginTop: 64 }}>
+            <button className="btn-link" onClick={submit} disabled={!ready} style={{ transition: "opacity 0.4s ease" }}>
+              {checking ? "Reading your list…" : "Continue"}
+            </button>
+            <div style={{ marginTop: 20 }}>
+              <button className="btn-quiet" onClick={() => setKind(kind === "anilist" ? "mal" : "anilist")}>
+                {kind === "anilist" ? "or — I'm on MyAnimeList" : "or — I'm on AniList"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // "For two", step one: whose list to read alongside the user's.
 function ScreenTogether({ onLog, partner, checking, onSubmit }) {
   const [kind, setKind] = useState(partner?.kind || "mal");
@@ -1774,6 +1910,12 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight }) {
             >
               {formatAnimeMeta(pick)}
             </p>
+            {pick.resume ? (
+              <p className="meta" style={{ marginTop: 6, fontSize: 10.5, letterSpacing: "0.16em", textAlign: "center" }}>
+                you stopped at episode {pick.resume.watched}
+                {pick.resume.total ? ` of ${pick.resume.total}` : ""}
+              </p>
+            ) : null}
             {pick.watch_links?.length ? (
               <p className="meta watch-links">
                 <span title="From AniList; availability varies by region">streams on</span>
@@ -1788,7 +1930,9 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight }) {
 
           <div className="reveal-scroll__copy ink-bloom delay-3">
             <div className="eyebrow shu">
-              {pick.mode === "together"
+              {pick.resume
+                ? "・ pick up where you left off"
+                : pick.mode === "together"
                 ? `・ for you and ${pick.partner_name || "them"}`
                 : pick.mode === "choose"
                 ? `・ over ${pick.chooseAgainst?.join(", ") || "the rest"}`
@@ -2052,7 +2196,7 @@ function PastPickAnswer({ entry, onAnswer }) {
   );
 }
 
-function ScreenHistory({ nav, history, source }) {
+function ScreenHistory({ nav, history, source, listSource }) {
   const [editing, setEditing] = useState(false);
 
   return (
@@ -2116,10 +2260,22 @@ function ScreenHistory({ nav, history, source }) {
               <button className="btn-quiet" onClick={nav.disconnect}>
                 disconnect MyAnimeList
               </button>
+            ) : source === "username" ? (
+              <>
+                <button className="btn-quiet" onClick={nav.usernameStart}>
+                  change username{listSource ? ` (${listSource.username}, ${sourceLabel(listSource)})` : ""}
+                </button>
+                <button className="btn-quiet" onClick={nav.connect}>
+                  connect MyAnimeList
+                </button>
+              </>
             ) : (
               <>
                 <button className="btn-quiet" onClick={nav.editManualList}>
                   edit your list
+                </button>
+                <button className="btn-quiet" onClick={nav.usernameStart}>
+                  use a username
                 </button>
                 <button className="btn-quiet" onClick={nav.connect}>
                   connect MyAnimeList
@@ -2187,6 +2343,14 @@ function ScreenHistory({ nav, history, source }) {
                       chose · from a shortlist
                     </div>
                   )}
+                  {entry.mode === "resume" && (
+                    <div
+                      className="meta"
+                      style={{ marginTop: 10, fontSize: 9.5, letterSpacing: "0.16em", color: "var(--bone-4)" }}
+                    >
+                      picked back up
+                    </div>
+                  )}
                   {entry.mode === "together" && (
                     <div
                       className="meta"
@@ -2195,12 +2359,12 @@ function ScreenHistory({ nav, history, source }) {
                       for two · with {entry.partner_name || "them"}
                     </div>
                   )}
-                  {entry.answered_from === "myanimelist" && (
+                  {entry.answered_from && (
                     <div
                       className="meta"
                       style={{ marginTop: 10, fontSize: 9.5, letterSpacing: "0.16em", color: "var(--bone-4)" }}
                     >
-                      from MyAnimeList
+                      from {entry.answered_from === "anilist" ? "AniList" : "MyAnimeList"}
                     </div>
                   )}
                   {entry.seen_before && (
@@ -2319,6 +2483,19 @@ function ScreenHistory({ nav, history, source }) {
   );
 }
 
+// The way in the user chose last, if it's still set up; otherwise MAL login,
+// then a username, then a typed list.
+function initialMode() {
+  const available = {
+    mal: Boolean(loadTokens()?.access_token),
+    username: Boolean(loadListSource()),
+    manual: Boolean(loadManualList().trim())
+  };
+  const saved = loadActiveMode();
+  if (available[saved]) return saved;
+  return available.mal ? "mal" : available.username ? "username" : available.manual ? "manual" : "mal";
+}
+
 function partnerName(partner) {
   return partner?.kind === "mal" ? partner.username : partner?.name?.trim() || "them";
 }
@@ -2394,7 +2571,7 @@ function makeUserReflection(feedback, note) {
 }
 
 function hasRecommendationInput() {
-  return Boolean(loadTokens()?.access_token || loadManualList().trim());
+  return Boolean(loadTokens()?.access_token || loadListSource() || loadManualList().trim());
 }
 
 // Retries the model up to MAX_RECOMMENDATION_ATTEMPTS times, telling it why
@@ -2646,7 +2823,7 @@ function validateRecommendation(recommendation, candidateList, memory, unwatched
     return { ok: false, error: "that title isn't in candidateList; pick one that is" };
   }
 
-  if (isMemoryExcludedTitle(recommendation.title, memory) || isMemoryExcludedTitle(recommendation.title_jp, memory)) {
+  if (!candidate.resume && (isMemoryExcludedTitle(recommendation.title, memory) || isMemoryExcludedTitle(recommendation.title_jp, memory))) {
     return { ok: false, error: "that title is already on the user's list or was recommended before" };
   }
 
@@ -2675,6 +2852,7 @@ function mergeCandidateMeta(recommendation, candidate) {
     image_url: candidate.image_url || recommendation.image_url || "",
     watch_links: candidate.watchLinks || [],
     // Saved with the pick so later pools can exclude it by id, not just name.
+    ...(candidate.resume ? { resume: candidate.resume } : {}),
     ...(candidate.anilistId ? { anilistId: candidate.anilistId } : {}),
     ...(candidate.malId ? { malId: candidate.malId } : {})
   };
