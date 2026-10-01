@@ -48,6 +48,9 @@ export function buildRecommendationMemory({ malList, history = [], existingMemor
       memory.pending = uniqueTitles([...memory.pending, ...titles]);
       memory.watchlisted = uniqueTitles([...memory.watchlisted, ...titles]);
     }
+    if (entry.state === "watching") {
+      memory.in_progress = uniqueTitles([...memory.in_progress, ...titles]);
+    }
     if (entry.feedback === "good") {
       memory.completed = uniqueTitles([...memory.completed, ...titles]);
     }

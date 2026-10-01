@@ -73,6 +73,7 @@ import {
 } from "./sync.js";
 import { normalizeSnapshot } from "./syncMerge.js";
 import { sharePick } from "./shareCard.js";
+import { askAgainAfter, findCurrentPending, findReviewEntries, isAwaitingAnswer } from "./reviewQueue.js";
 
 // Lets the header (wordmark, "← back") reach navigation without threading
 // it through every screen.
@@ -879,9 +880,21 @@ export default function App() {
 
   // Applies a "how was it?" answer to a logged pick: from the return-visit
   // question, the log, or a reopened pick.
-  function answerEntry(entry, answer, { note = "", seenBefore = false, reflection = "", reason = "", answeredFrom = "myanimelist" } = {}) {
+  // "Watching it" and "I'll watch it later" snooze the question (see
+  // reviewQueue.js); saving a pick straight from the reveal doesn't, so it's
+  // still asked about on the next visit.
+  function answerEntry(entry, answer, { note = "", seenBefore = false, reflection = "", reason = "", answeredFrom = "myanimelist", snooze = true } = {}) {
     let patch;
-    if (answer === "not-tonight") {
+    if (answer === "watching") {
+      patch = {
+        feedback: "",
+        feedback_note: "",
+        state: "watching",
+        watching_since: entry.watching_since || new Date().toISOString(),
+        note: "watching it.",
+        ask_after: askAgainAfter("watching")
+      };
+    } else if (answer === "not-tonight") {
       patch = {
         feedback: "",
         feedback_note: "",
@@ -891,15 +904,16 @@ export default function App() {
         note: reason ? `not tonight · ${reason}.` : "not tonight."
       };
     } else if (answer === "later") {
-      patch = { feedback: "", feedback_note: "", state: "pending", note: "waiting in the watchlist" };
+      patch = { feedback: "", feedback_note: "", state: "pending", note: "waiting in the watchlist", ask_after: snooze ? askAgainAfter("later") : null };
     } else if (answer === "pass") {
-      patch = { feedback: "", feedback_note: "", state: "skipped", note: "passed on it." };
+      patch = { feedback: "", feedback_note: "", state: "skipped", note: "passed on it.", ask_after: null };
     } else {
       patch = {
         feedback: answer,
         state: "rated",
         feedback_note: note.trim(),
         note: reflection || makeUserReflection(answer, note),
+        ask_after: null,
         ...(reflection ? { answered_from: answeredFrom } : {}),
         ...(seenBefore ? { seen_before: true } : {})
       };
@@ -916,12 +930,12 @@ export default function App() {
     }
     setHistory(nextHistory);
     // Answers read off the list itself don't need writing back to it.
-    if (!reflection && ["good", "meh", "later"].includes(answer)) shareWithMal(entry, answer);
+    if (!reflection && MAL_ACTION_FOR[answer]) shareWithMal(entry, MAL_ACTION_FOR[answer]);
     return nextHistory;
   }
 
   function handleSaveForLater() {
-    if (revealEntry) answerEntry(revealEntry, "later");
+    if (revealEntry) answerEntry(revealEntry, "later", { snooze: false });
   }
 
   // "I've already seen it": keep how it landed as a taste signal, then ask
@@ -963,24 +977,11 @@ export default function App() {
       return;
     }
 
-    const remainingPendingIds = reviewIds.filter((id) => id !== pending.id);
-
     // Answered questions are replaced rather than stacked, so "back" from the
     // mood screen doesn't walk back through them.
-    if (answer === "not-yet") {
-      // An unanswered pick they still mean to watch becomes a saved one.
-      if (pending.state === "unrated") {
-        answerEntry(pending, "later");
-      }
-      setPendingReviewIds(remainingPendingIds);
-      go(remainingPendingIds.length ? VIEW.PENDING : VIEW.MOOD, { replace: true });
-      return;
-    }
-
     const nextHistory = answerEntry(pending, answer);
-    const nextPendingIds = remainingPendingIds.filter((id) =>
-      nextHistory.some((entry) => entry.id === id && isAwaitingAnswer(entry))
-    );
+    const due = new Set(findReviewEntries(nextHistory, sessionEntryIds.current).map((entry) => entry.id));
+    const nextPendingIds = reviewIds.filter((id) => id !== pending.id && due.has(id));
     setPendingReviewIds(nextPendingIds);
     go(nextPendingIds.length ? VIEW.PENDING : VIEW.MOOD, { replace: true });
   }
@@ -1628,14 +1629,18 @@ function ScreenPending({ nav, pending }) {
               fontStyle: "italic"
             }}
           >
-            {pending.mode === "resume"
+            {pending.state === "watching"
+              ? `Did you finish ${pending.recommendation.title}?`
+              : pending.mode === "resume"
               ? `Did you get back to ${pending.recommendation.title}?`
               : pending.mode === "together"
               ? `Did you and ${pending.partner_name || "them"} watch ${pending.recommendation.title}?`
               : `Did you watch ${pending.recommendation.title}?`}
           </h2>
           <p className="meta fade-up delay-1">
-            {pending.state === "pending" ? "Saved" : "En picked it"} · {formatDate(pending.date)}
+            {pending.state === "watching"
+              ? `Watching since ${formatDate(pending.watching_since || pending.date)}`
+              : `${pending.state === "pending" ? "Saved" : "En picked it"} · ${formatDate(pending.date)}`}
           </p>
 
           <div className="choice-links fade-up delay-2" style={{ marginTop: 64 }}>
@@ -1645,8 +1650,11 @@ function ScreenPending({ nav, pending }) {
             <button className="btn-link" onClick={() => nav.pendingAnswer("meh")}>
               Meh
             </button>
-            <button className="btn-link" onClick={() => nav.pendingAnswer("not-yet")}>
-              Not yet
+            <button className="btn-link" onClick={() => nav.pendingAnswer("watching")}>
+              {pending.state === "watching" ? "Still watching" : "Watching it"}
+            </button>
+            <button className="btn-link" onClick={() => nav.pendingAnswer("later")}>
+              {pending.state === "watching" ? "I'll finish it later" : "I'll watch it later"}
             </button>
             <button className="btn-quiet" onClick={() => nav.pendingAnswer("pass")}>
               I'll pass on it
@@ -2480,10 +2488,19 @@ function ScreenFeedback({ nav, pick }) {
   );
 }
 
-const ANSWERS = ["good", "meh", "pass"];
+const ANSWERS = [
+  ["good", "good"],
+  ["meh", "meh"],
+  ["watching", "watching it"],
+  ["later", "later"],
+  ["pass", "pass"]
+];
 
 function currentAnswer(entry) {
-  return entry.state === "skipped" ? "pass" : entry.feedback || "";
+  if (entry.state === "skipped") return "pass";
+  if (entry.state === "watching") return "watching";
+  if (entry.state === "pending") return "later";
+  return entry.feedback || "";
 }
 
 function AnswerControls({ entry, onAnswer, prompt }) {
@@ -2491,14 +2508,14 @@ function AnswerControls({ entry, onAnswer, prompt }) {
   return (
     <div className="answer-controls">
       <span className="meta answer-controls__prompt">{prompt}</span>
-      {ANSWERS.map((answer) => (
+      {ANSWERS.map(([answer, label]) => (
         <button
           key={answer}
           className={current === answer ? "btn-quiet answer-current" : "btn-quiet"}
           aria-pressed={current === answer}
           onClick={() => onAnswer(entry.id, answer)}
         >
-          {answer}
+          {label}
         </button>
       ))}
     </div>
@@ -2508,9 +2525,12 @@ function AnswerControls({ entry, onAnswer, prompt }) {
 // A pick reopened from the log: how it went, and a way to change that.
 function PastPickAnswer({ entry, onAnswer }) {
   const [changing, setChanging] = useState(false);
+  const askAgain = entry.ask_after && Date.parse(entry.ask_after) > Date.now() ? ` En asks again ${formatDate(entry.ask_after)}.` : "";
   const summary =
     entry.state === "pending"
-      ? "Saved for later."
+      ? `Saved for later.${askAgain}`
+      : entry.state === "watching"
+        ? `You're watching it.${askAgain}`
       : entry.state === "unrated"
         ? "Not rated yet."
         : entry.state === "skipped"
@@ -2667,13 +2687,15 @@ function ScreenHistory({ nav, history, source, listSource, malSync, sync }) {
                       marginTop: 12,
                       fontSize: 10.5,
                       letterSpacing: "0.22em",
-                      color: entry.feedback === "good" || entry.state === "pending"
+                      color: entry.feedback === "good" || entry.state === "pending" || entry.state === "watching"
                         ? "var(--shu)"
                         : "var(--bone-4)"
                     }}
                   >
                     {entry.state === "pending"
-                      ? "○ pending"
+                      ? "○ later"
+                      : entry.state === "watching"
+                        ? "○ watching"
                       : entry.state === "unrated"
                         ? "○ unrated"
                         : entry.state === "skipped"
@@ -3339,6 +3361,9 @@ function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre
   );
 }
 
+// En's answer -> the MyAnimeList change it asks for (api/mal-status.js).
+const MAL_ACTION_FOR = { good: "good", meh: "meh", later: "later", watching: "tonight" };
+
 const MAL_STATUS_WORDS = {
   watching: "marked as watching",
   plan_to_watch: "added to plan to watch",
@@ -3454,36 +3479,6 @@ function writeSession(key, value) {
 
 function formatCount(count) {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(count);
-}
-
-function isAwaitingAnswer(entry) {
-  return entry.state === "pending" || entry.state === "unrated";
-}
-
-function findCurrentPending(history, pendingReviewIds, sessionIds) {
-  const pendingById = new Map(
-    history
-      .filter(isAwaitingAnswer)
-      .map((entry) => [entry.id, entry])
-  );
-  return pendingReviewIds.map((id) => pendingById.get(id)).find(Boolean) || findReviewEntries(history, sessionIds)[0];
-}
-
-// Saved picks and unanswered picks from earlier visits, oldest first.
-function findReviewEntries(history, sessionIds = new Set()) {
-  return history
-    .map((entry, index) => ({ entry, index }))
-    .filter(({ entry }) => isAwaitingAnswer(entry) && !sessionIds.has(entry.id))
-    .sort((a, b) => {
-      const timeA = Date.parse(a.entry.date);
-      const timeB = Date.parse(b.entry.date);
-
-      if (Number.isNaN(timeA) && Number.isNaN(timeB)) return b.index - a.index;
-      if (Number.isNaN(timeA)) return 1;
-      if (Number.isNaN(timeB)) return -1;
-      return timeA - timeB;
-    })
-    .map(({ entry }) => entry);
 }
 
 function makeUserReflection(feedback, note) {

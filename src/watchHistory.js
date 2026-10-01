@@ -126,7 +126,7 @@ export function answersFromList({ list, history = [], sourceName = "MyAnimeList"
 
   const answers = [];
   for (const logged of history) {
-    if (logged.state !== "unrated" && logged.state !== "pending") continue;
+    if (!["unrated", "pending", "watching"].includes(logged.state)) continue;
     const rec = logged.recommendation || {};
     const match =
       (rec.malId && byId.get(rec.malId)) ||

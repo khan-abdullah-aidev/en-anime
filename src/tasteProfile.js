@@ -62,7 +62,7 @@ export function buildTasteProfile({ malList, feedbackHistory = [], previousProfi
     ...likedEntries.map((entry) => findCatalogAnime(entry, catalogByTitle)).filter(Boolean),
     ...manualCatalog,
     ...feedbackHistory
-      .filter((entry) => entry.feedback === "good" || entry.state === "pending")
+      .filter((entry) => entry.feedback === "good" || entry.state === "pending" || entry.state === "watching")
       .map((entry) => findCatalogAnime(entry.recommendation, catalogByTitle))
       .filter(Boolean)
   ];
