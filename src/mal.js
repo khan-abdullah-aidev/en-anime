@@ -27,6 +27,29 @@ export async function fetchPartnerList(username) {
   return sortByRecent(payload.data || []);
 }
 
+// Two-way sync: puts an answer the user gave En onto their MAL list (see
+// api/mal-status.js for what each action changes, and what it never touches).
+export async function updateMalListStatus(accessToken, malId, action) {
+  let response;
+  try {
+    response = await fetch("/api/mal-status", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ malId, action })
+    });
+  } catch {
+    throw new Error("En couldn't reach MyAnimeList to update your list.");
+  }
+  const payload = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    throw new MalAuthError(payload.error || "Your MyAnimeList session expired.");
+  }
+  if (!response.ok) {
+    throw Object.assign(new Error(payload.error || "En couldn't update your MyAnimeList list."), { code: payload.code });
+  }
+  return payload;
+}
+
 export class MalAuthError extends Error {
   constructor(message) {
     super(message);

@@ -2,7 +2,9 @@ import { clearOauthSession, loadOauthSession, saveOauthSession, saveTokens } fro
 
 const MAL_AUTH_URL = "https://myanimelist.net/v1/oauth2/authorize";
 const REDIRECT_URI = "http://localhost:5173/callback";
-const SCOPE = "read:users";
+// MAL documents a single scope, write:users, which covers reading the list
+// and updating it (two-way sync, see api/mal-status.js).
+const SCOPE = "write:users";
 
 export function getRedirectUri() {
   return import.meta.env.VITE_MAL_REDIRECT_URI || REDIRECT_URI;

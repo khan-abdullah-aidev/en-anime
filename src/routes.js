@@ -15,7 +15,8 @@ export const VIEW = {
   HISTORY: "history",
   TOGETHER: "together",
   TOGETHER_MOOD: "together_mood",
-  USERNAME: "username"
+  USERNAME: "username",
+  KNOWS: "knows"
 };
 
 const PATHS = {
@@ -28,7 +29,8 @@ const PATHS = {
   [VIEW.HISTORY]: "/log",
   [VIEW.TOGETHER]: "/together",
   [VIEW.TOGETHER_MOOD]: "/together/tonight",
-  [VIEW.USERNAME]: "/your-username"
+  [VIEW.USERNAME]: "/your-username",
+  [VIEW.KNOWS]: "/what-en-knows"
 };
 
 // Where "← back" goes when there's no earlier page in this tab to return to,
@@ -46,7 +48,8 @@ export const PARENT = {
   [VIEW.HISTORY]: VIEW.MOOD,
   [VIEW.TOGETHER]: VIEW.MOOD,
   [VIEW.TOGETHER_MOOD]: VIEW.TOGETHER,
-  [VIEW.USERNAME]: VIEW.LANDING
+  [VIEW.USERNAME]: VIEW.LANDING,
+  [VIEW.KNOWS]: VIEW.HISTORY
 };
 
 // The thinking screen has no address of its own: it sits on top of the page

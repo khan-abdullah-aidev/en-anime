@@ -57,7 +57,14 @@ export function withFetch(impl, fn) {
   const real = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
-    const body = init.body ? JSON.parse(init.body) : null;
+    let body = null;
+    if (init.body) {
+      try {
+        body = JSON.parse(init.body);
+      } catch {
+        body = String(init.body); // a form post
+      }
+    }
     calls.push({ url: String(url), body, headers: init.headers || {} });
     return impl(String(url), body, calls.length);
   };

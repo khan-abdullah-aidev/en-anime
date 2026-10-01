@@ -140,6 +140,40 @@ export function summarizeRecentPatterns(malList, feedbackHistory = []) {
   };
 }
 
+// The evidence behind each genre, for "What En knows about you": how many of
+// the user's shows carry it, how they score those against their own average,
+// and how many they dropped. Keyed by normalized genre name.
+export function describeGenreAffinity(malList) {
+  const entries = Array.isArray(malList) ? malList.filter(isWatchedTasteEntry) : [];
+  const scored = entries.filter((entry) => Number(entry.my_list_status?.score) > 0);
+  const averageScore = scored.length
+    ? scored.reduce((sum, entry) => sum + Number(entry.my_list_status.score), 0) / scored.length
+    : null;
+
+  const stats = {};
+  for (const entry of entries) {
+    const score = Number(entry.my_list_status?.score || 0);
+    for (const genre of entry.genres || []) {
+      const key = normalizeTitleForCompare(genre);
+      if (!key || NON_TASTE_LABELS.has(key)) continue;
+      const stat = (stats[key] ||= { label: genre, count: 0, dropped: 0, scored: 0, deltaTotal: 0 });
+      stat.count += 1;
+      if (entry.my_list_status?.status === "dropped") stat.dropped += 1;
+      if (score > 0 && averageScore !== null) {
+        stat.scored += 1;
+        stat.deltaTotal += score - averageScore;
+      }
+    }
+  }
+
+  return Object.fromEntries(
+    Object.entries(stats).map(([key, stat]) => [
+      key,
+      { label: stat.label, count: stat.count, dropped: stat.dropped, scoreDelta: stat.scored ? round(stat.deltaTotal / stat.scored) : null }
+    ])
+  );
+}
+
 function isWatchedTasteEntry(entry) {
   const status = entry?.my_list_status?.status;
   return status !== "plan_to_watch" && status !== "watching";

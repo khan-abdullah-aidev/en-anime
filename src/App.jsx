@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState } from 
 import { askEn, askEnChoose, askEnTogether, askEnVerdict } from "./openrouter.js";
 import { isEnConfigError } from "./llmProviders.js";
 import { beginMalOauth, finishMalOauth, refreshMalOauth } from "./oauth.js";
-import { MalAuthError, fetchAnimeImage, fetchAnimeList, fetchPartnerList, isMalAuthError } from "./mal.js";
+import { MalAuthError, fetchAnimeImage, fetchAnimeList, fetchPartnerList, isMalAuthError, updateMalListStatus } from "./mal.js";
 import { ANIME_CATALOG } from "./animeCatalog.js";
 import {
   appendHistory,
@@ -37,15 +37,42 @@ import {
 import {
   buildTasteProfile,
   compactFeedbackHistory,
+  describeGenreAffinity,
   summarizeRecentPatterns
 } from "./tasteProfile.js";
 import { answersFromList, buildWatchHistoryDigest, describeQueriedTitle } from "./watchHistory.js";
-import { buildOpenCandidatePool, buildTogetherPool, toModelCandidate } from "./discovery.js";
-import { normalizeTitleForCompare, titleMatchesAnime } from "./titleUtils.js";
+import { buildOpenCandidatePool, buildTogetherPool, seedBench, toModelCandidate } from "./discovery.js";
+import { normalizeTitleForCompare, titleMatchesAnime, uniqueTitles } from "./titleUtils.js";
 import { resolveAnimeOnAniList } from "./anilist.js";
 import { PARENT, VIEW, parsePath, pathFor } from "./routes.js";
 import { fetchPublicList, sourceLabel } from "./lists.js";
 import { debugLog } from "./debug.js";
+import {
+  EXCLUDABLE,
+  GENRE_OPTIONS,
+  NOTES_LIMIT,
+  applyTasteCorrections,
+  exclusionFilter,
+  loadPreferences,
+  updatePreferences,
+  userSaidFor
+} from "./preferences.js";
+import {
+  applyRemoteSnapshot,
+  deleteRemoteSnapshot,
+  exportLogBlob,
+  fetchRemoteSnapshot,
+  generateSyncCode,
+  importLogText,
+  loadSyncSettings,
+  localSnapshot,
+  normalizeSyncCode,
+  pushSnapshot,
+  saveSyncSettings,
+  syncAvailable
+} from "./sync.js";
+import { normalizeSnapshot } from "./syncMerge.js";
+import { sharePick } from "./shareCard.js";
 
 // Lets the header (wordmark, "← back") reach navigation without threading
 // it through every screen.
@@ -121,7 +148,22 @@ export default function App() {
   const [status, setStatus] = useState("");
   const [thinkingMood, setThinkingMood] = useState("");
   const [error, setError] = useState("");
+  // What the user has told En directly (preferences.js).
+  const [preferences, setPreferences] = useState(() => loadPreferences());
+  // A quiet message at the foot of the screen: { kind: "info", text } or
+  // the one-time MyAnimeList offer, { kind: "mal-offer", items }.
+  const [notice, setNotice] = useState(null);
+  const [knows, setKnows] = useState({ status: "idle" });
+  const [syncSettings, setSyncSettings] = useState(() => loadSyncSettings());
+  const [syncState, setSyncState] = useState({ available: null, busy: false, error: "" });
   const handledCallback = useRef(false);
+  // The last snapshot the server confirmed, so a sync only runs when
+  // something here has changed since.
+  const lastSyncedSnapshot = useRef("");
+  const syncTimer = useRef(null);
+  const syncing = useRef(false);
+  const syncAgain = useRef(false);
+  const lastSyncAt = useRef(0);
   // Picks revealed in this visit. "Did you watch it?" is only asked about
   // picks from earlier visits, never one the user was just handed.
   const sessionEntryIds = useRef(new Set());
@@ -174,6 +216,69 @@ export default function App() {
         // Not worth an error here; the next request will surface it.
       });
   }, []);
+
+  // The log on other devices: sync shortly after anything changes here, and
+  // when the tab comes back into view (another device may have moved on).
+  useEffect(() => {
+    if (!syncSettings.enabled) return undefined;
+    if (JSON.stringify(localSnapshot()) === lastSyncedSnapshot.current) return undefined;
+    clearTimeout(syncTimer.current);
+    syncTimer.current = setTimeout(() => {
+      if (JSON.stringify(localSnapshot()) !== lastSyncedSnapshot.current) runSync();
+    }, 1500);
+    return () => clearTimeout(syncTimer.current);
+  }, [history, preferences, syncSettings.enabled]);
+
+  useEffect(() => {
+    function onVisible() {
+      if (document.visibilityState === "visible" && loadSyncSettings().enabled && Date.now() - lastSyncAt.current > 30000) {
+        runSync();
+      }
+    }
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, []);
+
+  // Signing in with MyAnimeList on a new device: if the log was synced from
+  // another one, pick it up. Checked once per device.
+  useEffect(() => {
+    const settings = loadSyncSettings();
+    if (settings.enabled || settings.probed || mode !== "mal" || !tokens?.access_token) return;
+    setSyncSettings(saveSyncSettings({ ...settings, probed: true }));
+    withMalToken((token) => fetchRemoteSnapshot({ token }))
+      .then((remote) => {
+        if (!remote?.history?.length) return;
+        enableSync({ via: "mal" });
+        setNotice({ kind: "info", text: "Your log from your other devices is here." });
+      })
+      .catch(() => {
+        // No stored copy, or no storage on this server: nothing to pick up.
+      });
+  }, [tokens?.access_token, mode]);
+
+  // "What En knows about you" reads the list when it opens.
+  useEffect(() => {
+    if (view !== VIEW.KNOWS) return undefined;
+    let cancelled = false;
+    setKnows((current) => (current.status === "ready" ? current : { status: "loading", reload: current.reload }));
+    fetchOwnList()
+      .then((list) => !cancelled && setKnows({ status: "ready", list }))
+      .catch((listError) =>
+        !cancelled && setKnows({
+          status: "error",
+          error: isMalAuthError(listError) ? "Your MyAnimeList session expired. Connect again from the log." : listError.message
+        })
+      );
+    return () => {
+      cancelled = true;
+    };
+  }, [view, knows.reload]);
+
+  useEffect(() => {
+    if (view === VIEW.HISTORY && syncState.available === null) {
+      syncAvailable().then((available) => setSyncState((current) => ({ ...current, available })));
+    }
+  }, [view]);
 
   useEffect(() => {
     if (window.location.pathname !== "/callback" || handledCallback.current) return;
@@ -364,12 +469,17 @@ export default function App() {
     applyListAnswers(list);
     const history = loadHistory();
 
-    const tasteProfile = buildTasteProfile({
+    // The cache keeps what En inferred; the user's corrections are applied
+    // on top each time, so undoing one brings the inference back.
+    const inferredProfile = buildTasteProfile({
       malList: list,
       feedbackHistory: history,
       previousProfile: loadTasteProfileCache()
     });
-    saveTasteProfileCache(tasteProfile);
+    saveTasteProfileCache(inferredProfile);
+    const preferences = loadPreferences();
+    const tasteProfile = applyTasteCorrections(inferredProfile, preferences);
+    const userSaid = userSaidFor(preferences);
 
     const memory = buildRecommendationMemory({
       malList: list,
@@ -392,7 +502,8 @@ export default function App() {
         watchHistory: buildWatchHistoryDigest(list),
         tasteProfile,
         recentPatterns: summarizeRecentPatterns(list, history),
-        feedbackHistory: compactFeedbackHistory(history)
+        feedbackHistory: compactFeedbackHistory(history),
+        ...(userSaid ? { userSaid } : {})
       }
     };
   }
@@ -401,13 +512,17 @@ export default function App() {
   // catalog if AniList can't be reached.
   async function findCandidates({ mood, list, signals, memory, partner: other, includeResume = false }) {
     const passedOver = passedOverTonight();
+    const { excludedGenres, mutedSeeds } = loadPreferences();
+    const exclude = exclusionFilter(excludedGenres);
     const { candidates, source, constraints, constraintsRelaxed } = other
       ? await buildTogetherPool({
           mood,
           passedOver,
           you: { list, history: loadHistory(), memory, tasteProfile: signals.tasteProfile },
           partner: other,
-          recentPatterns: signals.recentPatterns
+          recentPatterns: signals.recentPatterns,
+          exclude,
+          mutedSeeds
         })
       : await buildOpenCandidatePool({
           mood,
@@ -417,9 +532,18 @@ export default function App() {
           tasteProfile: signals.tasteProfile,
           recentPatterns: signals.recentPatterns,
           memory,
-          includeResume
+          includeResume,
+          exclude,
+          mutedSeeds
         });
-    debugLog("[En debug] candidate pool", { source, count: candidates.length, constraints, constraintsRelaxed });
+    debugLog("[En debug] candidate pool", { source, count: candidates.length, constraints, constraintsRelaxed, leftOut: exclude.labels });
+    if (!candidates.length) {
+      throw new Error(
+        exclude.labels.length
+          ? `Leaving out ${joinList(exclude.labels)} left En nothing to pick from. Let one back in and ask again.`
+          : "En couldn't find anything left to pick tonight. Try again in a moment."
+      );
+    }
     // Only sent when there's something to say, to keep the payload lean.
     const steering = {
       ...(Object.keys(constraints || {}).length ? { constraints } : {}),
@@ -791,6 +915,8 @@ export default function App() {
       recordRecommendedAnime(entry.recommendation, "rejected");
     }
     setHistory(nextHistory);
+    // Answers read off the list itself don't need writing back to it.
+    if (!reflection && ["good", "meh", "later"].includes(answer)) shareWithMal(entry, answer);
     return nextHistory;
   }
 
@@ -801,7 +927,9 @@ export default function App() {
   // "I've already seen it": keep how it landed as a taste signal, then ask
   // again with the mood that produced this pick (the title is already banned).
   function handleWatchTonight() {
-    if (revealEntry) setHistory(updateHistoryEntry(revealEntry.id, { watch_tonight: true }));
+    if (!revealEntry) return;
+    setHistory(updateHistoryEntry(revealEntry.id, { watch_tonight: true }));
+    shareWithMal(revealEntry, "tonight");
   }
 
   // "Not tonight": log why, then ask again with the same mood. The reason
@@ -885,6 +1013,196 @@ export default function App() {
     go(VIEW.LANDING);
   }
 
+  // ---------- preferences ----------
+
+  function changePreferences(patch) {
+    setPreferences(updatePreferences(patch));
+  }
+
+  function toggleExcludedGenre(label) {
+    const current = loadPreferences().excludedGenres;
+    changePreferences({
+      excludedGenres: current.includes(label) ? current.filter((item) => item !== label) : [...current, label]
+    });
+  }
+
+  // ---------- MyAnimeList, both ways ----------
+
+  // Runs a MAL call with the current token, refreshing it once if it expired.
+  async function withMalToken(call) {
+    const current = loadTokens();
+    if (!current?.access_token) throw new MalAuthError("Connect MyAnimeList first.");
+    try {
+      return await call(current.access_token);
+    } catch (callError) {
+      if (!isMalAuthError(callError)) throw callError;
+      const next = await refreshMalOauth(current);
+      setTokens(next);
+      return call(next.access_token);
+    }
+  }
+
+  // What the user tells En about a pick goes on their MAL list too, once
+  // they've said yes to that (asked the first time it would happen).
+  function shareWithMal(entry, action) {
+    const malId = entry?.recommendation?.malId;
+    if (mode !== "mal" || !loadTokens()?.access_token || !malId) return;
+    const setting = loadPreferences().malSync;
+    if (setting === "off") return;
+    if (setting !== "on") {
+      setNotice((current) =>
+        current?.kind === "mal-offer"
+          ? { ...current, items: [...current.items, { entry, action }] }
+          : { kind: "mal-offer", items: [{ entry, action }] }
+      );
+      return;
+    }
+    sendToMal(entry, action);
+  }
+
+  async function sendToMal(entry, action) {
+    try {
+      const result = await withMalToken((token) => updateMalListStatus(token, entry.recommendation.malId, action));
+      if (result.changed) {
+        setNotice({ kind: "info", text: `${entry.recommendation.title}: ${MAL_STATUS_WORDS[result.status] || "updated"} on your MyAnimeList.` });
+      }
+    } catch (malError) {
+      setNotice({
+        kind: "info",
+        text: isMalAuthError(malError) ? "MyAnimeList needs you to connect again before En can update your list." : malError.message
+      });
+    }
+  }
+
+  function answerMalOffer(yes) {
+    const items = notice?.kind === "mal-offer" ? notice.items : [];
+    changePreferences({ malSync: yes ? "on" : "off" });
+    setNotice(yes ? null : { kind: "info", text: "Okay. You can turn it on from the log." });
+    if (yes) items.forEach(({ entry, action }) => sendToMal(entry, action));
+  }
+
+  // ---------- the log on other devices ----------
+
+  function withSyncCredentials(settings, call) {
+    if (settings.via === "code") return call({ code: settings.code });
+    return withMalToken((token) => call({ token }));
+  }
+
+  function canSync(settings) {
+    if (!settings.enabled) return false;
+    return settings.via === "code" ? Boolean(settings.code) : Boolean(loadTokens()?.access_token);
+  }
+
+  // Sends this device's log and takes back the merged one. One at a time;
+  // a change made meanwhile gets its own sync straight after.
+  async function runSync() {
+    const settings = loadSyncSettings();
+    if (!canSync(settings)) return;
+    if (syncing.current) {
+      syncAgain.current = true;
+      return;
+    }
+    syncing.current = true;
+    setSyncState((current) => ({ ...current, busy: true }));
+    try {
+      const merged = await withSyncCredentials(settings, pushSnapshot);
+      if (applyRemoteSnapshot(merged)) {
+        setHistory(loadHistory());
+        setPreferences(loadPreferences());
+      }
+      lastSyncedSnapshot.current = JSON.stringify(normalizeSnapshot(merged));
+      lastSyncAt.current = Date.now();
+      setSyncSettings(saveSyncSettings({ ...loadSyncSettings(), lastSyncedAt: new Date().toISOString() }));
+      setSyncState((current) => ({ ...current, busy: false, error: "" }));
+    } catch (syncError) {
+      setSyncState((current) => ({
+        ...current,
+        busy: false,
+        error: isMalAuthError(syncError) ? "Connect MyAnimeList again to keep syncing." : syncError.message
+      }));
+    } finally {
+      syncing.current = false;
+      if (syncAgain.current) {
+        syncAgain.current = false;
+        runSync();
+      }
+    }
+  }
+
+  function enableSync(settings) {
+    lastSyncedSnapshot.current = "";
+    setSyncSettings(saveSyncSettings({ ...loadSyncSettings(), ...settings, enabled: true, probed: true }));
+    setSyncState((current) => ({ ...current, error: "" }));
+    runSync();
+  }
+
+  // Joining with a code typed in from another device, or starting fresh:
+  // MAL users sync by account, everyone else gets a code.
+  function handleSyncOn(typedCode) {
+    if (typedCode !== undefined) {
+      const code = normalizeSyncCode(typedCode);
+      if (!code) {
+        setSyncState((current) => ({ ...current, error: "That isn't a code En made. It's 20 letters and numbers." }));
+        return false;
+      }
+      enableSync({ via: "code", code });
+      return true;
+    }
+    if (mode === "mal" && loadTokens()?.access_token) enableSync({ via: "mal", code: undefined });
+    else enableSync({ via: "code", code: generateSyncCode() });
+    return true;
+  }
+
+  async function handleSyncOff({ forget = false } = {}) {
+    const settings = loadSyncSettings();
+    if (forget) {
+      try {
+        await withSyncCredentials(settings, deleteRemoteSnapshot);
+      } catch (syncError) {
+        setSyncState((current) => ({ ...current, error: syncError.message }));
+        return;
+      }
+    }
+    setSyncSettings(saveSyncSettings({ probed: true }));
+    setSyncState((current) => ({ ...current, error: "" }));
+    setNotice({ kind: "info", text: forget ? "Syncing is off, and En's copy is gone. This device keeps its log." : "Syncing is off on this device." });
+  }
+
+  function handleExportLog() {
+    const url = URL.createObjectURL(exportLogBlob());
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `en-log-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+
+  async function handleImportLog(file) {
+    try {
+      const added = importLogText(await file.text());
+      setHistory(loadHistory());
+      setPreferences(loadPreferences());
+      setNotice({
+        kind: "info",
+        text: added ? `Added ${added} pick${added === 1 ? "" : "s"} from the file.` : "Nothing new in that file. The log already had all of it."
+      });
+    } catch (importError) {
+      setNotice({ kind: "info", text: importError.message });
+    }
+  }
+
+  async function handleShare(entry) {
+    try {
+      return await sharePick(entry);
+    } catch (shareError) {
+      console.warn("[En] share card failed", shareError);
+      setNotice({ kind: "info", text: "En couldn't make the card. Try again." });
+      return "error";
+    }
+  }
+
   const nav = {
     back: goBack,
     canGoBack: routeIdx > 0 || Boolean(PARENT[view]),
@@ -914,7 +1232,15 @@ export default function App() {
     openPick: (id) => go(VIEW.REVEAL, { entryId: id }),
     deleteHistoryEntry: handleDeleteHistoryEntry,
     clearHistory: handleClearHistory,
-    disconnect: handleDisconnect
+    disconnect: handleDisconnect,
+    knows: () => go(VIEW.KNOWS),
+    share: handleShare,
+    toggleMalSync: () => changePreferences({ malSync: loadPreferences().malSync === "on" ? "off" : "on" }),
+    syncOn: handleSyncOn,
+    syncOff: handleSyncOff,
+    syncNow: runSync,
+    exportLog: handleExportLog,
+    importLog: handleImportLog
   };
 
   // A pick handed over in this visit and not yet answered gets the "watch it
@@ -931,6 +1257,7 @@ export default function App() {
     <NavContext.Provider value={nav}>
       <div style={{ minHeight: "100vh", position: "relative" }}>
         {error ? <ErrorRibbon message={error} onDismiss={() => setError("")} /> : null}
+        <Notice notice={notice} onDismiss={() => setNotice(null)} onMalOffer={answerMalOffer} />
         {view === VIEW.LANDING && <ScreenLanding nav={nav} status={status} />}
         {view === VIEW.MANUAL && (
           <ScreenManual
@@ -955,6 +1282,8 @@ export default function App() {
             onTogether={nav.togetherStart}
             mood={mood}
             setMood={setMood}
+            excluded={preferences.excludedGenres}
+            onToggleGenre={toggleExcludedGenre}
           />
         )}
         {view === VIEW.SHORTLIST && (
@@ -1001,6 +1330,8 @@ export default function App() {
             onSubmit={() => handleTogether(togetherMood)}
             onSurprise={() => handleTogether("")}
             onChangePartner={() => go(VIEW.TOGETHER)}
+            excluded={preferences.excludedGenres}
+            onToggleGenre={toggleExcludedGenre}
           />
         )}
         {view === VIEW.THINKING && (
@@ -1030,6 +1361,21 @@ export default function App() {
             nav={nav}
             history={history}
             source={mode === "username" ? "username" : mode === "manual" || !tokens?.access_token ? "manual" : "mal"}
+            listSource={loadListSource()}
+            malSync={preferences.malSync}
+            sync={{ settings: syncSettings, ...syncState }}
+          />
+        )}
+        {view === VIEW.KNOWS && (
+          <ScreenKnows
+            nav={nav}
+            knows={knows}
+            history={history}
+            preferences={preferences}
+            onChange={changePreferences}
+            onToggleGenre={toggleExcludedGenre}
+            onRetry={() => setKnows({ status: "idle", reload: Date.now() })}
+            mode={mode}
             listSource={loadListSource()}
           />
         )}
@@ -1312,7 +1658,7 @@ function ScreenPending({ nav, pending }) {
   );
 }
 
-function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mood, setMood }) {
+function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mood, setMood, excluded, onToggleGenre }) {
   const ref = useRef(null);
   const hints = useMemo(
     () => [
@@ -1435,6 +1781,7 @@ function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mo
                 or — for two
               </button>
             </div>
+            <LeaveOut excluded={excluded} onToggle={onToggleGenre} />
           </div>
         </div>
       </div>
@@ -1749,7 +2096,7 @@ function ScreenTogether({ onLog, partner, checking, onSubmit }) {
 }
 
 // "For two", step two: tonight's mood, for both of them.
-function ScreenTogetherMood({ onLog, name, mood, setMood, onSubmit, onSurprise, onChangePartner }) {
+function ScreenTogetherMood({ onLog, name, mood, setMood, onSubmit, onSurprise, onChangePartner, excluded, onToggleGenre }) {
   const ref = useRef(null);
 
   useEffect(() => {
@@ -1805,6 +2152,7 @@ function ScreenTogetherMood({ onLog, name, mood, setMood, onSubmit, onSurprise, 
                 or — watching with someone else
               </button>
             </div>
+            <LeaveOut excluded={excluded} onToggle={onToggleGenre} />
           </div>
         </div>
       </div>
@@ -2029,6 +2377,9 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight }) {
                 </>
               )}
             </div>
+            <div style={{ marginTop: 28 }}>
+              <ShareButton key={entry.id} onShare={() => nav.share(entry)} />
+            </div>
           </div>
         </div>
         <div className="reveal-scroll__seal meta jp">縁</div>
@@ -2196,7 +2547,7 @@ function PastPickAnswer({ entry, onAnswer }) {
   );
 }
 
-function ScreenHistory({ nav, history, source, listSource }) {
+function ScreenHistory({ nav, history, source, listSource, malSync, sync }) {
   const [editing, setEditing] = useState(false);
 
   return (
@@ -2239,6 +2590,9 @@ function ScreenHistory({ nav, history, source, listSource }) {
               flexWrap: "wrap"
             }}
           >
+            <button className="btn-quiet" onClick={nav.knows} style={{ color: "var(--bone-2)" }}>
+              what En knows about you →
+            </button>
             <button
               className="btn-quiet"
               onClick={() => setEditing((value) => !value)}
@@ -2257,9 +2611,14 @@ function ScreenHistory({ nav, history, source, listSource }) {
               clear log
             </button>
             {source === "mal" ? (
-              <button className="btn-quiet" onClick={nav.disconnect}>
-                disconnect MyAnimeList
-              </button>
+              <>
+                <button className="btn-quiet" onClick={nav.toggleMalSync} aria-pressed={malSync === "on"}>
+                  update MyAnimeList: {malSync === "on" ? "on" : "off"}
+                </button>
+                <button className="btn-quiet" onClick={nav.disconnect}>
+                  disconnect MyAnimeList
+                </button>
+              </>
             ) : source === "username" ? (
               <>
                 <button className="btn-quiet" onClick={nav.usernameStart}>
@@ -2469,6 +2828,8 @@ function ScreenHistory({ nav, history, source, listSource }) {
             ))}
           </div>
 
+          <SyncPanel nav={nav} sync={sync} source={source} hasLog={history.length > 0} />
+
           <div style={{ textAlign: "center", marginTop: 80, paddingBottom: 80 }}>
             <p
               className="meta"
@@ -2481,6 +2842,576 @@ function ScreenHistory({ nav, history, source, listSource }) {
       </div>
     </div>
   );
+}
+
+// "Leave some genres out": a standing filter on every pick En makes, shown
+// where tonight's pick is asked for.
+function LeaveOut({ excluded = [], onToggle }) {
+  const [open, setOpen] = useState(false);
+  if (!open) {
+    return (
+      <div className="leave-out">
+        <button className="btn-quiet" onClick={() => setOpen(true)} aria-expanded="false">
+          {excluded.length ? `leaving out ${joinList(excluded)} · change` : "or — leave some genres out"}
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="leave-out leave-out__panel fade-in">
+      <p className="meta" style={{ fontFamily: "var(--serif)", fontStyle: "italic", fontSize: 15 }}>
+        Tap what En should never suggest. It stays left out until you let it back in.
+      </p>
+      <GenreChips excluded={excluded} onToggle={onToggle} />
+      <button className="btn-quiet" onClick={() => setOpen(false)} aria-expanded="true" style={{ marginTop: 14 }}>
+        done
+      </button>
+    </div>
+  );
+}
+
+function GenreChips({ excluded, onToggle, align = "center" }) {
+  return (
+    <div className={align === "left" ? "chips chips--left" : "chips"} role="group" aria-label="Genres to leave out">
+      {EXCLUDABLE.map(({ label }) => (
+        <button
+          key={label}
+          className="chip"
+          aria-pressed={excluded.includes(label)}
+          aria-label={`${label}${excluded.includes(label) ? ", left out" : ""}`}
+          onClick={() => onToggle(label)}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Notice({ notice, onDismiss, onMalOffer }) {
+  useEffect(() => {
+    if (notice?.kind !== "info") return undefined;
+    const timer = setTimeout(onDismiss, 6000);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
+  if (!notice) return null;
+  if (notice.kind === "mal-offer") {
+    return (
+      <div className="notice fade-in" role="dialog" aria-label="Update MyAnimeList too?">
+        <p>
+          Update your MyAnimeList too? When you tell En you're watching a pick, saving it or how it went, En can mark
+          it on your list. It never changes a score, a drop or anything you've finished.
+        </p>
+        <div className="notice__actions">
+          <button className="btn-quiet notice__yes" onClick={() => onMalOffer(true)}>
+            yes, keep it in step
+          </button>
+          <button className="btn-quiet" onClick={() => onMalOffer(false)}>
+            no thanks
+          </button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="notice fade-in" role="status">
+      <p>{notice.text}</p>
+      <div className="notice__actions">
+        <button className="btn-quiet" onClick={onDismiss}>
+          ok
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ShareButton({ onShare }) {
+  const [state, setState] = useState("");
+  return (
+    <button
+      className="btn-quiet"
+      disabled={state === "busy"}
+      onClick={async () => {
+        setState("busy");
+        const result = await onShare();
+        setState(result === "downloaded" ? "downloaded" : "");
+      }}
+    >
+      {state === "busy" ? "making the card…" : state === "downloaded" ? "card saved · make another" : "share this pick"}
+    </button>
+  );
+}
+
+// The log on other devices: syncing (by MAL account or by code), and a file
+// to keep or carry by hand, which works even without syncing.
+function SyncPanel({ nav, sync, source, hasLog }) {
+  const { settings = {}, available, busy, error } = sync;
+  const [joining, setJoining] = useState(false);
+  const [code, setCode] = useState("");
+  const [turningOff, setTurningOff] = useState(false);
+  const fileRef = useRef(null);
+  const viaMal = settings.via === "mal";
+
+  let body;
+  if (available === null) {
+    body = <p>Checking…</p>;
+  } else if (!available) {
+    body = <p>Save the log as a file to keep a copy, or to load it on another device.</p>;
+  } else if (settings.enabled) {
+    body = (
+      <>
+        <p>
+          {viaMal
+            ? source === "mal"
+              ? "Synced with your MyAnimeList account. Connect the same account on another device and the log is there."
+              : "Synced with your MyAnimeList account. Connect MyAnimeList again to keep syncing."
+            : "Synced with this code. On another device, open the log, choose “I have a sync code” and type it in."}
+        </p>
+        {!viaMal && <div className="sync-code" aria-label="Your sync code">{settings.code}</div>}
+        <p className="meta" role="status" style={{ fontStyle: "normal", fontSize: 12 }}>
+          {busy ? "syncing…" : error || (settings.lastSyncedAt ? `last synced ${formatTimeAgo(settings.lastSyncedAt)}` : "")}
+        </p>
+        <div className="log-panel__actions">
+          {turningOff ? (
+            <>
+              <button className="btn-quiet" onClick={() => nav.syncOff()}>
+                turn off, keep En's copy
+              </button>
+              <button className="btn-quiet" onClick={() => nav.syncOff({ forget: true })}>
+                turn off and delete En's copy
+              </button>
+              <button className="btn-quiet" onClick={() => setTurningOff(false)}>
+                cancel
+              </button>
+            </>
+          ) : (
+            <>
+              <button className="btn-quiet" onClick={nav.syncNow} disabled={busy}>
+                sync now
+              </button>
+              <button className="btn-quiet" onClick={() => setTurningOff(true)}>
+                turn off
+              </button>
+            </>
+          )}
+        </div>
+      </>
+    );
+  } else {
+    body = (
+      <>
+        <p>
+          {source === "mal"
+            ? "Keep this log, your answers and what you've told En on every device you use. It follows your MyAnimeList account."
+            : "Keep this log, your answers and what you've told En on every device you use. En gives you a code to type in on the other one."}
+        </p>
+        {joining ? (
+          <div style={{ marginTop: 14 }}>
+            <input
+              value={code}
+              onChange={(event) => setCode(event.target.value)}
+              onKeyDown={submitOnEnter(() => nav.syncOn(code) && setJoining(false))}
+              aria-label="Sync code from your other device"
+              placeholder="XXXX-XXXX-XXXX-XXXX-XXXX"
+              autoCapitalize="characters"
+              autoCorrect="off"
+              spellCheck={false}
+              className="sync-code-input"
+            />
+            <div className="log-panel__actions">
+              <button className="btn-quiet" onClick={() => nav.syncOn(code) && setJoining(false)} disabled={!code.trim()}>
+                sync with this code
+              </button>
+              <button className="btn-quiet" onClick={() => setJoining(false)}>
+                cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="log-panel__actions">
+            <button className="btn-quiet" onClick={() => nav.syncOn()} style={{ color: "var(--bone-2)" }}>
+              turn on
+            </button>
+            <button className="btn-quiet" onClick={() => setJoining(true)}>
+              I have a sync code
+            </button>
+          </div>
+        )}
+        {error ? <p role="alert">{error}</p> : null}
+      </>
+    );
+  }
+
+  return (
+    <section className="log-panel" aria-labelledby="log-devices">
+      <div className="eyebrow" id="log-devices">On your other devices</div>
+      {body}
+      <div className="log-panel__actions" style={{ marginTop: 18 }}>
+        <button className="btn-quiet" onClick={nav.exportLog} disabled={!hasLog}>
+          download the log
+        </button>
+        <button className="btn-quiet" onClick={() => fileRef.current?.click()}>
+          load a log file
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="application/json,.json"
+          hidden
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) nav.importLog(file);
+            event.target.value = "";
+          }}
+        />
+      </div>
+    </section>
+  );
+}
+
+// "What En knows about you": the profile En inferred, with the evidence for
+// each part, and a way to correct every part of it.
+function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre, onRetry, mode, listSource }) {
+  const list = knows.status === "ready" ? knows.list : null;
+  const isList = Array.isArray(list);
+  const profile = useMemo(() => (list ? buildTasteProfile({ malList: list, feedbackHistory: history }) : null), [list, history]);
+  const evidence = useMemo(() => (isList ? describeGenreAffinity(list) : {}), [list, isList]);
+  const bench = useMemo(() => (isList ? benchFor(list) : []), [list, isList]);
+  const [adding, setAdding] = useState(false);
+  const [notes, setNotes] = useState(preferences.notes);
+  const [notesSaved, setNotesSaved] = useState(false);
+
+  const { moreOf, notFavorite, notDisliked, mutedSeeds, excludedGenres } = preferences;
+  const favorites = profile ? uniqueTitles([...moreOf, ...profile.favoriteGenres]).filter((genre) => !hasLabel(notFavorite, genre)) : [];
+  const dislikes = profile ? profile.dislikedTropes.filter((trope) => !hasLabel(notDisliked, trope) && !hasLabel(moreOf, trope)) : [];
+  const missing = GENRE_OPTIONS.filter((genre) => !hasLabel(favorites, genre));
+  const site = mode === "username" ? sourceLabel(listSource) : "MyAnimeList";
+
+  const rated = history.filter((entry) => entry.state === "rated");
+  const good = rated.filter((entry) => entry.feedback === "good").length;
+  const meh = rated.filter((entry) => entry.feedback === "meh");
+  const passed = history.filter((entry) => entry.state === "skipped" || entry.state === "not_tonight").length;
+
+  function saveNotes() {
+    if (notes.trim() === preferences.notes.trim()) return;
+    onChange({ notes: notes.trim() });
+    setNotesSaved(true);
+  }
+
+  function isMuted(entry) {
+    return mutedSeeds.some((seed) => (seed.malId && seed.malId === entry.id) || (seed.anilistId && seed.anilistId === entry.anilistId));
+  }
+
+  function toggleMuted(entry) {
+    onChange({
+      mutedSeeds: isMuted(entry)
+        ? mutedSeeds.filter((seed) => !((seed.malId && seed.malId === entry.id) || (seed.anilistId && seed.anilistId === entry.anilistId)))
+        : [...mutedSeeds, { title: listTitle(entry), malId: entry.id || null, anilistId: entry.anilistId || null }]
+    });
+  }
+
+  let summary = "";
+  if (isList) {
+    const finished = list.filter((entry) => entry.my_list_status?.status === "completed").length;
+    const dropped = list.filter((entry) => entry.my_list_status?.status === "dropped").length;
+    const average = profile?.scoreTendencies?.averageScore;
+    summary = `Read from your ${site} list: ${formatCount(finished)} finished, ${formatCount(dropped)} dropped${average ? `, ${average} average score` : ""}.`;
+  } else if (list) {
+    summary = "Read from the shows you told En you love.";
+  }
+  if (summary && rated.length) summary += ` And from how ${rated.length === 1 ? "one of its picks" : `${rated.length} of its picks`} landed.`;
+
+  return (
+    <div className="app-frame">
+      <Chrome onLog={nav.log} />
+      <div className="app-stage" style={{ alignItems: "flex-start", paddingTop: 80 }}>
+        <div className="column" style={{ maxWidth: 680 }}>
+          <div className="eyebrow fade-up">What En knows</div>
+          <h2 className="serif-display fade-up delay-1" style={{ fontSize: 48, margin: "24px 0 8px", fontWeight: 300 }}>
+            About you
+          </h2>
+          <p className="fade-up delay-2" style={{ color: "var(--bone-3)", fontStyle: "italic", lineHeight: 1.6, maxWidth: 560 }}>
+            {knows.status === "error"
+              ? knows.error
+              : knows.status === "ready"
+                ? `${summary} If something here is wrong, change it. En reads this before every pick.`
+                : "Reading your list…"}
+          </p>
+          {knows.status === "error" && (
+            <button className="btn-quiet" onClick={onRetry}>
+              try again
+            </button>
+          )}
+
+          {profile && (
+            <>
+              <section className="knows-section fade-up delay-2" aria-labelledby="knows-favorites">
+                <div className="eyebrow" id="knows-favorites">You keep coming back to</div>
+                <p className="knows-section__lede">
+                  {isList
+                    ? "Genres you score above your own average. Pools lean toward them."
+                    : "Genres from the shows you named. Pools lean toward them."}
+                </p>
+                {favorites.length ? (
+                  favorites.map((genre) => {
+                    const said = hasLabel(moreOf, genre);
+                    return (
+                      <div key={genre} className="knows-row">
+                        <div>
+                          <span className="knows-row__label">{genreLabel(genre)}</span>
+                          <span className="meta knows-row__why">{said ? "you said so" : favoriteWhy(evidence[normalizeTitleForCompare(genre)], isList)}</span>
+                        </div>
+                        <button
+                          className="btn-quiet"
+                          onClick={() =>
+                            onChange(
+                              said
+                                ? { moreOf: withoutLabel(moreOf, genre) }
+                                : { notFavorite: [...notFavorite, genre], moreOf: withoutLabel(moreOf, genre) }
+                            )
+                          }
+                        >
+                          {said ? "remove" : "not really"}
+                        </button>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <p className="meta">Nothing yet. There isn't enough on the list to tell.</p>
+                )}
+                {notFavorite.length ? (
+                  <p className="meta" style={{ marginTop: 16 }}>
+                    You said these aren't you:{" "}
+                    {notFavorite.map((genre, index) => (
+                      <span key={genre}>
+                        {index ? ", " : ""}
+                        {genreLabel(genre)}{" "}
+                        <button className="btn-quiet" style={{ padding: 0 }} onClick={() => onChange({ notFavorite: withoutLabel(notFavorite, genre) })}>
+                          undo
+                        </button>
+                      </span>
+                    ))}
+                  </p>
+                ) : null}
+                <div style={{ marginTop: 18 }}>
+                  {adding ? (
+                    <div className="fade-in">
+                      <div className="chips chips--left" role="group" aria-label="Genres En missed">
+                        {missing.map((genre) => (
+                          <button
+                            key={genre}
+                            className="chip"
+                            onClick={() => onChange({ moreOf: [...moreOf, genre], notFavorite: withoutLabel(notFavorite, genre) })}
+                          >
+                            + {genre}
+                          </button>
+                        ))}
+                      </div>
+                      <button className="btn-quiet" onClick={() => setAdding(false)} style={{ marginTop: 10 }}>
+                        done
+                      </button>
+                    </div>
+                  ) : (
+                    <button className="btn-quiet" onClick={() => setAdding(true)}>
+                      + something En missed
+                    </button>
+                  )}
+                </div>
+              </section>
+
+              <section className="knows-section" aria-labelledby="knows-dislikes">
+                <div className="eyebrow" id="knows-dislikes">Doesn't land for you</div>
+                <p className="knows-section__lede">What you drop or score below your average. En steers around it unless tonight asks for it.</p>
+                {dislikes.length ? (
+                  dislikes.map((trope) => (
+                    <div key={trope} className="knows-row">
+                      <div>
+                        <span className="knows-row__label">{genreLabel(trope)}</span>
+                        <span className="meta knows-row__why">{dislikeWhy(evidence[normalizeTitleForCompare(trope)])}</span>
+                      </div>
+                      <button className="btn-quiet" onClick={() => onChange({ notDisliked: [...notDisliked, trope] })}>
+                        it's fine, actually
+                      </button>
+                    </div>
+                  ))
+                ) : (
+                  <p className="meta">Nothing stands out. You haven't turned away from any one genre.</p>
+                )}
+                {notDisliked.length ? (
+                  <p className="meta" style={{ marginTop: 16 }}>
+                    You said these are fine:{" "}
+                    {notDisliked.map((trope, index) => (
+                      <span key={trope}>
+                        {index ? ", " : ""}
+                        {genreLabel(trope)}{" "}
+                        <button className="btn-quiet" style={{ padding: 0 }} onClick={() => onChange({ notDisliked: withoutLabel(notDisliked, trope) })}>
+                          undo
+                        </button>
+                      </span>
+                    ))}
+                  </p>
+                ) : null}
+              </section>
+
+              <section className="knows-section" aria-labelledby="knows-never">
+                <div className="eyebrow" id="knows-never">Never suggest</div>
+                <p className="knows-section__lede">
+                  Left out of every pick, wherever it would come from. The same list sits under tonight's question.
+                </p>
+                <GenreChips excluded={excludedGenres} onToggle={onToggleGenre} align="left" />
+              </section>
+
+              {bench.length ? (
+                <section className="knows-section" aria-labelledby="knows-seeds">
+                  <div className="eyebrow" id="knows-seeds">Where En starts looking</div>
+                  <p className="knows-section__lede">
+                    Your favorites. En's pools grow from what fans of these shows love. Take one out and it stops shaping your
+                    picks. It stays on your list.
+                  </p>
+                  {bench.map((entry) => {
+                    const muted = isMuted(entry);
+                    const score = entry.my_list_status?.score;
+                    return (
+                      <div key={entry.anilistId || entry.id} className={muted ? "knows-row knows-row--muted" : "knows-row"}>
+                        <div>
+                          <span className="knows-row__label" style={{ fontStyle: "italic" }}>{listTitle(entry)}</span>
+                          <span className="meta knows-row__why">{score ? `you gave it ${score}` : "finished recently"}</span>
+                        </div>
+                        <button className="btn-quiet" onClick={() => toggleMuted(entry)}>
+                          {muted ? "start here again" : "don't start here"}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </section>
+              ) : null}
+
+              {history.length ? (
+                <section className="knows-section" aria-labelledby="knows-picks">
+                  <div className="eyebrow" id="knows-picks">From En's picks</div>
+                  <p className="knows-section__lede">
+                    {history.length} pick{history.length === 1 ? "" : "s"} so far.{" "}
+                    {rated.length || passed
+                      ? `${good} landed, ${meh.length} didn't${passed ? `, ${passed} passed over` : ""}. The ones that landed become places to start; the ones that didn't steer away.`
+                      : "None answered yet. How they land shapes the next ones."}
+                  </p>
+                  {meh.filter((entry) => entry.feedback_note).slice(0, 4).map((entry) => (
+                    <p key={entry.id} className="meta" style={{ fontFamily: "var(--serif)", fontStyle: "italic", fontSize: 15, margin: "8px 0" }}>
+                      {entry.recommendation.title}: “{entry.feedback_note}”
+                    </p>
+                  ))}
+                </section>
+              ) : null}
+
+              <section className="knows-section" aria-labelledby="knows-notes" style={{ paddingBottom: 96 }}>
+                <div className="eyebrow" id="knows-notes">In your own words</div>
+                <p className="knows-section__lede">
+                  Anything En should always keep in mind. It's read before every pick, and counts for more than anything En guessed.
+                </p>
+                <textarea
+                  value={notes}
+                  onChange={(event) => {
+                    setNotes(event.target.value);
+                    setNotesSaved(false);
+                  }}
+                  onBlur={saveNotes}
+                  maxLength={NOTES_LIMIT}
+                  rows={3}
+                  aria-label="Anything En should always keep in mind"
+                  placeholder="no fan service; I like shows I can finish in a weekend"
+                  className="knows-notes"
+                />
+                <div className="log-panel__actions" style={{ alignItems: "baseline" }}>
+                  <button className="btn-quiet" onClick={saveNotes} disabled={notes.trim() === preferences.notes.trim()}>
+                    save
+                  </button>
+                  <span className="meta" role="status">
+                    {notesSaved && notes.trim() === preferences.notes.trim() ? "saved" : `${notes.length}/${NOTES_LIMIT}`}
+                  </span>
+                </div>
+              </section>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const MAL_STATUS_WORDS = {
+  watching: "marked as watching",
+  plan_to_watch: "added to plan to watch",
+  completed: "marked as completed"
+};
+
+// The favorites seeds come from, best first, without repeats.
+function benchFor(list) {
+  const { by, favorites, recentGood } = seedBench(list);
+  const seen = new Set();
+  return [...recentGood.slice(0, 3), ...favorites]
+    .filter((entry) => {
+      const id = by === "anilistId" ? entry.anilistId : entry.id;
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    })
+    .slice(0, 12);
+}
+
+function listTitle(entry) {
+  return entry.alternative_titles?.en || entry.title;
+}
+
+function hasLabel(list, label) {
+  const key = normalizeTitleForCompare(label);
+  return list.some((item) => normalizeTitleForCompare(item) === key);
+}
+
+function withoutLabel(list, label) {
+  const key = normalizeTitleForCompare(label);
+  return list.filter((item) => normalizeTitleForCompare(item) !== key);
+}
+
+// Catalog labels come lowercase and hyphenated ("slice-of-life"); show the
+// proper name where there is one.
+function genreLabel(label) {
+  const text = String(label || "");
+  const known = EXCLUDABLE.find((option) => normalizeTitleForCompare(option.label) === normalizeTitleForCompare(text));
+  if (known) return known.label;
+  if (text !== text.toLowerCase()) return text;
+  const spaced = text.replace(/-/g, " ");
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+function favoriteWhy(stat, fromList) {
+  if (!stat) return fromList ? "common to the shows you loved" : "from the shows you named";
+  const parts = [`${stat.count} of your shows`];
+  if (stat.scoreDelta > 0) parts.push(`scored ${stat.scoreDelta.toFixed(1)} above your average`);
+  return parts.join(" · ");
+}
+
+function dislikeWhy(stat) {
+  if (!stat) return "from what you said about En's picks";
+  const parts = [];
+  if (stat.dropped) parts.push(`dropped ${stat.dropped} of ${stat.count}`);
+  if (stat.scoreDelta < 0) parts.push(`scored ${Math.abs(stat.scoreDelta).toFixed(1)} below your average`);
+  return parts.join(" · ") || `${stat.count} of your shows`;
+}
+
+function joinList(items) {
+  if (items.length <= 1) return items.join("");
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+function formatTimeAgo(date) {
+  const minutes = Math.round((Date.now() - Date.parse(date)) / 60000);
+  if (!Number.isFinite(minutes) || minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  return formatDate(date);
 }
 
 // The way in the user chose last, if it's still set up; otherwise MAL login,
@@ -2668,7 +3599,10 @@ function applyResolvedMeta(pick, meta) {
     episodes: meta.episodes ?? pick.episodes,
     genre: meta.genre || pick.genre,
     image_url: meta.image_url || pick.image_url || "",
-    watch_links: meta.watch_links?.length ? meta.watch_links : pick.watch_links || []
+    watch_links: meta.watch_links?.length ? meta.watch_links : pick.watch_links || [],
+    // Lets the pick be excluded by id later, and updated on MAL.
+    ...(meta.anilistId ? { anilistId: meta.anilistId } : {}),
+    ...(meta.malId ? { malId: meta.malId } : {})
   };
 }
 

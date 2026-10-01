@@ -7,6 +7,9 @@ const RECOMMENDATION_MEMORY_KEY = "en.recommendationMemory";
 const PARTNER_KEY = "en.partner";
 const LIST_SOURCE_KEY = "en.listSource";
 const ACTIVE_MODE_KEY = "en.activeMode";
+// Deleted log entries and when the log was last cleared, so another device
+// syncing an older copy doesn't bring them back (see syncMerge.js).
+const TOMBSTONES_KEY = "en.logTombstones";
 
 export function loadTokens() {
   return readJson(TOKEN_KEY, null);
@@ -41,15 +44,18 @@ export function loadHistory() {
     : [];
 }
 
+// Every write stamps updated_at, which is how syncing decides which
+// device's copy of an entry is newer.
 export function appendHistory(entry) {
-  const next = [entry, ...loadHistory()];
+  const next = [{ ...entry, updated_at: new Date().toISOString() }, ...loadHistory()];
   localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
   return next;
 }
 
 export function updateHistoryEntry(id, patch) {
+  const updated_at = new Date().toISOString();
   const next = loadHistory().map((entry) =>
-    entry.id === id ? { ...entry, ...patch } : entry
+    entry.id === id ? { ...entry, ...patch, updated_at } : entry
   );
   localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
   return next;
@@ -59,6 +65,8 @@ export function deleteHistoryEntry(id) {
   const entry = loadHistory().find((item) => item.id === id);
   const next = loadHistory().filter((item) => item.id !== id);
   localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
+  const tombstones = loadTombstones();
+  saveTombstones({ ...tombstones, deleted: { ...tombstones.deleted, [id]: new Date().toISOString() } });
 
   if (entry?.recommendation) {
     removeRecommendationFromMemory(entry.recommendation);
@@ -71,7 +79,32 @@ export function clearRecommendationLog() {
   localStorage.setItem(HISTORY_KEY, JSON.stringify([]));
   localStorage.removeItem(TASTE_PROFILE_KEY);
   localStorage.removeItem(RECOMMENDATION_MEMORY_KEY);
+  saveTombstones({ deleted: {}, clearedAt: new Date().toISOString() });
   return [];
+}
+
+// Replaces the whole log, e.g. with the merged copy from a sync.
+export function replaceHistory(history) {
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+  return loadHistory();
+}
+
+export function loadTombstones() {
+  const value = readJson(TOMBSTONES_KEY, null);
+  return {
+    deleted: value?.deleted && typeof value.deleted === "object" ? value.deleted : {},
+    clearedAt: typeof value?.clearedAt === "string" ? value.clearedAt : ""
+  };
+}
+
+export function saveTombstones(tombstones) {
+  localStorage.setItem(TOMBSTONES_KEY, JSON.stringify(tombstones));
+}
+
+// What a log that's been cleared on another device leaves behind here.
+export function forgetDerivedMemory() {
+  localStorage.removeItem(TASTE_PROFILE_KEY);
+  localStorage.removeItem(RECOMMENDATION_MEMORY_KEY);
 }
 
 export function loadTasteProfileCache() {
