@@ -159,3 +159,51 @@ test("the share card comes out as an image", async ({ page }) => {
   expect((await download).suggestedFilename()).toMatch(/^en-[a-z0-9-]+\.png$/);
   await expect(page.getByRole("button", { name: "card saved · make another" })).toBeVisible();
 });
+
+test("answers reach MyAnimeList, even for picks saved without a MAL id", async ({ page }) => {
+  const log = await stubServices(page);
+  const updates = [];
+  await page.route("**/api/mal-list", (route) => route.fulfill({ json: { data: [] } }));
+  await page.route("**/api/mal-status", async (route) => {
+    const body = route.request().postDataJSON();
+    updates.push({ ...body, auth: route.request().headers().authorization });
+    const already = body.action === "later";
+    await route.fulfill({ json: already ? { changed: false, status: "plan_to_watch" } : { changed: true, status: "watching", from: null } });
+  });
+  const old = (days) => new Date(Date.now() - days * DAY).toISOString();
+  const pick = (id, title, days, extra = {}) => ({
+    id,
+    date: old(days),
+    updated_at: old(days),
+    state: "unrated",
+    feedback: "",
+    note: "",
+    recommendation: { title, title_jp: title, year: 2021, episodes: 11, genre: "Drama", reason: "r", log_line: "l", ...extra }
+  });
+  await seed(page, {
+    "en.malTokens": { access_token: "test-token", refresh_token: "r" },
+    "en.activeMode": "mal",
+    "en.recommendationHistory": [pick("saved", "Odd Taxi", 2, { malId: 46102 }), pick("no-id", "Link Click", 5)]
+  });
+
+  // The question about the older pick: answered "Watching it", and asked once.
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Did you watch Link Click?" })).toBeVisible();
+  await page.getByRole("button", { name: "Watching it" }).click();
+  await expect(page.getByRole("dialog", { name: "Update MyAnimeList too?" })).toBeVisible();
+  await page.getByRole("button", { name: "yes, keep it in step" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Link Click: marked as watching on your MyAnimeList." })).toBeVisible();
+
+  // Looked up on AniList (the stub gives idMal = id + 50000) and kept on the pick.
+  expect(log.anilist.some((query) => query.includes("search:"))).toBe(true);
+  expect(updates[0]).toMatchObject({ action: "tonight", auth: "Bearer test-token" });
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("en.recommendationHistory")).find((entry) => entry.id === "no-id"));
+  expect(saved.recommendation.malId).toBe(updates[0].malId);
+
+  // From the log: "later" on a pick MAL already has as plan-to-watch.
+  await page.goto("/log");
+  const oddTaxi = page.locator("article", { hasText: "Odd Taxi" });
+  await oddTaxi.getByRole("button", { name: "later" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Your MyAnimeList already has Odd Taxi as plan to watch, so En left it." })).toBeVisible();
+  expect(updates[1]).toMatchObject({ malId: 46102, action: "later" });
+});

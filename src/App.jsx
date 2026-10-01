@@ -43,7 +43,7 @@ import {
 } from "./tasteProfile.js";
 import { answersFromList, buildWatchHistoryDigest, describeQueriedTitle } from "./watchHistory.js";
 import { buildOpenCandidatePool, buildTogetherPool, seedBench, toModelCandidate } from "./discovery.js";
-import { normalizeTitleForCompare, titleMatchesAnime, uniqueTitles } from "./titleUtils.js";
+import { animeTitleKeys, normalizeTitleForCompare, titleMatchesAnime, uniqueTitles } from "./titleUtils.js";
 import { resolveAnimeOnAniList } from "./anilist.js";
 import { PARENT, VIEW, parsePath, pathFor } from "./routes.js";
 import { fetchPublicList, sourceLabel } from "./lists.js";
@@ -1119,8 +1119,7 @@ export default function App() {
   // What the user tells En about a pick goes on their MAL list too, once
   // they've said yes to that (asked the first time it would happen).
   function shareWithMal(entry, action) {
-    const malId = entry?.recommendation?.malId;
-    if (mode !== "mal" || !loadTokens()?.access_token || !malId) return;
+    if (mode !== "mal" || !loadTokens()?.access_token || !entry?.recommendation) return;
     const setting = loadPreferences().malSync;
     if (setting === "off") return;
     if (setting !== "on") {
@@ -1134,18 +1133,52 @@ export default function App() {
     sendToMal(entry, action);
   }
 
+  // Says what happened every time, including when nothing needed changing,
+  // so a list that didn't move never looks like a failure.
   async function sendToMal(entry, action) {
+    const title = entry.recommendation.title;
     try {
-      const result = await withMalToken((token) => updateMalListStatus(token, entry.recommendation.malId, action));
-      if (result.changed) {
-        setNotice({ kind: "info", text: `${entry.recommendation.title}: ${MAL_STATUS_WORDS[result.status] || "updated"} on your MyAnimeList.` });
+      const malId = await malIdFor(entry);
+      if (!malId) {
+        setNotice({ kind: "info", text: `En couldn't find ${title} on MyAnimeList, so your list wasn't changed.` });
+        return;
       }
+      const result = await withMalToken((token) => updateMalListStatus(token, malId, action));
+      setNotice({
+        kind: "info",
+        text: result.changed
+          ? `${title}: ${MAL_STATUS_WORDS[result.status] || "updated"} on your MyAnimeList.`
+          : `Your MyAnimeList already has ${title} as ${MAL_STATUS_NAMES[result.status] || result.status}, so En left it.`
+      });
     } catch (malError) {
       setNotice({
         kind: "info",
         text: isMalAuthError(malError) ? "MyAnimeList needs you to connect again before En can update your list." : malError.message
       });
     }
+  }
+
+  // Picks from before En kept MAL ids, and ones from the curated catalog,
+  // don't have one: find it on the user's own list, else on AniList, and
+  // keep it on the pick for next time.
+  async function malIdFor(entry) {
+    const rec = entry.recommendation;
+    if (rec.malId) return rec.malId;
+    const keys = new Set(animeTitleKeys(rec));
+    const listed = Array.isArray(malListCache.current?.list) ? malListCache.current.list : [];
+    const onList = listed.find((item) => item.id && animeTitleKeys(item).some((key) => keys.has(key)));
+    let malId = onList?.id || null;
+    let anilistId = rec.anilistId || null;
+    if (!malId) {
+      const resolved = (await resolveAnimeOnAniList(rec.title)) || (rec.title_jp && rec.title_jp !== rec.title ? await resolveAnimeOnAniList(rec.title_jp) : null);
+      malId = resolved?.malId || null;
+      anilistId ||= resolved?.anilistId || null;
+    }
+    const current = malId && loadHistory().find((item) => item.id === entry.id);
+    if (current) {
+      setHistory(updateHistoryEntry(entry.id, { recommendation: { ...current.recommendation, malId, ...(anilistId ? { anilistId } : {}) } }));
+    }
+    return malId;
   }
 
   function answerMalOffer(yes) {
@@ -3491,6 +3524,14 @@ function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre
 
 // En's answer -> the MyAnimeList change it asks for (api/mal-status.js).
 const MAL_ACTION_FOR = { good: "good", meh: "meh", later: "later", watching: "tonight" };
+
+const MAL_STATUS_NAMES = {
+  watching: "watching",
+  completed: "completed",
+  plan_to_watch: "plan to watch",
+  on_hold: "on hold",
+  dropped: "dropped"
+};
 
 const MAL_STATUS_WORDS = {
   watching: "marked as watching",
