@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { listEntry, stubServices } from "./stubs.js";
+import { listEntry, media, stubServices } from "./stubs.js";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -272,4 +272,51 @@ test("two phones, one pick: a link, both lists and moods, the same pick on each"
   // Each phone keeps it in its own log.
   await guest.getByRole("button", { name: "LOG" }).click();
   await expect(guest.getByText("for two · with Abdullah").first()).toBeVisible();
+});
+
+test("En learns from every pick, past ones included, and shows what it's learned", async ({ page }) => {
+  // Past picks saved before En kept what each pick was: quiet ones landed, psychological ones didn't.
+  const quiet = { genres: ["Slice of Life"], tags: [{ name: "Iyashikei", rank: 90 }] };
+  const heady = { genres: ["Psychological"], tags: [{ name: "Philosophy", rank: 90 }] };
+  const log = await stubServices(page, { mediaById: (id) => media(id, `Past ${id}`, id % 2 ? heady : quiet) });
+  const past = (id, feedback, days) => {
+    const date = new Date(Date.now() - days * DAY).toISOString();
+    return {
+      id: `past-${id}`,
+      date,
+      updated_at: date,
+      state: "rated",
+      feedback,
+      note: "",
+      recommendation: { title: `Past ${id}`, title_jp: `Past ${id}`, year: 2019, episodes: 12, genre: "Drama", reason: "r", log_line: "l", anilistId: id }
+    };
+  };
+  await seed(page, {
+    ...typedList,
+    "en.recommendationHistory": [past(2, "good", 2), past(1, "meh", 3), past(4, "good", 4), past(3, "meh", 5), past(6, "good", 6), past(5, "meh", 7), past(8, "good", 8)]
+  });
+
+  await page.goto("/what-en-knows");
+  const learned = page.locator("section", { has: page.getByText("What En has learned", { exact: true }) });
+  await expect(learned.getByText("Every past pick counts, not just new ones.")).toBeVisible({ timeout: 15000 });
+  await expect(learned.getByText("From 7 picks you've answered. 4 of 7 landed so far.", { exact: false })).toBeVisible();
+  await expect(learned.locator(".hit-dot")).toHaveCount(7);
+  const iyashikei = learned.locator(".knows-row", { hasText: "Iyashikei" });
+  await expect(iyashikei).toContainText("4 of 4 landed");
+  await expect(learned.locator(".knows-row", { hasText: "Psychological" })).toContainText("3 of 3 missed");
+  expect(log.anilist.filter((query) => query.includes("id_in: $ids")).length).toBe(1);
+
+  // Next pick, the model is told what En has learned.
+  await page.goto("/tonight");
+  await page.getByRole("button", { name: "or — surprise me" }).click();
+  await expect(page).toHaveURL(/\/pick\//);
+  const payload = log.en.find((body) => body.kind === "recommend").payload;
+  expect(payload.learned.answeredPicks).toBe(7);
+  expect(payload.learned.landed).toContain("Iyashikei (4 of 4 landed)");
+
+  // And anything it learned can be forgotten.
+  await page.goto("/what-en-knows");
+  await learned.locator(".knows-row", { hasText: "Iyashikei" }).getByRole("button", { name: "forget this" }).click();
+  await expect(learned.locator(".knows-row", { hasText: "Iyashikei" })).toHaveCount(0);
+  await expect(learned.getByRole("button", { name: /bring them back/ })).toBeVisible();
 });

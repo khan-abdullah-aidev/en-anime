@@ -17,7 +17,8 @@ export const MOOD_READING = {
   airing: false
 };
 
-export async function stubServices(page, { aniListList = [], moodReading = MOOD_READING } = {}) {
+// mediaById: what AniList says about a show looked up by id (past picks).
+export async function stubServices(page, { aniListList = [], moodReading = MOOD_READING, mediaById = null } = {}) {
   const log = { en: [], anilist: [] };
 
   await page.route(/fonts\.(googleapis|gstatic)\.com/, (route) => route.abort());
@@ -38,7 +39,7 @@ export async function stubServices(page, { aniListList = [], moodReading = MOOD_
     }
     const { query, variables } = route.request().postDataJSON();
     log.anilist.push(query);
-    await route.fulfill({ headers: CORS, json: { data: aniListAnswer(query, variables || {}, aniListList) } });
+    await route.fulfill({ headers: CORS, json: { data: aniListAnswer(query, variables || {}, aniListList, mediaById) } });
   });
 
   return log;
@@ -68,7 +69,11 @@ function modelAnswer(body, moodReading) {
   };
 }
 
-function aniListAnswer(query, variables, list) {
+function aniListAnswer(query, variables, list, mediaById) {
+  // Past picks, looked up by id so En can learn from them.
+  if (query.includes("id_in: $ids") && !query.includes("recommendations(")) {
+    return { Page: { media: (variables.ids || []).map((id) => (mediaById ? mediaById(id) : media(id, `Show ${id}`))) } };
+  }
   if (query.includes("MediaListCollection")) {
     return { MediaListCollection: { lists: [{ entries: list }] } };
   }

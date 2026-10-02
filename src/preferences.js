@@ -13,6 +13,8 @@ const DEFAULTS = {
   moreOf: [],
   notFavorite: [],
   notDisliked: [],
+  // Traits from "What En has learned" the user told it to forget (learning.js keys).
+  unlearned: [],
   mutedSeeds: [],
   notes: "",
   malSync: null, // "on" | "off" | null (not asked yet)
@@ -87,6 +89,7 @@ export function normalizePreferences(raw) {
     moreOf: labels(value.moreOf),
     notFavorite: labels(value.notFavorite),
     notDisliked: labels(value.notDisliked),
+    unlearned: (Array.isArray(value.unlearned) ? value.unlearned : []).filter((key) => typeof key === "string").slice(0, 100),
     mutedSeeds: (Array.isArray(value.mutedSeeds) ? value.mutedSeeds : [])
       .filter((seed) => seed && typeof seed.title === "string")
       .map((seed) => ({ title: seed.title, malId: Number(seed.malId) || null, anilistId: Number(seed.anilistId) || null }))

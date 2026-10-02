@@ -46,7 +46,7 @@ describe("AniList lists, read by username", () => {
       history: [{ id: "x", state: "unrated", recommendation: { title: "Something Else", anilistId: 3 } }],
       sourceName: "AniList"
     });
-    assert.deepEqual(answers, [{ id: "x", answer: "good", reflection: "finished it on AniList · 9/10." }]);
+    assert.deepEqual(answers, [{ id: "x", answer: "good", reflection: "finished it on AniList · 9/10.", scoreDelta: 0 }]);
   });
 
   it("seeds an AniList list by AniList id", async () => {

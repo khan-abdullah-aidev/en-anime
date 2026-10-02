@@ -2,6 +2,7 @@ import { aniListRequest, resolveAnimeOnAniList } from "./anilist.js";
 import { NOT_TONIGHT_COOLDOWN_MS, buildCandidatePool, createExclusionCheck, isStillExcluded } from "./recommendationEngine.js";
 import { streamingLinks } from "./streaming.js";
 import { MOOD_GENRES } from "./moodVocabulary.js";
+import { pastFitLabel } from "./learning.js";
 import { animeTitleKeys, normalizeTitleForCompare, parseManualTitles, uniqueTitles } from "./titleUtils.js";
 
 // Candidates come from all of AniList rather than a fixed list:
@@ -89,8 +90,8 @@ const NO_EXCLUSIONS = { labels: [], genres: [], tags: [], matches: () => false }
 // nothing it matches gets into the pool, from any source. mutedSeeds are
 // favorites the user asked En not to start from.
 // moodReading is the model's reading of the mood (moodReading.js), or null.
-export async function buildOpenCandidatePool({ mood = "", passedOver = [], list, history = [], tasteProfile, recentPatterns, memory, includeResume = false, exclude = NO_EXCLUSIONS, mutedSeeds = [], moodReading = null, limit = POOL_LIMIT }) {
-  const pool = await buildFreshPool({ mood, passedOver, list, history, tasteProfile, recentPatterns, memory, exclude, mutedSeeds, moodReading, limit });
+export async function buildOpenCandidatePool({ mood = "", passedOver = [], list, history = [], tasteProfile, recentPatterns, memory, includeResume = false, exclude = NO_EXCLUSIONS, mutedSeeds = [], moodReading = null, learned = null, limit = POOL_LIMIT }) {
+  const pool = await buildFreshPool({ mood, passedOver, list, history, tasteProfile, recentPatterns, memory, exclude, mutedSeeds, moodReading, learned, limit });
   if (!includeResume) return pool;
   // A couple of shows they started and set aside ride along; the model picks
   // one only when finishing it suits tonight better than anything new.
@@ -101,7 +102,7 @@ export async function buildOpenCandidatePool({ mood = "", passedOver = [], list,
   return { ...pool, candidates: [...pool.candidates, ...resume] };
 }
 
-async function buildFreshPool({ mood = "", passedOver = [], list, history = [], tasteProfile, recentPatterns, memory, exclude = NO_EXCLUSIONS, mutedSeeds = [], moodReading = null, limit = POOL_LIMIT }) {
+async function buildFreshPool({ mood = "", passedOver = [], list, history = [], tasteProfile, recentPatterns, memory, exclude = NO_EXCLUSIONS, mutedSeeds = [], moodReading = null, learned = null, limit = POOL_LIMIT }) {
   const { constraints, discoveryMood, moodWanted, avoid } = buildRequestFilters({ mood, passedOver, reading: moodReading });
   const queryExclude = withAvoided(exclude, avoid);
   let fetched = null;
@@ -124,7 +125,7 @@ async function buildFreshPool({ mood = "", passedOver = [], list, history = [], 
   }
 
   const assemble = (activeConstraints) => {
-    const pool = fetched ? rankPool({ ...fetched, tasteProfile, moodWanted, avoid, constraints: activeConstraints, exclude, limit }) : [];
+    const pool = fetched ? rankPool({ ...fetched, tasteProfile, moodWanted, avoid, constraints: activeConstraints, exclude, learned, limit }) : [];
     if (pool.length >= MIN_POOL) return { candidates: pool, source: "anilist" };
 
     // AniList unreachable or the open pool came back thin: top up with the
@@ -151,7 +152,7 @@ async function buildFreshPool({ mood = "", passedOver = [], list, history = [], 
 // are left out entirely, since a continuation only works if both finished
 // the first part. Titles that fans of BOTH people's favorites recommend rank
 // highest.
-export async function buildTogetherPool({ mood = "", passedOver = [], you, partner, recentPatterns, exclude = NO_EXCLUSIONS, mutedSeeds = [], moodReading = null, limit = POOL_LIMIT }) {
+export async function buildTogetherPool({ mood = "", passedOver = [], you, partner, recentPatterns, exclude = NO_EXCLUSIONS, mutedSeeds = [], moodReading = null, learned = null, limit = POOL_LIMIT }) {
   const { constraints, discoveryMood, moodWanted, avoid } = buildRequestFilters({ mood, passedOver, reading: moodReading });
   const queryExclude = withAvoided(exclude, avoid);
   const tasteProfile = combineTasteProfiles(you.tasteProfile, partner.tasteProfile);
@@ -189,7 +190,7 @@ export async function buildTogetherPool({ mood = "", passedOver = [], you, partn
   }
 
   const assemble = (activeConstraints) => {
-    const pool = fetched ? rankPool({ ...fetched, tasteProfile, moodWanted, avoid, constraints: activeConstraints, exclude, limit }) : [];
+    const pool = fetched ? rankPool({ ...fetched, tasteProfile, moodWanted, avoid, constraints: activeConstraints, exclude, learned, limit }) : [];
     if (pool.length >= MIN_POOL) return { candidates: pool, source: "anilist" };
 
     const context = fetched?.context || buildTogetherContext({ you, partner });
@@ -475,7 +476,8 @@ export function toModelCandidate(candidate) {
       ? { status: candidate.resume.status, stoppedAt: `${candidate.resume.watched}/${candidate.resume.total || "?"}`, since: candidate.resume.since }
       : null,
     continues: candidate.continues || null,
-    airing: candidate.status === "RELEASING" || null
+    airing: candidate.status === "RELEASING" || null,
+    pastFit: pastFitLabel(candidate.learnedFit, candidate.learnedEvidence)
   });
 }
 
@@ -746,7 +748,7 @@ export function buildUserContext({ list, history = [], memory, watchedAnilistIds
   return { listIds, completedIds, completedAnilistIds, excludedAnilistIds, manualKeys, isExcludedTitle: createExclusionCheck(memory) };
 }
 
-export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfile = {}, mood = "", moodWanted = null, avoid = { genres: [], tags: [] }, constraints = {}, exclude = NO_EXCLUSIONS, limit = POOL_LIMIT }) {
+export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfile = {}, mood = "", moodWanted = null, avoid = { genres: [], tags: [] }, constraints = {}, exclude = NO_EXCLUSIONS, learned = null, limit = POOL_LIMIT }) {
   const merged = new Map();
   const add = (candidate, source, extra = {}) => {
     if (!candidate?.anilistId || !isUsable(candidate)) return;
@@ -793,6 +795,10 @@ export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfil
     // For two: fans of both people's favorites pointing here is the best sign.
     const bothLiked = owners.has("you") && owners.has("partner");
     const onTheirPlanToWatch = Boolean(entry.malId && context.partnerPlanIds?.has(entry.malId));
+    const because = [...entry.becauseWeights.entries()].sort((a, b) => b[1] - a[1]).map(([title]) => title);
+    const becauseYou = because.filter((title) => entry.becauseOwners.get(title) !== "partner");
+    // What En has learned from this person's answers (learning.js).
+    const past = learned ? learned.fit({ ...entry, sources: [...entry.sources], because: becauseYou }, wanted) : null;
     const rankScore =
       entry.similarity +
       1.5 * count(favorite) -
@@ -802,19 +808,22 @@ export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfil
       (Number.isFinite(entry.score) ? (entry.score - 70) / 6 : 0) +
       (continuation.continues ? 2 : 0) +
       (bothLiked ? 3 : 0) +
-      (onTheirPlanToWatch ? 2 : 0);
+      (onTheirPlanToWatch ? 2 : 0) +
+      (past ? learned.weight * past.fit : 0);
 
-    const because = [...entry.becauseWeights.entries()].sort((a, b) => b[1] - a[1]).map(([title]) => title);
     ranked.push({
       ...entry,
       sources: [...entry.sources],
-      because: because.filter((title) => entry.becauseOwners.get(title) !== "partner"),
+      because: becauseYou,
       becauseThem: because.filter((title) => entry.becauseOwners.get(title) === "partner"),
       bothLiked,
       onTheirPlanToWatch,
       becauseWeights: undefined,
       becauseOwners: undefined,
       continues: continuation.continues || null,
+      // Kept with the pick, so the log knows what it was asked for.
+      moodTerms: [...wanted.genres, ...wanted.tags],
+      ...(past?.evidence ? { learnedFit: Math.round(past.fit * 100) / 100, learnedEvidence: Math.round(past.evidence * 10) / 10 } : {}),
       rankScore: Math.round(rankScore * 100) / 100
     });
   }

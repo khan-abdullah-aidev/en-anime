@@ -144,8 +144,8 @@ describe("answering 'did you watch it?' from the MAL list", () => {
       ]
     });
     assert.deepEqual(answers, [
-      { id: "a", answer: "good", reflection: "finished it on MyAnimeList · 9/10." },
-      { id: "b", answer: "meh", reflection: "finished it on MyAnimeList · 5/10." },
+      { id: "a", answer: "good", reflection: "finished it on MyAnimeList · 9/10.", scoreDelta: 1.7 },
+      { id: "b", answer: "meh", reflection: "finished it on MyAnimeList · 5/10.", scoreDelta: -2.3 },
       { id: "c", answer: "good", reflection: "finished it on MyAnimeList." },
       { id: "d", answer: "meh", reflection: "dropped it on MyAnimeList at episode 4." }
     ]);

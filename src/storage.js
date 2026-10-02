@@ -61,6 +61,15 @@ export function updateHistoryEntry(id, patch) {
   return next;
 }
 
+// Several entries at once (e.g. what En looked up about past picks), in one write.
+export function patchHistoryEntries(patches) {
+  if (!patches.size) return loadHistory();
+  const updated_at = new Date().toISOString();
+  const next = loadHistory().map((entry) => (patches.has(entry.id) ? { ...entry, ...patches.get(entry.id), updated_at } : entry));
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
+  return next;
+}
+
 export function deleteHistoryEntry(id) {
   const entry = loadHistory().find((item) => item.id === id);
   const next = loadHistory().filter((item) => item.id !== id);

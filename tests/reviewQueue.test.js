@@ -47,7 +47,7 @@ describe("'Did you watch it?': who gets asked, and when", () => {
   it("MyAnimeList can still answer a pick that's being watched", () => {
     const list = [malEntry(5, "Link Click", "completed", 9, ["Drama"], { watched: 11, episodes: 11 })];
     const answers = answersFromList({ list, history: [pick("x", "watching", at(-3), { malId: 5, ask_after: at(10) })] });
-    assert.deepEqual(answers, [{ id: "x", answer: "good", reflection: "finished it on MyAnimeList · 9/10." }]);
+    assert.deepEqual(answers, [{ id: "x", answer: "good", reflection: "finished it on MyAnimeList · 9/10.", scoreDelta: 0 }]);
   });
 
   it("a pick being watched stays out of new pools", () => {

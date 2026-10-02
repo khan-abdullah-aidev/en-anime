@@ -18,6 +18,7 @@ import {
   loadActiveMode,
   loadTasteProfileCache,
   loadTokens,
+  patchHistoryEntries,
   recordRecommendedAnime,
   saveManualList,
   savePartner,
@@ -76,6 +77,8 @@ import { normalizeSnapshot } from "./syncMerge.js";
 import { sharePick } from "./shareCard.js";
 import { askAgainAfter, findCurrentPending, findReviewEntries, isAwaitingAnswer } from "./reviewQueue.js";
 import { readMood } from "./moodReading.js";
+import { buildTasteModel, describeModel, featuresOf, hitRate, learnedForModel, learnedRanker } from "./learning.js";
+import { backfillPastPicks, needsBackfill, scoreDeltas } from "./learningBackfill.js";
 import {
   createRoom,
   fetchRoom,
@@ -176,6 +179,9 @@ export default function App() {
   const [room, setRoom] = useState({ status: "idle" });
   const [joiningRoom, setJoiningRoom] = useState(false);
   const roomBusy = useRef(false);
+  // Looking up En's past picks so they teach it too (learningBackfill.js).
+  const [catchingUp, setCatchingUp] = useState(false);
+  const catchUpRunning = useRef(false);
   const [error, setError] = useState("");
   // What the user has told En directly (preferences.js).
   const [preferences, setPreferences] = useState(() => loadPreferences());
@@ -311,6 +317,33 @@ export default function App() {
       clearTimeout(timer);
     };
   }, [pollRoomId]);
+
+  // Past picks from before En kept what each pick was: look them up so they
+  // teach it too. Quietly, at startup and when the taste page has the list.
+  async function catchUpPastPicks(list = null) {
+    if (catchUpRunning.current) return;
+    const history = loadHistory();
+    if (!history.some(needsBackfill) && !Array.isArray(list)) return;
+    catchUpRunning.current = true;
+    setCatchingUp(true);
+    try {
+      const patches = await backfillPastPicks({ history, list: Array.isArray(list) ? list : null });
+      if (patches.size) setHistory(patchHistoryEntries(patches));
+    } finally {
+      catchUpRunning.current = false;
+      setCatchingUp(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!loadHistory().some(needsBackfill)) return undefined;
+    const timer = setTimeout(() => catchUpPastPicks(), 2500);
+    return () => clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (view === VIEW.KNOWS && knows.status === "ready") catchUpPastPicks(knows.list);
+  }, [view, knows.status]);
 
   // "What En knows about you" reads the list when it opens.
   useEffect(() => {
@@ -555,9 +588,9 @@ export default function App() {
     const answers = answersFromList({ list, history: loadHistory(), sourceName: source ? sourceLabel(source) : "MyAnimeList" });
     if (!answers.length) return;
     const byId = new Map(loadHistory().map((entry) => [entry.id, entry]));
-    for (const { id, answer, reflection } of answers) {
+    for (const { id, answer, reflection, scoreDelta } of answers) {
       const entry = byId.get(id);
-      if (entry) answerEntry(entry, answer, { reflection, answeredFrom: source?.kind === "anilist" ? "anilist" : "myanimelist" });
+      if (entry) answerEntry(entry, answer, { reflection, scoreDelta, answeredFrom: source?.kind === "anilist" ? "anilist" : "myanimelist" });
     }
     debugLog("[En debug] answered from MyAnimeList", answers);
 
@@ -576,6 +609,9 @@ export default function App() {
     const list = await fetchOwnList();
     setMalList(Array.isArray(list) ? list : []);
     applyListAnswers(list);
+    // How they scored answered picks on their own list sharpens what En learns.
+    const deltas = scoreDeltas(loadHistory(), list);
+    if (deltas.size) setHistory(patchHistoryEntries(new Map([...deltas].map(([id, delta]) => [id, { score_delta: delta }]))));
     const history = loadHistory();
 
     // The cache keeps what En inferred; the user's corrections are applied
@@ -589,6 +625,8 @@ export default function App() {
     const preferences = loadPreferences();
     const tasteProfile = applyTasteCorrections(inferredProfile, preferences);
     const userSaid = userSaidFor(preferences);
+    const tasteModel = buildTasteModel(history, { ignored: preferences.unlearned });
+    const learned = learnedForModel(tasteModel, history);
 
     const memory = buildRecommendationMemory({
       malList: list,
@@ -606,20 +644,23 @@ export default function App() {
     return {
       list,
       memory,
+      tasteModel,
       unwatchedTitles: buildUnwatchedTitles({ malList: list, history }),
       signals: {
         watchHistory: buildWatchHistoryDigest(list),
         tasteProfile,
         recentPatterns: summarizeRecentPatterns(list, history),
         feedbackHistory: compactFeedbackHistory(history),
-        ...(userSaid ? { userSaid } : {})
+        ...(userSaid ? { userSaid } : {}),
+        ...(learned ? { learned } : {})
       }
     };
   }
 
   // Candidates from all of AniList (see discovery.js), or the curated
   // catalog if AniList can't be reached.
-  async function findCandidates({ mood, list, signals, memory, partner: other, includeResume = false, moodReading = null, alsoExcluded = [] }) {
+  async function findCandidates({ mood, list, signals, memory, partner: other, includeResume = false, moodReading = null, alsoExcluded = [], tasteModel = null }) {
+    const learned = learnedRanker(tasteModel);
     const passedOver = passedOverTonight();
     const { excludedGenres, mutedSeeds } = loadPreferences();
     const exclude = exclusionFilter([...new Set([...excludedGenres, ...alsoExcluded])]);
@@ -632,7 +673,8 @@ export default function App() {
           recentPatterns: signals.recentPatterns,
           exclude,
           mutedSeeds,
-          moodReading
+          moodReading,
+          learned
         })
       : await buildOpenCandidatePool({
           mood,
@@ -645,7 +687,8 @@ export default function App() {
           includeResume,
           exclude,
           mutedSeeds,
-          moodReading
+          moodReading,
+          learned
         });
     debugLog("[En debug] candidate pool", { source, count: candidates.length, constraints, constraintsRelaxed, leftOut: exclude.labels, moodReading });
     if (!candidates.length) {
@@ -726,9 +769,9 @@ export default function App() {
     const say = (text) => isCurrent(requestId) && setStatus(text);
     const heard = hearMood(requestId, nextMood);
     try {
-      const { list, signals, memory, unwatchedTitles } = await loadEnContext();
+      const { list, signals, memory, unwatchedTitles, tasteModel } = await loadEnContext();
       say("Looking through everything you haven't seen");
-      const { candidates: candidateList, steering } = await findCandidates({ mood: nextMood, list, signals, memory, includeResume: true, moodReading: await heard });
+      const { candidates: candidateList, steering } = await findCandidates({ mood: nextMood, list, signals, memory, includeResume: true, moodReading: await heard, tasteModel });
       say("Considering");
 
       const rec = await askForAllowedRecommendation({ mood: nextMood, signals: { ...signals, ...steering }, candidateList, memory, unwatchedTitles });
@@ -798,7 +841,7 @@ export default function App() {
     const say = (text) => isCurrent(requestId) && setStatus(text);
     const heard = hearMood(requestId, moodText);
     try {
-      const { list, signals, memory, unwatchedTitles } = await loadEnContext();
+      const { list, signals, memory, unwatchedTitles, tasteModel } = await loadEnContext();
       say(`Reading ${possessive(name)} list`);
       const partnerList = await loadPartnerList(who);
       const partnerTaste = buildTasteProfile({ malList: partnerList, feedbackHistory: [] });
@@ -809,7 +852,8 @@ export default function App() {
         signals,
         memory,
         partner: { list: partnerList, tasteProfile: partnerTaste },
-        moodReading: await heard
+        moodReading: await heard,
+        tasteModel
       });
       say("Considering");
 
@@ -916,12 +960,12 @@ export default function App() {
     const say = (status) => isCurrent(requestId) && setStatus(status);
     const heard = hearMood(requestId, moodText);
     try {
-      const { list, memory, signals } = await loadEnContext();
+      const { list, memory, signals, tasteModel } = await loadEnContext();
       say("Weighing it against your history");
       const queriedTitles = [text];
       const [queriedTitleHistory, { candidates: candidateList, steering }] = await Promise.all([
         describeQueriedTitles(queriedTitles, list),
-        heard.then((moodReading) => findCandidates({ mood: moodText, list, signals, memory, moodReading }))
+        heard.then((moodReading) => findCandidates({ mood: moodText, list, signals, memory, moodReading, tasteModel }))
       ]);
 
       const verdict = await askForAllowedVerdict({
@@ -998,7 +1042,7 @@ export default function App() {
   // "Watching it" and "I'll watch it later" snooze the question (see
   // reviewQueue.js); saving a pick straight from the reveal doesn't, so it's
   // still asked about on the next visit.
-  function answerEntry(entry, answer, { note = "", seenBefore = false, reflection = "", reason = "", answeredFrom = "myanimelist", snooze = true } = {}) {
+  function answerEntry(entry, answer, { note = "", seenBefore = false, reflection = "", reason = "", answeredFrom = "myanimelist", snooze = true, scoreDelta = null } = {}) {
     let patch;
     if (answer === "watching") {
       patch = {
@@ -1029,6 +1073,7 @@ export default function App() {
         feedback_note: note.trim(),
         note: reflection || makeUserReflection(answer, note),
         ask_after: null,
+        ...(Number.isFinite(scoreDelta) ? { score_delta: scoreDelta } : {}),
         ...(reflection ? { answered_from: answeredFrom } : {}),
         ...(seenBefore ? { seen_before: true } : {})
       };
@@ -1210,7 +1255,7 @@ export default function App() {
       const guest = data.guest;
       const name = guest.name || "them";
       const heard = hearMood(requestId, local.hostMood || guest.mood, { partnerMood: local.hostMood ? guest.mood : "" });
-      const { list, signals, memory, unwatchedTitles } = await loadEnContext();
+      const { list, signals, memory, unwatchedTitles, tasteModel } = await loadEnContext();
       say(`Reading ${possessive(name)} list`);
       const partnerList = partnerListFromRoom(guest);
       const partnerTaste = buildTasteProfile({ malList: partnerList, feedbackHistory: [] });
@@ -1222,7 +1267,8 @@ export default function App() {
         memory,
         partner: { list: partnerList, tasteProfile: partnerTaste },
         moodReading: await heard,
-        alsoExcluded: guest.excludedGenres || []
+        alsoExcluded: guest.excludedGenres || [],
+        tasteModel
       });
       say("Considering");
 
@@ -1768,6 +1814,7 @@ export default function App() {
             onRetry={() => setKnows({ status: "idle", reload: Date.now() })}
             mode={mode}
             listSource={loadListSource()}
+            catchingUp={catchingUp}
           />
         )}
       </div>
@@ -3858,7 +3905,7 @@ function SyncPanel({ nav, sync, source, hasLog }) {
 
 // "What En knows about you": the profile En inferred, with the evidence for
 // each part, and a way to correct every part of it.
-function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre, onRetry, mode, listSource }) {
+function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre, onRetry, mode, listSource, catchingUp }) {
   const list = knows.status === "ready" ? knows.list : null;
   const isList = Array.isArray(list);
   const profile = useMemo(() => (list ? buildTasteProfile({ malList: list, feedbackHistory: history }) : null), [list, history]);
@@ -3878,6 +3925,10 @@ function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre
   const good = rated.filter((entry) => entry.feedback === "good").length;
   const meh = rated.filter((entry) => entry.feedback === "meh");
   const passed = history.filter((entry) => entry.state === "skipped" || entry.state === "not_tonight").length;
+  const tasteModel = useMemo(() => buildTasteModel(history, { ignored: preferences.unlearned }), [history, preferences.unlearned]);
+  const traits = useMemo(() => describeModel(tasteModel), [tasteModel]);
+  const rate = useMemo(() => hitRate(history), [history]);
+  const stillToRead = history.filter(needsBackfill).length;
 
   function saveNotes() {
     if (notes.trim() === preferences.notes.trim()) return;
@@ -4074,20 +4125,17 @@ function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre
               ) : null}
 
               {history.length ? (
-                <section className="knows-section" aria-labelledby="knows-picks">
-                  <div className="eyebrow" id="knows-picks">From En's picks</div>
-                  <p className="knows-section__lede">
-                    {history.length} pick{history.length === 1 ? "" : "s"} so far.{" "}
-                    {rated.length || passed
-                      ? `${good} landed, ${meh.length} didn't${passed ? `, ${passed} passed over` : ""}. The ones that landed become places to start; the ones that didn't steer away.`
-                      : "None answered yet. How they land shapes the next ones."}
-                  </p>
-                  {meh.filter((entry) => entry.feedback_note).slice(0, 4).map((entry) => (
-                    <p key={entry.id} className="meta" style={{ fontFamily: "var(--serif)", fontStyle: "italic", fontSize: 15, margin: "8px 0" }}>
-                      {entry.recommendation.title}: “{entry.feedback_note}”
-                    </p>
-                  ))}
-                </section>
+                <LearnedSection
+                  tasteModel={tasteModel}
+                  traits={traits}
+                  rate={rate}
+                  meh={meh}
+                  passed={passed}
+                  unlearned={preferences.unlearned}
+                  onChange={onChange}
+                  catchingUp={catchingUp}
+                  stillToRead={stillToRead}
+                />
               ) : null}
 
               <section className="knows-section" aria-labelledby="knows-notes" style={{ paddingBottom: 96 }}>
@@ -4132,6 +4180,96 @@ function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre
 const MAL_ACTION_FOR = { good: "good", meh: "meh", later: "later", watching: "tonight" };
 
 const ROOM_POLL_MS = 3000;
+
+// "What En has learned": its hit rate, and the traits behind hits and
+// misses, each of which can be forgotten.
+function LearnedSection({ tasteModel, traits, rate, meh, passed, unlearned, onChange, catchingUp, stillToRead }) {
+  const answered = rate.all.length;
+  const hits = rate.all.filter((pick) => pick.hit).length;
+  const recentHits = rate.recent.filter((pick) => pick.hit).length;
+  const firstHits = rate.first.filter((pick) => pick.hit).length;
+  const lean =
+    tasteModel.confidence < 0.35
+      ? "En leans on this a little so far, and more with every answer."
+      : tasteModel.confidence < 0.8
+        ? "En leans on this more and more."
+        : "En leans on this fully now.";
+  const streak = rate.all.slice(-20);
+  const capital = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+
+  let lede;
+  if (!answered) {
+    lede = "En learns from every pick you answer: what lands, what doesn't, what you pass on. Nothing to go on yet.";
+  } else {
+    const tally = answered >= 15
+      ? `${recentHits} of your last ${rate.recent.length} landed; ${firstHits} of your first ${rate.first.length} did.`
+      : `${hits} of ${answered} landed so far.`;
+    lede = `From ${answered} pick${answered === 1 ? "" : "s"} you've answered${passed ? `, and ${passed} passed over` : ""}. ${tally} ${lean}`;
+  }
+
+  const rows = (list, word) =>
+    list.map((trait) => (
+      <div key={trait.key} className="knows-row">
+        <div>
+          <span className="knows-row__label">{capital(trait.label)}</span>
+          <span className="meta knows-row__why">
+            {word === "landed" ? `${trait.hits} of ${trait.hits + trait.misses} landed` : `${trait.misses} of ${trait.hits + trait.misses} missed`}
+          </span>
+        </div>
+        <button className="btn-quiet" onClick={() => onChange({ unlearned: [...unlearned, trait.key] })}>
+          forget this
+        </button>
+      </div>
+    ));
+
+  return (
+    <section className="knows-section" aria-labelledby="knows-learned">
+      <div className="eyebrow" id="knows-learned">What En has learned</div>
+      <p className="knows-section__lede">{lede}</p>
+      {streak.length ? (
+        <p className="hit-streak" role="img" aria-label={`${streak.filter((pick) => pick.hit).length} of the last ${streak.length} picks landed`}>
+          {streak.map((pick) => (
+            <span key={pick.id} className={pick.hit ? "hit-dot hit-dot--hit" : "hit-dot"} title={`${pick.title}: ${pick.hit ? "landed" : "missed"}`} />
+          ))}
+        </p>
+      ) : null}
+      {traits.landed.length ? (
+        <>
+          <p className="meta knows-learned__heading">Lands for you</p>
+          {rows(traits.landed, "landed")}
+        </>
+      ) : null}
+      {traits.missed.length ? (
+        <>
+          <p className="meta knows-learned__heading">Misses for you</p>
+          {rows(traits.missed, "missed")}
+        </>
+      ) : null}
+      {answered && !traits.landed.length && !traits.missed.length ? (
+        <p className="meta">No pattern yet. One shows up once a few picks share something.</p>
+      ) : null}
+      {meh.filter((entry) => entry.feedback_note).slice(0, 4).map((entry) => (
+        <p key={entry.id} className="meta" style={{ fontFamily: "var(--serif)", fontStyle: "italic", fontSize: 15, margin: "8px 0" }}>
+          {entry.recommendation.title}: “{entry.feedback_note}”
+        </p>
+      ))}
+      <p className="meta" role="status" style={{ marginTop: 16 }}>
+        {catchingUp
+          ? "Reading your past picks, so they count too…"
+          : stillToRead
+            ? `${stillToRead} past pick${stillToRead === 1 ? "" : "s"} still to read; En catches up on them next time.`
+            : answered
+              ? "Every past pick counts, not just new ones."
+              : ""}
+      </p>
+      {unlearned.length ? (
+        <button className="btn-quiet" onClick={() => onChange({ unlearned: [] })}>
+          En forgot {unlearned.length} thing{unlearned.length === 1 ? "" : "s"} you asked it to · bring them back
+        </button>
+      ) : null}
+    </section>
+  );
+}
 
 const MAL_STATUS_NAMES = {
   watching: "watching",
@@ -4567,6 +4705,8 @@ function mergeCandidateMeta(recommendation, candidate) {
     genre: candidate.genre,
     image_url: candidate.image_url || recommendation.image_url || "",
     watch_links: candidate.watchLinks || [],
+    // What the pick was, for En to learn from how it lands (learning.js).
+    features: featuresOf(candidate),
     // Saved with the pick so later pools can exclude it by id, not just name.
     ...(candidate.resume ? { resume: candidate.resume } : {}),
     ...(candidate.anilistId ? { anilistId: candidate.anilistId } : {}),

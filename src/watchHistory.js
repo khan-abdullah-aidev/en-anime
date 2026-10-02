@@ -141,7 +141,9 @@ export function answersFromList({ list, history = [], sourceName = "MyAnimeList"
       answers.push({
         id: logged.id,
         answer: good ? "good" : "meh",
-        reflection: score ? `finished it on ${sourceName} · ${score}/10.` : `finished it on ${sourceName}.`
+        reflection: score ? `finished it on ${sourceName} · ${score}/10.` : `finished it on ${sourceName}.`,
+        // How far from their usual score, which tells En how much it landed.
+        ...(score && average ? { scoreDelta: Math.round((score - average) * 10) / 10 } : {})
       });
     } else if (status === "dropped") {
       const watched = Number(match.my_list_status?.num_episodes_watched) || 0;
