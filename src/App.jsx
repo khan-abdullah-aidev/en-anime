@@ -1705,6 +1705,7 @@ export default function App() {
             setMood={setMood}
             excluded={preferences.excludedGenres}
             onToggleGenre={toggleExcludedGenre}
+            onClearGenres={() => changePreferences({ excludedGenres: [] })}
           />
         )}
         {view === VIEW.SHORTLIST && (
@@ -1768,6 +1769,7 @@ export default function App() {
             onChangePartner={() => go(VIEW.TOGETHER)}
             excluded={preferences.excludedGenres}
             onToggleGenre={toggleExcludedGenre}
+            onClearGenres={() => changePreferences({ excludedGenres: [] })}
           />
         )}
         {view === VIEW.THINKING && (
@@ -2016,7 +2018,7 @@ function ScreenManual({ onLog, onSubmit, manualList, setManualList }) {
               onKeyDown={submitOnEnter(() => manualList.trim() && onSubmit(manualList), { requireModifier: true })}
               aria-label="Anime you've watched and loved, separated by commas or new lines"
               rows={3}
-              className="serif-display"
+              className="serif-display field"
               placeholder="Death Note, Your Name, Vinland Saga..."
               style={{
                 width: "100%",
@@ -2028,7 +2030,6 @@ function ScreenManual({ onLog, onSubmit, manualList, setManualList }) {
                 fontWeight: 300
               }}
             />
-            <hr className="hairline" style={{ marginTop: 8 }} />
           </div>
 
           <div className="fade-up delay-4" style={{ marginTop: 80 }}>
@@ -2104,7 +2105,7 @@ function ScreenPending({ nav, pending }) {
   );
 }
 
-function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mood, setMood, excluded, onToggleGenre }) {
+function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mood, setMood, excluded, onToggleGenre, onClearGenres }) {
   const ref = useRef(null);
   const hints = useMemo(
     () => [
@@ -2163,7 +2164,7 @@ function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mo
               onKeyDown={submitOnEnter(() => mood.trim() && onConsider())}
               aria-label="How do you feel tonight? A word, a sentence, or nothing at all."
               rows={2}
-              className="serif-display"
+              className="serif-display field field--grow"
               style={{
                 width: "100%",
                 fontSize: 28,
@@ -2174,7 +2175,6 @@ function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mo
                 fontWeight: 300
               }}
             />
-            <hr className="hairline" style={{ marginTop: 8 }} />
             {!mood && (
               <div
                 style={{
@@ -2184,7 +2184,7 @@ function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mo
                   alignItems: "flex-start",
                   justifyContent: "center",
                   pointerEvents: "none",
-                  paddingTop: 6
+                  paddingTop: 26
                 }}
               >
                 <span
@@ -2227,7 +2227,7 @@ function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mo
                 or — for two
               </button>
             </div>
-            <LeaveOut excluded={excluded} onToggle={onToggleGenre} />
+            <LeaveOut excluded={excluded} onToggle={onToggleGenre} onClear={onClearGenres} />
           </div>
         </div>
       </div>
@@ -2278,7 +2278,7 @@ function ScreenShortlist({ onLog, onSubmit, shortlist, setShortlist }) {
               onKeyDown={submitOnEnter(() => shortlist.trim() && onSubmit(shortlist), { requireModifier: true })}
               aria-label="The anime you're considering: one title, or a few separated by vs, or, or new lines"
               rows={2}
-              className="serif-display"
+              className="serif-display field field--grow"
               placeholder="Chainsaw Man, or Chainsaw Man vs Frieren..."
               style={{
                 width: "100%",
@@ -2290,7 +2290,6 @@ function ScreenShortlist({ onLog, onSubmit, shortlist, setShortlist }) {
                 fontWeight: 300
               }}
             />
-            <hr className="hairline" style={{ marginTop: 8 }} />
           </div>
 
           <div className="fade-up delay-4" style={{ marginTop: 80 }}>
@@ -2355,7 +2354,7 @@ function ScreenShortlistMood({ onLog, titles, mood, setMood, onSubmit, onSkip })
               onKeyDown={submitOnEnter(onSubmit)}
               aria-label="Tonight's mood, or why you're considering these. Optional."
               rows={2}
-              className="serif-display"
+              className="serif-display field field--grow"
               placeholder="something quiet, or nothing at all"
               style={{
                 width: "100%",
@@ -2367,7 +2366,6 @@ function ScreenShortlistMood({ onLog, titles, mood, setMood, onSubmit, onSkip })
                 fontWeight: 300
               }}
             />
-            <hr className="hairline" style={{ marginTop: 8 }} />
           </div>
 
           <div className="fade-up delay-4" style={{ marginTop: 72 }}>
@@ -2530,11 +2528,10 @@ function ScreenTogether({ onLog, partner, checking, onSubmit, onCreateRoom, myNa
                   onKeyDown={submitOnEnter(submit, { requireModifier: true })}
                   aria-label="Anime they've watched and loved, separated by commas or new lines"
                   rows={3}
-                  className="serif-display"
+                  className="serif-display field"
                   placeholder="Frieren, Mushishi, Your Name..."
                   style={{ width: "100%", fontSize: 24, textAlign: "center", lineHeight: 1.4, color: "var(--bone)", resize: "none", fontWeight: 300, marginTop: 28 }}
                 />
-                <hr className="hairline" style={{ marginTop: 8 }} />
               </>
             ) : (
               <input
@@ -2719,10 +2716,10 @@ function RoomHost({ nav, roomId, data, local, history }) {
               onKeyDown={submitOnEnter(() => nav.roomReady(roomId, mood))}
               aria-label="What are you in the mood for? Optional."
               rows={2}
-              className="serif-display room-mood"
+              className="serif-display field field--grow room-mood"
               placeholder="what are you in the mood for?"
+              style={{ marginBottom: 40 }}
             />
-            <hr className="hairline" style={{ margin: "8px auto 40px", maxWidth: 520 }} />
             <button className="btn-link" onClick={() => nav.roomReady(roomId, mood)}>
               {guest ? "Let En choose for two" : "I'm ready"}
             </button>
@@ -2769,10 +2766,9 @@ function RoomGuest({ nav, roomId, data, local, history, joining, ownList, myName
                 onChange={(event) => setList(event.target.value)}
                 aria-label="Anime you've watched and loved, separated by commas or new lines"
                 rows={2}
-                className="serif-display room-mood"
+                className="serif-display field field--grow room-mood"
                 placeholder="Frieren, Mushishi, Your Name..."
               />
-              <hr className="hairline" style={{ margin: "8px auto 0", maxWidth: 520 }} />
             </>
           ) : (
             <input
@@ -2818,10 +2814,9 @@ function RoomGuest({ nav, roomId, data, local, history, joining, ownList, myName
             onKeyDown={submitOnEnter(send)}
             aria-label="What are you in the mood for? Optional."
             rows={2}
-            className="serif-display room-mood"
+            className="serif-display field field--grow room-mood"
             placeholder="what are you in the mood for?"
           />
-          <hr className="hairline" style={{ margin: "8px auto 0", maxWidth: 520 }} />
         </div>
 
         <div className="fade-up delay-4" style={{ marginTop: 48 }}>
@@ -2866,7 +2861,7 @@ function RoomGuest({ nav, roomId, data, local, history, joining, ownList, myName
 }
 
 // "For two", step two: tonight's mood, for both of them.
-function ScreenTogetherMood({ onLog, name, mood, setMood, onSubmit, onSurprise, onChangePartner, excluded, onToggleGenre }) {
+function ScreenTogetherMood({ onLog, name, mood, setMood, onSubmit, onSurprise, onChangePartner, excluded, onToggleGenre, onClearGenres }) {
   const ref = useRef(null);
 
   useEffect(() => {
@@ -2901,11 +2896,10 @@ function ScreenTogetherMood({ onLog, name, mood, setMood, onSubmit, onSurprise, 
               onKeyDown={submitOnEnter(() => mood.trim() && onSubmit())}
               aria-label="What are you two in the mood for?"
               rows={2}
-              className="serif-display"
+              className="serif-display field field--grow"
               placeholder="something we'll both talk about after"
               style={{ width: "100%", fontSize: 26, textAlign: "center", lineHeight: 1.4, color: "var(--bone)", resize: "none", fontWeight: 300 }}
             />
-            <hr className="hairline" style={{ marginTop: 8 }} />
           </div>
 
           <div className="fade-up delay-4" style={{ marginTop: 64 }}>
@@ -2922,7 +2916,7 @@ function ScreenTogetherMood({ onLog, name, mood, setMood, onSubmit, onSurprise, 
                 or — watching with someone else
               </button>
             </div>
-            <LeaveOut excluded={excluded} onToggle={onToggleGenre} />
+            <LeaveOut excluded={excluded} onToggle={onToggleGenre} onClear={onClearGenres} />
           </div>
         </div>
       </div>
@@ -3039,14 +3033,19 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight }) {
               </p>
             ) : null}
             {pick.watch_links?.length ? (
-              <p className="meta watch-links">
-                <span title="From AniList; availability varies by region">streams on</span>
-                {pick.watch_links.map((link) => (
-                  <a key={link.site} href={link.url} target="_blank" rel="noopener noreferrer">
-                    {link.site}
-                  </a>
-                ))}
-              </p>
+              <>
+                <p className="meta watch-links">
+                  <span>streams on</span>
+                  {pick.watch_links.map((link) => (
+                    <a key={link.site} href={link.url} target="_blank" rel="noopener noreferrer">
+                      {link.site}
+                    </a>
+                  ))}
+                </p>
+                <p className="meta watch-links__note">
+                  What plays depends on your region, so a link may be blocked or hidden where you are.
+                </p>
+              </>
             ) : null}
           </div>
 
@@ -3635,8 +3634,9 @@ function ScreenHistory({ nav, history, source, listSource, malSync, sync }) {
 
 // "Leave some genres out": a standing filter on every pick En makes, shown
 // where tonight's pick is asked for.
-function LeaveOut({ excluded = [], onToggle }) {
+function LeaveOut({ excluded = [], onToggle, onClear }) {
   const [open, setOpen] = useState(false);
+  const doneRef = useRef(null);
   if (!open) {
     return (
       <div className="leave-out">
@@ -3652,9 +3652,21 @@ function LeaveOut({ excluded = [], onToggle }) {
         Tap what En should never suggest. It stays left out until you let it back in.
       </p>
       <GenreChips excluded={excluded} onToggle={onToggle} />
-      <button className="btn-quiet" onClick={() => setOpen(false)} aria-expanded="true" style={{ marginTop: 14 }}>
-        done
-      </button>
+      <div className="leave-out__actions">
+        <button
+          className="btn-quiet"
+          disabled={!excluded.length}
+          onClick={() => {
+            onClear();
+            doneRef.current?.focus();
+          }}
+        >
+          clear all
+        </button>
+        <button ref={doneRef} className="btn-quiet" onClick={() => setOpen(false)} aria-expanded="true">
+          done
+        </button>
+      </div>
     </div>
   );
 }
@@ -4097,6 +4109,20 @@ function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre
                   Left out of every pick, wherever it would come from. The same list sits under tonight's question.
                 </p>
                 <GenreChips excluded={excludedGenres} onToggle={onToggleGenre} align="left" />
+                {excludedGenres.length ? (
+                  <div className="log-panel__actions">
+                    <button
+                      className="btn-quiet"
+                      onClick={(event) => {
+                        const section = event.currentTarget.closest("section");
+                        onChange({ excludedGenres: [] });
+                        section?.querySelector(".chip")?.focus();
+                      }}
+                    >
+                      clear all
+                    </button>
+                  </div>
+                ) : null}
               </section>
 
               {bench.length ? (

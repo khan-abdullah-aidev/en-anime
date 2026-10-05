@@ -125,7 +125,7 @@ export function media(id, title, overrides = {}) {
     coverImage: { extraLarge: `https://img.example/${id}.png`, large: "" },
     tags: [],
     relations: { edges: [] },
-    externalLinks: [],
+    externalLinks: [{ site: "Crunchyroll", url: `https://crunchyroll.example/${id}`, type: "STREAMING" }],
     ...overrides
   };
 }

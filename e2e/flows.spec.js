@@ -46,6 +46,8 @@ test("a typed list gets one pick, read from tonight's mood, and the log keeps it
   const heading = page.getByRole("heading", { level: 1 });
   await expect(heading).toHaveText(title);
   await expect(heading).toBeFocused();
+  await expect(page.getByRole("link", { name: "Crunchyroll" })).toBeVisible();
+  await expect(page.getByText(/What plays depends on your region/)).toBeVisible();
 
   await page.getByRole("button", { name: "LOG" }).click();
   await expect(page.getByRole("heading", { name: "What En has chosen" })).toBeFocused();
@@ -77,6 +79,24 @@ test("genres left out stay out of every pick, and the choice is remembered", asy
   expect(candidates.filter((candidate) => (candidate.genres || []).includes("Horror"))).toEqual([]);
   expect(log.anilist.some((query) => query.includes('genre_not_in: ["Horror"]'))).toBe(true);
   expect(log.en.some((body) => body.kind === "mood"), "no mood, nothing to read").toBe(false);
+});
+
+test("clear all lets every genre back in at once", async ({ page }) => {
+  await stubServices(page);
+  await seed(page, { ...typedList, "en.preferences": { excludedGenres: ["Horror", "Ecchi", "Mecha"] } });
+  await page.goto("/tonight");
+
+  await page.getByRole("button", { name: /leaving out .*Horror/ }).click();
+  await expect(page.getByRole("button", { name: "Mecha, left out" })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "clear all" }).click();
+  await expect(page.locator(".chip[aria-pressed=true]")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "clear all" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "done" })).toBeFocused();
+  await page.getByRole("button", { name: "done" }).click();
+  await expect(page.getByRole("button", { name: "or — leave some genres out" })).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByRole("button", { name: "or — leave some genres out" })).toBeVisible();
 });
 
 test("'Watching it' stops the question coming back every visit", async ({ page }) => {
