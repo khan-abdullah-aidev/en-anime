@@ -2018,7 +2018,7 @@ function ScreenManual({ onLog, onSubmit, manualList, setManualList }) {
               onKeyDown={submitOnEnter(() => manualList.trim() && onSubmit(manualList), { requireModifier: true })}
               aria-label="Anime you've watched and loved, separated by commas or new lines"
               rows={3}
-              className="serif-display field"
+              className="serif-display field field--grow"
               placeholder="Death Note, Your Name, Vinland Saga..."
               style={{
                 width: "100%",
@@ -2176,27 +2176,8 @@ function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mo
               }}
             />
             {!mood && (
-              <div
-                style={{
-                  position: "absolute",
-                  inset: 0,
-                  display: "flex",
-                  alignItems: "flex-start",
-                  justifyContent: "center",
-                  pointerEvents: "none",
-                  paddingTop: 26
-                }}
-              >
-                <span
-                  key={hintIdx}
-                  className="serif-display fade-in"
-                  style={{
-                    fontSize: 28,
-                    color: "var(--bone-4)",
-                    fontStyle: "italic",
-                    fontWeight: 300
-                  }}
-                >
+              <div className="field-hint" aria-hidden="true">
+                <span key={hintIdx} className="serif-display field fade-in">
                   {hints[hintIdx]}
                 </span>
               </div>
@@ -2528,7 +2509,7 @@ function ScreenTogether({ onLog, partner, checking, onSubmit, onCreateRoom, myNa
                   onKeyDown={submitOnEnter(submit, { requireModifier: true })}
                   aria-label="Anime they've watched and loved, separated by commas or new lines"
                   rows={3}
-                  className="serif-display field"
+                  className="serif-display field field--grow"
                   placeholder="Frieren, Mushishi, Your Name..."
                   style={{ width: "100%", fontSize: 24, textAlign: "center", lineHeight: 1.4, color: "var(--bone)", resize: "none", fontWeight: 300, marginTop: 28 }}
                 />
