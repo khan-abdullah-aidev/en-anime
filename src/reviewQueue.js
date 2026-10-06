@@ -4,9 +4,10 @@
 // saved for later ("pending"), or being watched ("watching"). Saying
 // "watching it" or "I'll watch it later" snoozes the question instead of
 // having it come back every visit: ask_after is when it may be asked again.
+// "Not now" (or En's wordmark) answers nothing and only waits out tonight.
 // MAL/AniList can still answer it meanwhile (see answersFromList).
 const DAY = 24 * 60 * 60 * 1000;
-export const ASK_AGAIN_DAYS = { watching: 14, later: 30 };
+export const ASK_AGAIN_DAYS = { watching: 14, later: 30, notNow: 0.5 };
 
 export function isAwaitingAnswer(entry) {
   return entry.state === "unrated" || entry.state === "pending" || entry.state === "watching";

@@ -25,6 +25,7 @@ describe("'Did you watch it?': who gets asked, and when", () => {
   it("'watching it' and 'later' hold the question off for a while, then it comes back", () => {
     assert.equal(askAgainAfter("watching", now), at(ASK_AGAIN_DAYS.watching));
     assert.equal(askAgainAfter("later", now), at(ASK_AGAIN_DAYS.later));
+    assert.equal(askAgainAfter("notNow", now), new Date(now + 12 * 60 * 60 * 1000).toISOString(), "not now: just tonight");
     assert.equal(askAgainAfter("good", now), null);
 
     const history = [

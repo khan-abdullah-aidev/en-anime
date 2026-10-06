@@ -129,6 +129,36 @@ test("'Watching it' stops the question coming back every visit", async ({ page }
   await expect(page.getByRole("button", { name: "watching it" })).toHaveAttribute("aria-pressed", "true");
 });
 
+test("En's name on 'Did you watch X?' means not now: nothing answered, tonight's question instead", async ({ page }) => {
+  await stubServices(page);
+  const old = new Date(Date.now() - 3 * DAY).toISOString();
+  const pick = (id, title) => ({
+    id,
+    date: old,
+    updated_at: old,
+    state: "unrated",
+    feedback: "",
+    note: "",
+    recommendation: { title, year: 2021, episodes: 11, genre: "Drama", reason: "r", log_line: "l" }
+  });
+  await seed(page, { ...typedList, "en.recommendationHistory": [pick("a", "Link Click"), pick("b", "Mushishi")] });
+
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Did you watch Link Click?" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "not now — ask me another time" })).toBeVisible();
+  await page.getByRole("button", { name: "En, home" }).click();
+  await expect(page).toHaveURL(/\/tonight$/);
+  await expect(page.getByRole("heading", { name: "How do you feel?" })).toBeVisible();
+
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/tonight$/);
+  const entries = await page.evaluate(() => JSON.parse(localStorage.getItem("en.recommendationHistory")));
+  for (const entry of entries) {
+    expect([entry.state, entry.feedback]).toEqual(["unrated", ""]);
+    expect(Date.parse(entry.ask_after) - Date.now()).toBeGreaterThan(11 * 60 * 60 * 1000);
+  }
+});
+
 test("'What En knows about you' shows its evidence and takes corrections", async ({ page }) => {
   const list = [
     ...Array.from({ length: 6 }, (_, i) => listEntry(10 + i, `Quiet ${i}`, "COMPLETED", 9, ["Slice of Life", "Drama"])),
@@ -230,6 +260,9 @@ test("answers reach MyAnimeList, even for picks saved without a MAL id", async (
 
 test("two phones, one pick: a link, both lists and moods, the same pick on each", async ({ browser }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "it's two browsers already; one run is enough");
+  // Two browsers, each checking the room every few seconds, through a pick
+  // and a pass: more than the default 30s on a busy machine.
+  test.setTimeout(75000);
   const baseURL = testInfo.project.use.baseURL;
   const host = await (await browser.newContext({ baseURL })).newPage();
   const guest = await (await browser.newContext({ baseURL })).newPage();

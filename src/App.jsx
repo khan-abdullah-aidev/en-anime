@@ -1158,6 +1158,17 @@ export default function App() {
     go(nextPendingIds.length ? VIEW.PENDING : VIEW.MOOD, { replace: true });
   }
 
+  // "Ask me another time", or En's wordmark, on "Did you watch X?": no
+  // answer, nothing sent to MyAnimeList, nothing learned. Every question due
+  // now waits out tonight, and tonight's mood question comes up instead.
+  function handlePendingNotNow() {
+    const until = askAgainAfter("notNow");
+    const due = findReviewEntries(loadHistory(), sessionEntryIds.current);
+    setHistory(patchHistoryEntries(new Map(due.map((entry) => [entry.id, { ask_after: until }]))));
+    setPendingReviewIds([]);
+    go(VIEW.MOOD, { replace: true });
+  }
+
   function handleDeleteHistoryEntry(id) {
     const nextHistory = deleteHistoryEntry(id);
     setHistory(nextHistory);
@@ -1624,7 +1635,8 @@ export default function App() {
     back: goBack,
     canGoBack: routeIdx > 0 || Boolean(PARENT[view]),
     home: () => {
-      if (view !== VIEW.MOOD) goHome();
+      if (view === VIEW.PENDING) handlePendingNotNow();
+      else if (view !== VIEW.MOOD) goHome();
     },
     goto: (nextView) => go(nextView),
     log: () => go(VIEW.HISTORY),
@@ -1645,6 +1657,7 @@ export default function App() {
     watchTonight: handleWatchTonight,
     notTonight: handleNotTonight,
     pendingAnswer: handlePendingAnswer,
+    pendingNotNow: handlePendingNotNow,
     answer: handleAnswer,
     openPick: (id) => go(VIEW.REVEAL, { entryId: id }),
     deleteHistoryEntry: handleDeleteHistoryEntry,
@@ -2097,6 +2110,11 @@ function ScreenPending({ nav, pending }) {
             </button>
             <button className="btn-quiet" onClick={() => nav.pendingAnswer("pass")}>
               I'll pass on it
+            </button>
+          </div>
+          <div className="fade-up delay-3" style={{ marginTop: 40 }}>
+            <button className="btn-quiet" onClick={nav.pendingNotNow} style={{ color: "var(--bone-4)" }}>
+              not now — ask me another time
             </button>
           </div>
         </div>
