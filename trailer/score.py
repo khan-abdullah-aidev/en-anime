@@ -23,7 +23,7 @@ html = (HERE / "index.html").read_text(encoding="utf-8")
 C = json.loads(re.search(r'<script id="cues" type="application/json">(.*?)</script>', html, re.S).group(1))
 DUR = C["duration"]
 N = int((DUR + 0.2) * SR)
-BEAT = C["beat"]
+
 rng = np.random.default_rng(7)
 
 
@@ -357,226 +357,168 @@ def rain(dur, vel=1.0):
 
 main = Bus()
 act1 = Bus()
-S = C["seal"]
-R = C["reveal"]
+B = 60 / 70  # a slow seventy
 
 
-def strum(bus, notes, at, gain_db, spread=0.028, pan=0.0, send=0.35, **kw):
+def strum(bus, notes, at, gain_db, spread=0.03, pan=0.0, send=0.35, **kw):
     for i, name in enumerate(notes):
         bus.add(koto(hz(name), **kw), at + i * spread, gain_db - 1.5 * i, pan + 0.12 * (i - len(notes) / 2), send)
 
 
-# Act one: 11:47 PM, the scroll.
-act1.add(pad(["D2", "A2", "D3"], C["cut"] + 0.6, attack=3.0, release=0.5, bright=520, vel=1), 0.2, -27, send=0.3)
-act1.add(pad(["A3", "Bb3", "E4"], C["cut"] - 5.0, attack=2.6, release=0.3, bright=1600, detune=16, vel=1), 5.3, -32, send=0.4)
-act1.add(bandpass(pink(int(C["cut"] * SR)), 200, 3000, 1) / 3, 0.0, -44, send=0.0)
-for at, name, vel in [(0.6, "D3", 0.45), (0.62, "A3", 0.4), (2.7, "F4", 0.5), (3.45, "E4", 0.42), (4.2, "D4", 0.4), (5.3, "Bb3", 0.45), (5.32, "D4", 0.4), (6.1, "A3", 0.45)]:
-    act1.add(felt_piano(hz(name), 4.5, vel), at, -11, pan=-0.1 if name < "E" else 0.12, send=0.5)
-# The scroll wheel: slow notches, then the rush.
-tick_times = []
-x = 1.6
-while x < C["cut"]:
-    tick_times.append(x)
-    rate = 2.6 + 3.5 * (x - 1.6) / (C["rush"] - 1.6) if x < C["rush"] else 6 * (1 + 46 * 2 ** (10 * ((x - C["rush"]) / (C["cut"] - C["rush"])) - 10))
-    x += max(0.012, rng.exponential(1 / rate) * 0.6 + 0.4 / rate)
-for x in tick_times:
-    k = max(0.0, (x - C["rush"]) / (C["cut"] - C["rush"]))
-    act1.add(tick(rng.uniform(0.5, 1), tone=rng.uniform(2600, 4200)), x, -27 + 13 * k, pan=rng.uniform(-0.6, 0.6), send=0.15)
-rush = C["cut"] - C["rush"]
-act1.add(riser(rush, hz("D3"), hz("D6")), C["rush"], -8, send=0.3)
-act1.add(swell(rush, lo=150, hi=12000), C["rush"], -5, send=0.2)
-act1.add(swell(1.4, lo=300, hi=14000), C["cut"] - 1.4, -7, send=0.1)
-act1.add(boom(1.2, f_hi=50, f_lo=30, vel=1) [::-1].copy() * np.linspace(0, 1, int(1.2 * SR)) ** 2, C["cut"] - 1.2, -12, send=0.0)
+def piano(name, at, gain_db, vel=0.5, dur=5.0, pan=0.05, send=0.5, bus=None):
+    (bus or main).add(felt_piano(hz(name), dur, vel), at, gain_db, pan=pan, send=send)
 
-# Act two: silence, then a single string.
-main.add(lowpass(pink(int(3 * SR)), 900, 1) / 4 * smooth_env(int(3 * SR), 1.0, 0.5), C["cut"], -48, send=0)
-main.add(koto(hz("A4"), 5, 0.8, bright=0.5, t60=3.5), C["dot"], -9, send=0.7)
-main.add(pad(["D3", "A3", "E4", "F4"], S - 11.6 + 0.6, attack=2.4, release=0.6, bright=1100, vel=1), 11.6, -24, send=0.5)
-for at, name, vel in [(C["q1"], "D4", 0.45), (C["q1"] + 0.02, "A3", 0.4), (C["q2"], "F4", 0.5), (C["q2"] + 0.02, "C4", 0.4), (C["q2"] + 0.75, "E4", 0.42)]:
-    main.add(felt_piano(hz(name), 4.5, vel), at, -10, pan=0.08, send=0.5)
-main.add(swell(1.3, lo=200, hi=9000), S - 1.3, -12, send=0.3)
 
-# The seal.
-main.add(boom(4, vel=1), S, -4, send=0.25)
-main.add(taiko(1, 1.1), S, -8, send=0.35)
-main.add(bell(hz("D5"), 6, 1), S, -21, pan=-0.2, send=0.6)
-main.add(bell(hz("A5"), 6, 1), S + 0.01, -23, pan=0.2, send=0.6)
-strum(main, ["D3", "A3", "D4", "E4", "A4"], S, -11, bright=0.6)
+def drip(vel=1.0):
+    n = int(0.12 * SR)
+    t = tt(n)
+    f = 900 + 1700 * (1 - np.exp(-t / 0.012))
+    out = np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-t / 0.018)
+    return out * vel / np.abs(out).max()
 
-# Act three: reads, listens, considers. Pads on a two-bar grid.
-bar = 4 * BEAT
-chords = [
-    (S, ["D2", "A2", "D3", "F3", "A3", "C4", "E4"], 2200),
-    (S + 2 * bar, ["Bb1", "F2", "Bb2", "D3", "F3", "A3", "E4"], 2000),
-    (S + 4 * bar, ["G1", "D2", "G2", "Bb2", "D3", "F3", "A3"], 1700),
-]
-for i, (at, notes, br) in enumerate(chords):
-    length = (chords[i + 1][0] if i + 1 < len(chords) else C["think"]) - at + 1.0
-    main.add(pad(notes, length, attack=1.2 if i else 0.4, release=1.3, bright=br), at, -15, send=0.35)
-main.add(pad(["A1", "E2", "A2", "D3", "E3"], C["breath"] - C["think"] + 0.1, attack=1.0, release=0.12, bright=900), C["think"] - 0.4, -17, send=0.3)
-main.add(pad(["E5", "A5"], C["breath"] - 29.6, attack=2.0, release=0.12, bright=5000, detune=14, voices=4), 29.6, -31, send=0.6)
 
-ost_a = ["D4", "A4", "E5", "A4", "F5", "A4", "E5", "A4"]
-ost_b = ["D4", "A4", "F5", "A4", "E5", "A4", "D5", "A4"]
-x = C["reads"]
-i = 0
-while x < C["think"] - 0.2:
-    pattern = ost_b if x >= S + 4 * bar else ost_a
-    name = pattern[i % 8]
-    quiet = C["mood"] <= x < C["think"]
-    accent = 0 if i % 2 == 0 else -4
-    if not (quiet and i % 2):
-        main.add(koto(hz(name), 2.2, 0.7, bright=0.55, t60=1.6), x, -15 + accent - (5 if quiet else 0), pan=0.3 if i % 2 else -0.3, send=0.3)
-    x += BEAT / 2
-    i += 1
-x = C["reads"]
-while x < C["think"]:
-    main.add(heart(0.6), x, -22, send=0.05)
-    x += BEAT
-for at, name in [(C["reads"], "A4"), (C["reads"] + 1.4, "E5"), (C["reads"] + 2.8, "D5"), (C["reads"] + 4.2, "C5"), (C["reads"] + 4.9, "A4")]:
-    main.add(felt_piano(hz(name), 4, 0.55), at, -9, pan=0.1, send=0.45)
-# Pins and strikes as the list is read.
-loves = [0, 1, 3, 6, 8, 9, 11]
-drops = [2, 5]
-pent = ["A5", "C6", "D6", "E6", "G6", "A6", "C7"]
-for j, row in enumerate(loves):
-    main.add(bell(hz(pent[j]), 2.5, 1), C["readRows"] + row * 0.27, -28, pan=0.35, send=0.5)
-for row in drops:
-    main.add(swish(0.4), C["readRows"] + row * 0.27, -27, pan=0.35, send=0.2)
-# Typing.
+def sustained(name, dur, attack, release, vib=0.004):
+    n = int(dur * SR)
+    t = tt(n)
+    v = 1 + vib * np.sin(2 * np.pi * 5.1 * t) * np.clip(t / 1.5, 0, 1)
+    ph = 2 * np.pi * np.cumsum(hz(name) * v) / SR
+    return (np.sin(ph) + 0.16 * np.sin(2 * ph) + 0.05 * np.sin(3 * ph)) * smooth_env(n, attack, release)
+
+
+# I · 11:47 PM. A thousand shows.
+act1.add(pad(["D2", "A2", "D3"], 11.2, attack=3.5, release=1.8, bright=520), 0.3, -26, send=0.3)
+act1.add(pad(["E5", "A5", "D6"], 10.0, attack=3.5, release=2.0, bright=7000, detune=22, voices=4), 1.0, -38, send=0.7)
+act1.add(bandpass(pink(int(11.5 * SR)), 200, 3000, 1) / 3 * smooth_env(int(11.5 * SR), 1.5, 2.0), 0.0, -45, send=0.0)
+for at, name, vel, gain in [(C["clock"], "D3", 0.4, -12), (C["clock"] + 0.03, "A3", 0.38, -13),
+                            (C["l1"], "F4", 0.5, -11), (C["l1"] + 0.75, "E4", 0.42, -12),
+                            (C["l2"], "D4", 0.48, -11), (C["l2"] + 0.02, "Bb3", 0.4, -13), (C["l2"] + 0.9, "A3", 0.42, -12),
+                            (C["clock2"], "A5", 0.35, -17), (C["clock2"] + 0.02, "D2", 0.45, -14)]:
+    piano(name, at, gain, vel, bus=act1)
+x = 1.8
+while x < C["exhale"] + 0.6:
+    act1.add(tick(rng.uniform(0.4, 0.9), tone=rng.uniform(2600, 4200)), x, -37, pan=rng.uniform(-0.6, 0.6), send=0.2)
+    x += rng.uniform(0.25, 0.9)
+# The exhale: everything sinks.
+n = int(2.2 * SR)
+sigh = stft_filter(rng.standard_normal(n), lambda f, c: 1 / (1 + (f / (6000 * (1 - min(1.0, max(0.0, c) / 2.2)) ** 2 + 150)) ** 4))
+act1.add(sigh / np.abs(sigh).max() * np.sin(np.pi * np.clip(tt(n) / 2.2, 0, 1)) ** 2, C["exhale"], -27, send=0.3)
+
+# II · How do you feel?
+main.add(bandpass(pink(int(7 * SR)), 300, 2500, 1) / 3 * smooth_env(int(7 * SR), 1.0, 1.0), 11.4, -52, send=0)
+piano("A4", C["ask"], -15, 0.35, send=0.6)
 t_type = C["type"]
 for i, ch in enumerate(C["typeText"]):
-    d = 0.062 + 0.022 * math.sin(i * 12.9898) * math.sin(i * 4.1414)
-    main.add(key_tap(rng.uniform(0.6, 1)), t_type, -21 if ch != " " else -24, pan=rng.uniform(-0.15, 0.15), send=0.08)
+    d = 0.075 + 0.025 * math.sin(i * 12.9898) * math.sin(i * 4.1414)
+    main.add(key_tap(rng.uniform(0.6, 1)), t_type, -22 if ch != " " else -25, pan=rng.uniform(-0.15, 0.15), send=0.1)
     if ch == " ":
-        d += 0.03
+        d += 0.04
     if ch in ".,":
-        d += 0.32
+        d += 0.36
     t_type += d
-main.add(key_tap(1), C["press"], -16, send=0.2)
-main.add(koto(hz("D6"), 3, 0.5, bright=0.3, t60=2.5), C["press"] + 0.02, -18, send=0.6)
-# Considering: four soft steps down, then the held breath.
-for at, name in zip(C["thinkLines"], ["A4", "G4", "F4", "E4"]):
-    main.add(felt_piano(hz(name), 3.5, 0.45), at, -12, send=0.55)
-x = C["think"]
-while x < C["breath"]:
-    main.add(heart(0.8), x, -17, send=0.05)
-    x += BEAT
-main.add(riser(C["breath"] - 30.4, hz("A3"), hz("A5"), 1), 30.4, -22, send=0.4)
-main.add(swell(C["breath"] - 30.6, lo=200, hi=8000), 30.6, -17, send=0.2)
-main.add(swell(R - C["breath"] - 0.15, lo=300, hi=12000), C["breath"] + 0.15, -14, send=0.2)
+# The first drop, landing on "rain": a drip that rings like a string.
+main.add(drip(1), C["dropLand"], -16, send=0.6)
+main.add(koto(hz("A5"), 5, 0.6, bright=0.3, t60=4.0), C["dropLand"] + 0.01, -16, send=0.8)
+main.add(rain(35.2 - C["dropLand"] + 1.5, 1), C["dropLand"] + 0.2, -26, send=0.08)
+for k in range(9):
+    main.add(drip(rng.uniform(0.3, 0.8)), C["dropLand"] + 0.6 + k * rng.uniform(0.15, 0.4), -30, pan=rng.uniform(-0.7, 0.7), send=0.3)
 
-# The reveal: the answer, in D major.
-main.add(boom(4.5, vel=1), R, -3, send=0.3)
-main.add(taiko(1, 1.15), R, -7, send=0.35)
-for name, p in [("D5", -0.25), ("A5", 0.25), ("F#6", 0)]:
-    main.add(bell(hz(name), 7, 1), R, -20, pan=p, send=0.7)
-strum(main, ["D3", "A3", "D4", "F#4", "A4", "D5"], R, -10, bright=0.65)
-main.add(pad(["D2", "A2", "D3", "F#3", "A3", "C#4", "E4"], 3.4, attack=0.25, release=1.2, bright=2600), R, -13, send=0.35)
-main.add(pad(["B1", "F#2", "B2", "D3", "F#3", "A3", "C#4"], C["one"] - (R + 2.8) + 0.6, attack=1.0, release=0.9, bright=2400), R + 2.8, -14, send=0.35)
-main.add(rain(C["one"] - R + 1.5, 1), R - 0.2, -27, send=0.1)
-theme = [(1, "A4"), (1.5, "D5"), (2, "E5"), (3, "F#5"), (5, "E5"), (5.5, "D5"), (6, "B4"), (7, "A4")]
-for b, name in theme:
-    main.add(felt_piano(hz(name), 5, 0.62), R + b * BEAT, -6, pan=0.06, send=0.5)
-for b in range(1, 15):
-    name = ["D4", "A4", "E5", "F#5", "A4", "E5", "D5", "A4"][b % 8]
-    main.add(koto(hz(name), 2, 0.6, bright=0.5, t60=1.5), R + b * BEAT / 2 + BEAT / 2, -19, pan=0.35 if b % 2 else -0.35, send=0.35)
-# One anime. Not a list.
-main.add(pad(["G2", "D3", "F#3", "B3"], C["two"] - C["one"] + 0.3, attack=0.8, release=1.0, bright=1100), C["one"] - 0.2, -25, send=0.5)
-main.add(felt_piano(hz("D3"), 5, 0.5), C["one"], -13, send=0.5)
-main.add(felt_piano(hz("A3"), 5, 0.45), C["one"] + 0.02, -14, send=0.5)
-main.add(felt_piano(hz("D5"), 5, 0.45), C["one"] + 0.04, -14, send=0.6)
-main.add(bell(hz("F#5"), 5, 1), C["never"], -24, send=0.7)
-main.add(felt_piano(hz("A4"), 4, 0.45), C["never"] + 0.7, -11, send=0.5)
-main.add(swell(1.1, lo=300, hi=10000), C["two"] - 1.1, -14, send=0.2)
-
-# Where it helps: drums arrive.
-cards = [C["two"], C["torn"], C["resume"], C["learn"]]
-card_chords = [
-    ["G1", "D2", "G2", "B2", "D3", "F#3", "A3"],
-    ["A1", "E2", "A2", "C#3", "E3", "F#3", "B3"],
-    ["B1", "F#2", "B2", "D3", "F#3", "A3", "C#4"],
-    ["G1", "D2", "G2", "B2", "D3", "F#3", "A3"],
+# III · The thread.
+P = C["pull"]
+main.add(koto(hz("D5"), 4, 0.7, bright=0.55, t60=3.0), P, -12, send=0.55)
+main.add(swish(0.9), P - 0.1, -26, send=0.3)
+main.add(sustained("A5", C["window"] - P + 2.0, 3.0, 2.0), P, -31, send=0.6)
+journey_chords = [
+    (P, C["c2"], ["D2", "A2", "D3", "F3", "A3", "E4"], 1500),
+    (C["c2"], C["only"], ["Bb1", "F2", "Bb2", "D3", "F3", "A3", "E4"], 1600),
+    (C["only"], C["world"] - 0.25, ["A1", "E2", "A2", "D3", "E3", "A3"], 1100),
 ]
-for k, (at, notes) in enumerate(zip(cards, card_chords)):
-    main.add(pad(notes, bar + 0.6, attack=0.3, release=0.5, bright=2200 + 500 * k), at, -14, send=0.35)
-    main.add(taiko(1, 1.0), at, -8, send=0.3)
-    main.add(taiko(0.5, 0.8), at + 2.5 * BEAT, -17, pan=-0.2, send=0.3)
-    main.add(taiko(0.6, 0.85), at + 3 * BEAT, -15, pan=0.2, send=0.3)
-    main.add(boom(2, f_hi=60, f_lo=36, vel=1), at, -14, send=0.1)
-main.add(pad(["A1", "E2", "A2", "C#3", "E3"], 1.6, attack=0.4, release=0.6, bright=2600), C["learn"] + 2 * BEAT, -16, send=0.35)
-ost_m = ["D5", "A4", "B4", "A4", "E5", "A4", "F#5", "A4"]
-x = C["two"]
+for a, b, notes, br in journey_chords:
+    main.add(pad(notes, b - a + 1.2, attack=2.0, release=1.2 if b < C["world"] - 1 else 0.15, bright=br), a, -18, send=0.4)
+ost = ["D4", "A4", "E5", "A4", "F5", "A4", "E5", "A4"]
+x = P + 0.6
 i = 0
-while x < C["finale"] - 0.1:
-    main.add(koto(hz(ost_m[i % 8]), 1.6, 0.6, bright=0.6, t60=1.2), x, -17 if i % 2 else -14, pan=0.35 if i % 2 else -0.35, send=0.28)
-    main.add(tick(0.6, 5200), x + BEAT / 4, -33, pan=0.4, send=0.1)
-    x += BEAT / 2
+while x < C["only"] - 0.2:
+    main.add(koto(hz(ost[i % 8]), 2.4, 0.6, bright=0.5, t60=1.8), x, -19 if i % 2 == 0 else -23, pan=0.3 if i % 2 else -0.3, send=0.35)
+    x += B / 2
     i += 1
-for at, name in [(C["two"], "B4"), (C["two"] + 2 * BEAT, "D5"), (C["torn"], "C#5"), (C["torn"] + 2 * BEAT, "E5"),
-                 (C["resume"], "D5"), (C["resume"] + 2 * BEAT, "F#5"), (C["learn"], "B4"), (C["learn"] + 2 * BEAT, "A4")]:
-    main.add(felt_piano(hz(name), 3.5, 0.6), at, -8, pan=0.05, send=0.45)
-# For two: one note from each side, meeting as the pick appears.
-main.add(koto(hz("D5"), 3, 0.7), C["two"] + 1.5, -12, pan=-0.85, send=0.5)
-main.add(koto(hz("D5"), 3, 0.7), C["two"] + 1.5, -12, pan=0.85, send=0.5)
-main.add(bell(hz("A5"), 4, 1), C["two"] + 1.5, -24, send=0.6)
-# Torn: two strikes, one winner.
-decide = C["torn"] + 1.2
-main.add(swish(0.4), decide, -22, pan=-0.5, send=0.2)
-main.add(swish(0.4), decide + 0.12, -22, pan=0.5, send=0.2)
-main.add(bell(hz("F#5"), 4, 1), decide + 0.2, -22, send=0.6)
-# Resume: the bar fills, a run climbs with it.
-for j, name in enumerate(["B4", "C#5", "D5", "E5", "F#5", "A5", "B5"]):
-    main.add(koto(hz(name), 2, 0.55, bright=0.7, t60=1.4), C["resume"] + 0.9 + j * 0.15, -17, pan=-0.4 + 0.12 * j, send=0.35)
-# Learns: a bell for every pick that landed.
-streak = [1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1]
-up = ["A5", "B5", "D6", "E6", "F#6", "A6", "B6", "D7"]
-j = 0
-for k, hit in enumerate(streak):
-    at = C["learn"] + 0.95 + k * 0.075
-    if hit:
-        main.add(bell(hz(up[min(j, 7)]), 1.8, 1), at, -27, pan=-0.5 + k / 14, send=0.4)
-        j += 1
-    else:
-        main.add(tick(0.5, 1800), at, -30, pan=-0.5 + k / 14, send=0.1)
-main.add(key_tap(0.8), C["learn"] + 0.8, -18, send=0.2)
+x = P + 2.0
+while x < C["world"] - 0.6:
+    main.add(heart(0.6), x, -25 + 6 * max(0.0, (x - C["only"]) / (C["world"] - C["only"])), send=0.05)
+    x += B
+for at, notes, sparkle in zip(C["loves"], [["A4", "E5"], ["C5"], ["E5"]], ["A5", "C6", "E6"]):
+    for j, name in enumerate(notes):
+        piano(name, at + 0.02 * j, -10, 0.55, send=0.55)
+    main.add(bell(hz(sparkle), 3, 1), at, -26, pan=0.3, send=0.6)
+for at in C["drops"]:
+    main.add(swish(0.6), at, -24, pan=0.35, send=0.25)
+    piano("D2", at + 0.9, -18, 0.4, send=0.4)
+# Toward the one: rising into the light.
+main.add(riser(C["world"] - 31.0, hz("A3"), hz("A5"), 1), 31.0, -22, send=0.4)
+main.add(swell(C["world"] - C["window"], lo=200, hi=12000), C["window"], -11, send=0.25)
 
-# 縁: the thread, then everything.
-F, K = C["finale"], C["kanji"]
-n = int((K - F + 0.2) * SR)
-t = tt(n)
-vib = 1 + 0.004 * np.sin(2 * np.pi * 5.2 * t) * np.clip(t / 1.5, 0, 1)
-ph = 2 * np.pi * np.cumsum(hz("A5") * vib) / SR
-thread = (np.sin(ph) + 0.18 * np.sin(2 * ph) + 0.06 * np.sin(3 * ph)) * smooth_env(n, 2.2, 0.15) * np.clip(t / (K - F), 0, 1) ** 0.6
-main.add(thread, F, -25, send=0.6)
-main.add(pad(["A1", "E2", "A2", "D3", "E3"], K - F + 0.1, attack=2.0, release=0.1, bright=900), F, -19, send=0.4)
-main.add(swell(1.6, lo=200, hi=12000), K - 1.6, -11, send=0.25)
-main.add(boom(5, f_hi=72, f_lo=30, vel=1), K, -2, send=0.3)
-main.add(taiko(1, 1.2), K, -6, send=0.4)
+# IV · The one.
+W0 = C["world"]
+main.add(boom(5, vel=1), W0, -3, send=0.3)
+main.add(taiko(1, 1.2), W0, -7, send=0.4)
+for name, p in [("D5", -0.25), ("A5", 0.25), ("F#6", 0)]:
+    main.add(bell(hz(name), 8, 1), W0, -20, pan=p, send=0.75)
+strum(main, ["D3", "A3", "D4", "F#4", "A4", "D5"], W0, -10, bright=0.65, spread=0.035)
+world_chords = [
+    (W0, C["reasons"][1], ["D2", "A2", "D3", "F#3", "A3", "C#4", "E4"], 2600),
+    (C["reasons"][1], C["reasons"][2], ["B1", "F#2", "B2", "D3", "F#3", "A3", "C#4"], 2400),
+    (C["reasons"][2], C["one"] + 0.4, ["G1", "D2", "G2", "B2", "D3", "F#3", "A3"], 2200),
+]
+for k, (a, b, notes, br) in enumerate(world_chords):
+    main.add(pad(notes, b - a + 1.0, attack=0.25 if k == 0 else 1.2, release=1.2, bright=br), a, -13, send=0.4)
+main.add(rain(C["one"] - W0 + 1.0, 1), W0 - 0.3, -29, send=0.1)
+theme = [(C["title"], "A4"), (C["title"] + 0.6, "D5"), (C["title"] + 1.2, "E5"), (C["reasons"][0], "F#5"),
+         (C["reasons"][0] + 1.1, "E5"), (C["reasons"][0] + 1.6, "D5"), (C["reasons"][1], "B4"), (C["reasons"][1] + 1.1, "C#5"),
+         (C["reasons"][1] + 1.6, "D5"), (C["reasons"][2], "E5"), (C["reasons"][2] + 1.3, "D5"), (C["reasons"][2] + 2.0, "A4")]
+for at, name in theme:
+    piano(name, at, -6, 0.6, dur=5.5)
+x = C["title"]
+i = 0
+arp = ["D4", "A4", "E5", "F#5", "A4", "E5", "D5", "A4"]
+while x < C["one"] - 0.6:
+    main.add(koto(hz(arp[i % 8]), 2.2, 0.55, bright=0.5, t60=1.6), x, -21 if i % 2 else -18, pan=0.35 if i % 2 else -0.35, send=0.35)
+    x += B / 2
+    i += 1
+
+# V · One anime.
+O = C["one"]
+main.add(pad(["G2", "D3", "F#3", "B3"], C["thread"] - O + 0.4, attack=1.0, release=1.4, bright=1100), O - 0.2, -25, send=0.5)
+piano("D3", O, -12, 0.5, send=0.55)
+piano("A3", O + 0.03, -13, 0.45, send=0.55)
+piano("F#4", O + 0.06, -12, 0.45, send=0.6)
+piano("A4", C["chosen"], -12, 0.45, send=0.6)
+piano("E4", C["chosen"] + 0.9, -14, 0.4, send=0.6)
+main.add(bell(hz("F#5"), 6, 1), C["never"], -24, send=0.75)
+piano("A3", C["never"] + 0.02, -15, 0.4, send=0.6)
+
+# 縁.
+T, K = C["thread"], C["kanji"]
+main.add(sustained("A5", K - T + 0.3, 1.8, 0.2), T, -24, send=0.6)
+main.add(pad(["A1", "E2", "A2", "D3", "E3"], K - T + 0.1, attack=1.6, release=0.1, bright=900), T, -20, send=0.4)
+main.add(swell(1.7, lo=200, hi=12000), K - 1.7, -11, send=0.25)
+main.add(boom(5, f_hi=72, f_lo=30, vel=1), K, -3, send=0.3)
+main.add(taiko(1, 1.25), K, -6, send=0.4)
 for name, p in [("D5", -0.3), ("F#5", 0.3), ("A5", -0.1), ("D6", 0.1)]:
-    main.add(bell(hz(name), 7, 1), K, -20, pan=p, send=0.75)
-strum(main, ["D3", "A3", "D4", "F#4", "A4", "D5"], K, -9, bright=0.7, spread=0.035)
-main.add(pad(["D1", "D2", "A2", "D3", "F#3", "A3", "C#4", "E4", "F#4"], C["stop"] - K + 0.2, attack=0.2, release=1.6, bright=3000), K, -11, send=0.4)
-for at, name in [(K + 0.7, "A5"), (K + 1.45, "F#5"), (K + 2.1, "E5")]:
-    main.add(felt_piano(hz(name), 4, 0.5), at, -10, send=0.5)
-# Stop scrolling. Tonight, let En choose.
-main.add(felt_piano(hz("D3"), 5, 0.55), C["stop"], -14, send=0.5)
-main.add(felt_piano(hz("A3"), 5, 0.45), C["stop"] + 0.03, -15, send=0.5)
-main.add(felt_piano(hz("F#4"), 5, 0.45), C["stop"] + 0.05, -14, send=0.6)
-main.add(pad(["G2", "D3", "B3", "E4"], C["end"] - C["stop"] + 0.3, attack=1.2, release=0.6, bright=1200), C["stop"], -28, send=0.5)
-main.add(felt_piano(hz("A4"), 4, 0.5), C["tonight"], -9, send=0.5)
-main.add(felt_piano(hz("D5"), 4, 0.5), C["tonight"] + 2 * BEAT, -9, send=0.5)
-main.add(swell(0.9, lo=300, hi=9000), C["end"] - 0.9, -18, send=0.3)
+    main.add(bell(hz(name), 8, 1), K, -20, pan=p, send=0.8)
+strum(main, ["D3", "A3", "D4", "F#4", "A4", "D5"], K, -9, bright=0.7, spread=0.04)
+main.add(pad(["D1", "D2", "A2", "D3", "F#3", "A3", "C#4", "E4", "F#4"], C["end"] - K + 0.2, attack=0.2, release=2.0, bright=3000), K, -11, send=0.45)
+for at, name in [(K + 1.0, "A5"), (K + 1.9, "F#5"), (K + 2.8, "E5")]:
+    piano(name, at, -11, 0.5, send=0.6)
+
 # The end card: home.
 E = C["end"]
-main.add(boom(4, f_hi=60, f_lo=32, vel=1), E, -9, send=0.3)
-main.add(pad(["D2", "A2", "E3", "F#3", "A3", "C#4", "E4"], DUR - E, attack=0.3, release=DUR - C["fade"], bright=2400), E, -12, send=0.45)
+main.add(boom(4, f_hi=60, f_lo=32, vel=1), E, -11, send=0.3)
+main.add(pad(["D2", "A2", "E3", "F#3", "A3", "C#4", "E4"], DUR - E, attack=0.4, release=DUR - C["fade"] + 0.5, bright=2400), E, -12, send=0.5)
 for name, v in [("D3", 0.55), ("A3", 0.5), ("E4", 0.45), ("F#4", 0.5)]:
-    main.add(felt_piano(hz(name), 6, v), E, -12 if name < "E" else -9, send=0.55)
-main.add(koto(hz("D5"), 5, 0.75, t60=3.2), E, -10, send=0.6)
-main.add(bell(hz("A5"), 7, 1), E, -21, send=0.7)
-main.add(koto(hz("A5"), 5, 0.5, bright=0.45, t60=3.2), E + 2 * BEAT, -15, send=0.7)
-main.add(felt_piano(hz("F#5"), 5, 0.45), E + 4 * BEAT, -12, send=0.6)
+    piano(name, E, -12 if name < "E" else -9, v, dur=6.5, send=0.6)
+main.add(koto(hz("D5"), 5, 0.75, t60=3.4), E, -10, send=0.65)
+main.add(bell(hz("A5"), 8, 1), E, -21, send=0.8)
+main.add(koto(hz("A5"), 5, 0.5, bright=0.45, t60=3.4), E + 2 * B, -15, send=0.75)
+piano("F#5", E + 4 * B, -12, 0.45, send=0.65)
 
 
 # ——— mixdown ———
@@ -585,13 +527,6 @@ print("reverb…", flush=True)
 hall = make_ir(3.8, 1.8)
 room = make_ir(1.8, 0.7, seed=9)
 a1 = render_bus(act1, room, -5)
-# The cut is a cut: act one stops dead, tail and all.
-cut = int(C["cut"] * SR)
-gate = np.ones(N)
-gate[cut:] = 0
-ramp = int(0.004 * SR)
-gate[cut - ramp:cut] = np.linspace(1, 0, ramp)
-a1 *= gate
 mix = render_bus(main, hall, -3) + a1
 
 # Gentle glue: a slow compressor on the sum, then a soft ceiling.
