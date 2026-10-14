@@ -1,0 +1,1458 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>En — Trailer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,300;1,400;1,500&family=Inter:wght@300;400;500&family=Noto+Serif+JP:wght@300;400;500&family=JetBrains+Mono:wght@300;400&display=block" rel="stylesheet">
+<style>
+/* The trailer for En. Every frame is a pure function of time (renderAt(t)),
+   so render.mjs can capture it frame by frame. Open with ?play to watch it
+   in real time, &t=33 to start somewhere, &tall for the 9:16 cut. */
+:root {
+  --ink: #0d0c0b;
+  --ink-2: #15130f;
+  --bone: #ebe6dc;
+  --bone-2: rgba(235, 230, 220, 0.78);
+  --bone-3: rgba(235, 230, 220, 0.55);
+  --bone-4: rgba(235, 230, 220, 0.32);
+  --bone-5: rgba(235, 230, 220, 0.16);
+  --hair: rgba(235, 230, 220, 0.10);
+  --hair-strong: rgba(235, 230, 220, 0.20);
+  --shu: #b8533f;
+  --serif: 'Cormorant Garamond', 'EB Garamond', Georgia, serif;
+  --sans: 'Inter', system-ui, sans-serif;
+  --jp: 'Noto Serif JP', serif;
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #000; overflow: hidden; }
+body { -webkit-font-smoothing: antialiased; text-rendering: geometricPrecision; }
+
+#stage {
+  position: relative;
+  overflow: hidden;
+  background: var(--ink);
+  color: var(--bone);
+  font-family: var(--serif);
+  font-weight: 300;
+  transform-origin: 0 0;
+}
+.layer, .scene { position: absolute; inset: 0; }
+.scene { display: none; z-index: 4; }
+.scene.front { z-index: 6; }
+#thread { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
+#haze { z-index: 1; }
+#flare { z-index: 7; pointer-events: none; }
+#vignette {
+  z-index: 8;
+  background: radial-gradient(ellipse 75% 70% at 50% 50%, rgba(0,0,0,0) 55%, rgba(0,0,0,0.42) 100%);
+}
+.cam { position: absolute; inset: 0; transform-origin: 50% 50%; }
+.abs { position: absolute; }
+.center-x { left: 0; right: 0; text-align: center; }
+
+/* Type, at trailer scale: En's own styles, about one and a half times up. */
+.cap {
+  font-family: var(--sans);
+  font-size: 16px;
+  font-weight: 400;
+  letter-spacing: 0.34em;
+  text-transform: uppercase;
+  color: rgba(235, 230, 220, 0.64);
+  font-feature-settings: 'tnum';
+}
+.cap.shu { color: var(--shu); }
+.display { font-family: var(--serif); font-weight: 300; letter-spacing: -0.01em; line-height: 1.04; margin: 0; }
+.it { font-style: italic; }
+.dim { color: var(--bone-2); }
+.w { display: inline-block; white-space: pre; will-change: transform, opacity, filter; }
+.hairline { height: 1px; background: var(--hair-strong); }
+.btn-link {
+  display: inline-block;
+  font-family: var(--sans);
+  font-size: 17px;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--bone);
+  padding: 0 0 18px;
+  border-bottom: 1px solid var(--bone);
+}
+
+/* 1 · the catalogue wall */
+#wall { position: absolute; left: -12%; right: -12%; top: -12%; bottom: -12%; }
+.row {
+  position: absolute;
+  left: 0;
+  white-space: nowrap;
+  font-family: var(--serif);
+  font-weight: 300;
+  color: var(--bone);
+  will-change: transform;
+}
+#wall-scrim {
+  background: radial-gradient(ellipse 46% 38% at 50% 50%, rgba(13,12,11,0.92) 0%, rgba(13,12,11,0.75) 45%, rgba(13,12,11,0) 100%);
+}
+#wall-l1 .display, #wall-l2 .display { font-size: 104px; }
+.tall #wall-l1 .display, .tall #wall-l2 .display { font-size: 86px; padding: 0 60px; }
+#q-text .display { font-size: 92px; }
+.tall #q-text .display { font-size: 82px; padding: 0 70px; }
+#clock { font-family: var(--sans); font-weight: 300; letter-spacing: 0.42em; font-feature-settings: 'tnum'; color: var(--bone-2); }
+
+/* 2 · the question, the seal */
+#dot { width: 12px; height: 12px; border-radius: 50%; background: var(--shu); box-shadow: 0 0 24px 4px rgba(184,83,63,0.55); }
+#seal { width: 300px; height: 300px; }
+#seal svg { position: absolute; inset: 0; overflow: visible; }
+#seal-kanji {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-family: var(--jp); font-weight: 400; font-size: 150px; color: var(--shu); line-height: 1;
+  padding-bottom: 8px;
+}
+.wordmark-en { font-family: var(--serif); font-style: italic; font-weight: 300; line-height: 1; position: relative; }
+.wordmark-en .seal-dot { position: absolute; width: 0.07em; height: 0.07em; border-radius: 50%; background: var(--shu); right: -0.16em; top: 0.18em; }
+
+/* 3 · reads your history */
+.chapter { display: flex; gap: 18px; align-items: center; }
+.chapter .num { color: var(--shu); }
+#list { overflow: hidden; -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 16%, #000 80%, transparent 100%); }
+#list-rows { position: absolute; left: 0; right: 0; top: 0; }
+.lrow {
+  position: absolute; left: 0; right: 0; height: 70px;
+  display: flex; align-items: center; justify-content: space-between;
+  border-bottom: 1px solid var(--hair);
+}
+.lrow .t { font-size: 34px; font-weight: 300; color: var(--bone-3); position: relative; padding-left: 34px; }
+.lrow .t .strike { position: absolute; left: 30px; top: 55%; height: 1px; background: var(--bone-3); width: 0; }
+.lrow .m { font-family: var(--sans); font-size: 14px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--bone-4); font-feature-settings: 'tnum'; }
+.lrow .pin { position: absolute; left: 4px; top: 50%; width: 9px; height: 9px; margin-top: -4px; border-radius: 50%; background: var(--shu); opacity: 0; box-shadow: 0 0 14px rgba(184,83,63,0.8); }
+
+/* 4 · tonight */
+.pill {
+  position: relative;
+  border: 1px solid var(--hair-strong);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(235,230,220,0.03), rgba(235,230,220,0) 70%);
+  height: 104px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 44px; font-weight: 300; color: var(--bone);
+}
+.pill .typed { white-space: pre; }
+.pill .caret { display: inline-block; width: 2px; height: 50px; background: var(--shu); margin-left: 3px; vertical-align: -9px; }
+.pill .hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-style: italic; color: var(--bone-4); }
+
+/* 5 · considering */
+#think-dot { width: 13px; height: 13px; border-radius: 50%; background: var(--shu); box-shadow: 0 0 22px 3px rgba(184,83,63,0.45); }
+.tline { font-size: 38px; font-style: italic; font-weight: 300; margin: 22px 0; }
+.tline .tx { position: relative; }
+.tline .el { position: absolute; left: 100%; }
+
+/* 6 · the reveal, the hanging scroll */
+.chrome { display: flex; justify-content: space-between; align-items: center; }
+.wm { display: inline-flex; align-items: baseline; gap: 14px; font-size: 30px; }
+.wm .k { font-family: var(--jp); font-size: 25px; color: var(--bone-3); font-weight: 300; }
+.wm .e { font-style: italic; letter-spacing: 0.04em; }
+.chrome-r { display: flex; gap: 34px; }
+.meta { font-family: var(--sans); font-size: 15px; letter-spacing: 0.24em; color: rgba(235, 230, 220, 0.62); font-weight: 300; }
+#scroll { display: grid; align-items: start; justify-content: center; }
+#vert {
+  writing-mode: vertical-rl;
+  font-family: var(--jp); font-weight: 300; color: var(--bone-3);
+  letter-spacing: 0.3em; line-height: 1.4;
+  border-right: 1px solid var(--hair-strong);
+  align-self: stretch;
+}
+#poster { position: relative; border: 1px solid var(--hair-strong); background: #12100d; overflow: hidden; }
+#poster canvas { display: block; }
+#pick-title { font-style: italic; font-weight: 300; line-height: 1.0; letter-spacing: -0.01em; margin: 0; }
+#reason { font-style: italic; font-weight: 300; color: var(--bone-2); line-height: 1.62; margin: 0; }
+#reason span { display: inline; }
+
+/* 8 · where it helps */
+.card-title { font-style: italic; font-weight: 300; line-height: 1; margin: 0; }
+.ghost { font-size: 26px; color: var(--bone-4); line-height: 1.6; font-style: italic; }
+.who { font-family: var(--sans); font-size: 15px; letter-spacing: 0.34em; text-transform: uppercase; color: var(--bone-2); margin-bottom: 18px; }
+.torn-t { font-size: 66px; position: relative; display: inline-block; }
+.torn-t .strike { position: absolute; left: -4px; top: 56%; height: 1.5px; background: var(--bone-3); width: 0; }
+.answers { display: flex; justify-content: center; gap: 56px; }
+.answers .a { font-family: var(--sans); font-size: 17px; letter-spacing: 0.24em; text-transform: uppercase; padding-bottom: 16px; border-bottom: 1px solid var(--bone-4); color: var(--bone-3); }
+.streak { display: flex; justify-content: center; gap: 16px; }
+.hd { width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid var(--bone-4); }
+.progress { height: 2px; background: var(--hair-strong); position: relative; }
+.progress .fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--shu); box-shadow: 0 0 12px rgba(184,83,63,0.7); }
+
+/* 9 · 縁 */
+#big-kanji { font-family: var(--jp); font-weight: 300; color: var(--bone); line-height: 1; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="layer" id="haze"></div>
+
+  <!-- 1 · 11:47 PM. The catalogue. -->
+  <section class="scene" id="s-wall">
+    <div class="cam" id="wall-cam"><div id="wall"></div></div>
+    <div class="layer" id="wall-scrim"></div>
+    <div class="abs" id="clock">11:47 PM</div>
+    <div class="abs center-x" id="wall-l1"><h1 class="display" data-split>Forty minutes of scrolling.</h1></div>
+    <div class="abs center-x" id="wall-l2">
+      <h1 class="display" data-split>A thousand shows.</h1>
+      <h1 class="display it dim" data-split>Nothing to watch.</h1>
+    </div>
+  </section>
+
+  <!-- 2 · What if someone simply chose? -->
+  <section class="scene" id="s-q">
+    <div class="abs center-x" id="q-text">
+      <h1 class="display" data-split>What if someone simply chose —</h1>
+      <h1 class="display it dim" data-split>and chose well?</h1>
+    </div>
+    <div class="abs" id="dot"></div>
+    <div class="abs" id="seal">
+      <svg viewBox="0 0 300 300">
+        <circle id="ring-o" cx="150" cy="150" r="146" fill="none" stroke="#b8533f" stroke-width="2.2"/>
+        <circle id="ring-i" cx="150" cy="150" r="128" fill="none" stroke="#b8533f" stroke-opacity="0.35" stroke-width="1"/>
+      </svg>
+      <div id="seal-kanji">縁</div>
+    </div>
+    <div class="abs center-x" id="q-word">
+      <div class="wordmark-en" id="q-en" style="display:inline-block">En<span class="seal-dot"></span></div>
+      <div class="cap" id="q-eyebrow" style="margin-top:34px">An anime sommelier</div>
+    </div>
+  </section>
+
+  <!-- 3 · It reads your history. -->
+  <section class="scene" id="s-reads">
+    <div class="cam" id="reads-cam">
+      <div class="abs" id="reads-copy">
+        <div class="cap chapter" id="reads-ch"><span class="num">01</span><span>Your history</span></div>
+        <h1 class="display" data-split id="reads-h">It reads your history.</h1>
+        <p class="display it" data-split id="reads-sub" style="color:var(--bone-3)">Every finish. Every drop. Every score.</p>
+      </div>
+      <div class="abs" id="list-wrap">
+        <div class="chrome" id="list-head" style="border-bottom:1px solid var(--hair-strong);padding-bottom:18px">
+          <span class="cap">Your list</span><span class="cap" id="count">0 titles</span>
+        </div>
+        <div class="abs" id="list"><div id="list-rows"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4 · How do you feel? -->
+  <section class="scene" id="s-mood">
+    <div class="cam" id="mood-cam">
+      <div class="abs center-x" id="mood-block">
+        <div class="cap chapter" style="justify-content:center" id="mood-ch"><span class="num">02</span><span>Tonight</span></div>
+        <h2 class="display" data-split id="mood-h">How do you feel?</h2>
+        <p class="display it" id="mood-sub" style="color:var(--bone-3)">A word, a sentence, or nothing at all.</p>
+        <div class="pill" id="pill"><span class="hint" id="pill-hint">something quiet</span><span class="typed" id="typed"></span><span class="caret" id="caret"></span></div>
+        <div id="consider-wrap"><span class="btn-link" id="consider">Let En consider</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5 · Considering. -->
+  <section class="scene" id="s-think">
+    <div class="cam" id="think-cam">
+      <div class="abs center-x" id="think-block">
+        <div class="cap chapter" style="justify-content:center" id="think-ch"><span class="num">03</span><span>The pick</span></div>
+        <div style="display:flex;justify-content:center"><div id="think-dot"></div></div>
+        <div id="tlines"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6 · The reveal. -->
+  <section class="scene" id="s-reveal">
+    <div class="cam" id="reveal-cam">
+      <div class="abs chrome" id="reveal-chrome">
+        <div class="wm"><span class="k">縁</span><span class="e">En</span></div>
+        <div class="chrome-r"><span class="meta">03 / 03</span><span class="meta" style="letter-spacing:0.28em">LOG</span></div>
+      </div>
+      <div class="abs" id="scroll">
+        <div id="vert">蟲師 ・ 二〇二六年十月十四日</div>
+        <div id="center-col" style="display:flex;flex-direction:column;align-items:center">
+          <div id="poster"><canvas id="poster-c"></canvas></div>
+          <p class="meta" id="pick-meta" style="margin-top:18px">2005 · 26 episodes · Slice of Life</p>
+        </div>
+        <div id="copy-col">
+          <div class="cap shu" id="pick-eyebrow">・ for you, tonight</div>
+          <h1 id="pick-title">Mushishi</h1>
+          <div class="hairline" id="pick-hair"></div>
+          <p id="reason"><span id="r1">You gave Odd Taxi a nine and dropped Tokyo Ghoul at episode three.</span> <span id="r2">Tonight wants rain, not blood.</span> <span id="r3">This is the quietest thing you haven’t seen.</span></p>
+          <div id="watch-wrap"><span class="btn-link" id="watch">Watch it tonight</span></div>
+        </div>
+      </div>
+      <div class="abs center-x meta" id="reveal-seal" style="font-family:var(--jp);letter-spacing:0.3em">縁</div>
+    </div>
+  </section>
+
+  <!-- 7 · One anime. -->
+  <section class="scene" id="s-one">
+    <div class="abs center-x" id="one-block">
+      <h1 class="display" data-split id="one-h">One anime.</h1>
+      <div class="cap" id="one-sub" style="letter-spacing:0.46em;color:var(--bone-3)">Not a list. Never a list.</div>
+    </div>
+  </section>
+
+  <!-- 8 · Where it helps. -->
+  <section class="scene" id="s-two">
+    <div class="abs center-x cardcap" id="two-cap"><div class="cap shu">For two</div><p class="display it" data-split>One pick, from both of your lists.</p></div>
+    <div class="abs" id="two-l"><div class="who">You</div><div class="ghost">Odd Taxi<br>Monster<br>Ping Pong</div></div>
+    <div class="abs" id="two-r" style="text-align:right"><div class="who">Sam</div><div class="ghost">Chainsaw Man<br>Jujutsu Kaisen<br>Mob Psycho 100</div></div>
+    <div class="abs center-x" id="two-pick"><div class="cap shu">・ for you and Sam</div><h1 class="card-title" id="two-title">Frieren</h1></div>
+  </section>
+
+  <section class="scene" id="s-torn">
+    <div class="abs center-x cardcap" id="torn-cap"><div class="cap shu">Torn between a few?</div><p class="display it" data-split>It settles it, and tells you why.</p></div>
+    <div class="abs center-x" id="torn-eyebrow"><div class="cap shu">・ over Dandadan, Blue Period</div></div>
+    <div class="abs" id="torn-row">
+      <span class="torn-t" id="tt0">Dandadan<span class="strike"></span></span>
+      <span class="torn-t" id="tt1">Pluto</span>
+      <span class="torn-t" id="tt2">Blue Period<span class="strike"></span></span>
+    </div>
+  </section>
+
+  <section class="scene" id="s-resume">
+    <div class="abs center-x cardcap" id="resume-cap"><div class="cap shu">Left one halfway?</div><p class="display it" data-split>It remembers where you stopped.</p></div>
+    <div class="abs center-x" id="resume-block">
+      <div class="cap shu">・ pick up where you left off</div>
+      <h1 class="card-title" id="resume-title">Haikyu!!</h1>
+      <div class="progress" id="resume-bar"><div class="fill" id="resume-fill"></div></div>
+      <div class="meta" id="resume-meta" style="margin-top:22px">you stopped at episode <span id="ep">14</span> of 25</div>
+    </div>
+  </section>
+
+  <section class="scene" id="s-learn">
+    <div class="abs center-x cardcap" id="learn-cap"><div class="cap shu">It learns</div><p class="display it" data-split>Every answer sharpens the next pick.</p></div>
+    <div class="abs center-x" id="learn-block">
+      <div class="answers" id="answers"><span class="a" id="a-good">It was good</span><span class="a">Meh</span><span class="a">I’ll pass on it</span></div>
+      <div class="streak" id="streak"></div>
+      <div class="meta" id="learn-meta">the last nine landed</div>
+    </div>
+  </section>
+
+  <!-- 9 · 縁. The end. -->
+  <section class="scene front" id="s-fin">
+    <div class="abs center-x" id="big-kanji-wrap"><div id="big-kanji">縁</div></div>
+    <div class="abs center-x" id="fin-lines">
+      <div class="cap" id="fin-cap" style="letter-spacing:0.5em">En · the unseen thread</div>
+      <p class="display it dim" data-split id="fin-l1">between you and the one</p>
+      <p class="display it dim" data-split id="fin-l2">you were meant to find.</p>
+    </div>
+  </section>
+
+  <section class="scene" id="s-stop">
+    <div class="abs center-x" id="stop-block">
+      <h1 class="display" data-split id="stop-1">Stop scrolling.</h1>
+      <h1 class="display it dim" data-split id="stop-2">Tonight, let En choose.</h1>
+    </div>
+  </section>
+
+  <section class="scene" id="s-end">
+    <div class="abs center-x" id="end-block">
+      <div id="end-mark" style="display:inline-flex;align-items:baseline">
+        <span id="end-k" style="font-family:var(--jp);font-weight:300;color:var(--bone-3)">縁</span>
+        <span class="wordmark-en" id="end-en">En<span class="seal-dot"></span></span>
+      </div>
+      <p class="display it dim" id="end-tag">One anime. Chosen for tonight.</p>
+      <div class="hairline" id="end-hair" style="margin:0 auto"></div>
+      <div id="end-url" style="font-family:var(--sans);font-weight:400;letter-spacing:0.3em;color:var(--bone)">en-anime.vercel.app</div>
+      <div class="cap" id="end-foot" style="color:var(--bone-4)">Free · Works with MyAnimeList &amp; AniList</div>
+    </div>
+  </section>
+
+  <canvas id="thread"></canvas>
+  <div class="layer" id="flare"></div>
+  <div class="layer" id="vignette"></div>
+</div>
+
+<svg width="0" height="0" style="position:absolute">
+  <filter id="mblur" x="-30%" y="-10%" width="160%" height="120%" color-interpolation-filters="sRGB">
+    <feGaussianBlur id="mblur-std" stdDeviation="0 0"/>
+  </filter>
+</svg>
+
+<!-- The cue sheet. score.py reads this too, so picture and music stay locked. -->
+<script id="cues" type="application/json">
+{
+  "duration": 66.6,
+  "beat": 0.7,
+  "clock": 0.6,
+  "wall": 1.4,
+  "line1": 2.7,
+  "line2": 5.3,
+  "line2b": 6.1,
+  "rush": 7.8,
+  "cut": 10.4,
+  "dot": 11.1,
+  "q1": 11.8,
+  "q2": 13.0,
+  "seal": 14.8,
+  "word": 15.8,
+  "reads": 17.6,
+  "readRows": 19.3,
+  "mood": 23.2,
+  "type": 24.4,
+  "typeText": "rain on a tuesday, something quiet",
+  "press": 27.4,
+  "think": 28.8,
+  "thinkLines": [29.1, 29.8, 30.5, 31.2],
+  "breath": 32.2,
+  "reveal": 33.0,
+  "reasons": [34.3, 35.4, 36.2],
+  "one": 38.6,
+  "never": 39.3,
+  "two": 41.4,
+  "torn": 44.2,
+  "resume": 47.0,
+  "learn": 49.8,
+  "finale": 52.6,
+  "kanji": 55.4,
+  "stop": 58.2,
+  "tonight": 59.6,
+  "end": 61.0,
+  "fade": 65.2
+}
+</script>
+
+<script>
+const C = JSON.parse(document.getElementById('cues').textContent);
+const params = new URLSearchParams(location.search);
+const TALL = params.has('tall');
+const W = TALL ? 1080 : 1920;
+const H = TALL ? 1920 : 1080;
+const stage = document.getElementById('stage');
+stage.style.width = W + 'px';
+stage.style.height = H + 'px';
+if (TALL) stage.classList.add('tall');
+const $ = (id) => document.getElementById(id);
+
+// ——— maths ———
+const clamp01 = (x) => Math.max(0, Math.min(1, x));
+const lerp = (a, b, k) => a + (b - a) * k;
+const seg = (t, a, b) => clamp01((t - a) / (b - a));
+const outCubic = (x) => 1 - Math.pow(1 - x, 3);
+const outQuint = (x) => 1 - Math.pow(1 - x, 5);
+const outExpo = (x) => (x >= 1 ? 1 : 1 - Math.pow(2, -10 * x));
+const inExpo = (x) => (x <= 0 ? 0 : Math.pow(2, 10 * x - 10));
+const inOutCubic = (x) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
+const inOutSine = (x) => -(Math.cos(Math.PI * x) - 1) / 2;
+const inCubic = (x) => x * x * x;
+function rng(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Opacity, blur and lift for something that arrives at tIn and leaves at tOut.
+function presence(t, tIn, tOut, din = 0.9, dout = 0.6) {
+  const a = outCubic(seg(t, tIn, tIn + din));
+  const b = tOut == null ? 0 : inCubic(seg(t, tOut, tOut + dout));
+  return { k: a * (1 - b), enter: a, exit: b };
+}
+function setP(el, t, tIn, tOut, o = {}) {
+  const { din = 0.9, dout = 0.6, rise = 16, blur = 10, scale = 0, x = 0 } = o;
+  const p = presence(t, tIn, tOut, din, dout);
+  el.style.opacity = p.k.toFixed(4);
+  const bl = blur * (1 - p.enter) + blur * 0.8 * p.exit;
+  el.style.filter = bl > 0.05 ? `blur(${bl.toFixed(2)}px)` : 'none';
+  const y = rise * (1 - p.enter) - rise * 0.4 * p.exit;
+  const s = 1 + scale * (1 - p.enter);
+  el.style.transform = `translate(${x}px, ${y.toFixed(2)}px) scale(${s.toFixed(4)})`;
+  return p;
+}
+// The app's ink bloom: scale .96 → 1, blur 4 → 0, over 1.6s.
+function bloom(el, t, tIn, tOut, o = {}) {
+  const { dur = 1.6, dout = 0.6, from = 0.96, blurPx = 6 } = o;
+  const e = outQuint(seg(t, tIn, tIn + dur));
+  const x = inCubic(seg(t, tOut ?? 1e9, (tOut ?? 1e9) + dout));
+  el.style.opacity = (e * (1 - x)).toFixed(4);
+  const bl = blurPx * (1 - e) + 8 * x;
+  el.style.filter = bl > 0.05 ? `blur(${bl.toFixed(2)}px)` : 'none';
+  el.style.transform = `scale(${lerp(from, 1, e).toFixed(4)})`;
+}
+
+// Split a line into words that arrive one after another.
+document.querySelectorAll('[data-split]').forEach((el) => {
+  const words = el.textContent.split(/(\s+)/);
+  el.textContent = '';
+  words.forEach((w) => {
+    if (!w) return;
+    if (/^\s+$/.test(w)) { el.appendChild(document.createTextNode(' ')); return; }
+    const s = document.createElement('span');
+    s.className = 'w';
+    s.textContent = w;
+    el.appendChild(s);
+  });
+});
+function words(el, t, tIn, tOut, o = {}) {
+  const { stagger = 0.085, dur = 1.0, rise = 18, blur = 9, dout = 0.55 } = o;
+  const spans = el.querySelectorAll('.w');
+  const x = inCubic(seg(t, tOut ?? 1e9, (tOut ?? 1e9) + dout));
+  spans.forEach((s, i) => {
+    const e = outCubic(seg(t, tIn + i * stagger, tIn + i * stagger + dur));
+    s.style.opacity = (e * (1 - x)).toFixed(4);
+    const bl = blur * (1 - e) + 8 * x;
+    s.style.filter = bl > 0.05 ? `blur(${bl.toFixed(2)}px)` : 'none';
+    s.style.transform = `translateY(${(rise * (1 - e) - 6 * x).toFixed(2)}px)`;
+  });
+}
+
+function place(el, css) { Object.assign(el.style, css); }
+function show(id, t, a, b) {
+  const on = t >= a && t < b;
+  $(id).style.display = on ? 'block' : 'none';
+  return on;
+}
+
+// ——— the thread ———
+const tc = $('thread');
+tc.width = W; tc.height = H;
+const tctx = tc.getContext('2d');
+function strokeThread(pts, p, o = {}) {
+  const { alpha = 1, width = 2, head = true, glow = 1, from = 0 } = o;
+  if (p <= 0 || alpha <= 0 || pts.length < 2) return null;
+  let total = 0;
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) {
+    total += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    cum.push(total);
+  }
+  const startLen = from * total;
+  const endLen = p * total;
+  const path = [];
+  for (let i = 0; i < pts.length; i++) {
+    if (cum[i] < startLen) continue;
+    if (cum[i] <= endLen) path.push(pts[i]);
+    else {
+      const k = (endLen - cum[i - 1]) / (cum[i] - cum[i - 1]);
+      path.push({ x: lerp(pts[i - 1].x, pts[i].x, k), y: lerp(pts[i - 1].y, pts[i].y, k) });
+      break;
+    }
+  }
+  if (path.length < 2) return null;
+  const draw = (lw, color, blur) => {
+    tctx.save();
+    tctx.lineCap = 'round';
+    tctx.lineJoin = 'round';
+    tctx.strokeStyle = color;
+    tctx.lineWidth = lw;
+    tctx.shadowColor = 'rgba(184,83,63,0.9)';
+    tctx.shadowBlur = blur;
+    tctx.beginPath();
+    tctx.moveTo(path[0].x, path[0].y);
+    for (let i = 1; i < path.length; i++) tctx.lineTo(path[i].x, path[i].y);
+    tctx.stroke();
+    tctx.restore();
+  };
+  draw(width * 5, `rgba(184,83,63,${0.10 * alpha * glow})`, 30 * glow);
+  draw(width, `rgba(196,92,70,${alpha})`, 10 * glow);
+  draw(Math.max(0.6, width * 0.35), `rgba(240,190,170,${0.55 * alpha})`, 0);
+  const hp = path[path.length - 1];
+  if (head && p < 0.999) {
+    tctx.save();
+    const g = tctx.createRadialGradient(hp.x, hp.y, 0, hp.x, hp.y, 26);
+    g.addColorStop(0, `rgba(255,214,196,${0.95 * alpha})`);
+    g.addColorStop(0.25, `rgba(214,110,84,${0.6 * alpha})`);
+    g.addColorStop(1, 'rgba(184,83,63,0)');
+    tctx.fillStyle = g;
+    tctx.fillRect(hp.x - 26, hp.y - 26, 52, 52);
+    tctx.restore();
+  }
+  return hp;
+}
+function bezierPts(p0, c0, c1, p1, n = 120) {
+  const out = [];
+  for (let i = 0; i <= n; i++) {
+    const u = i / n, v = 1 - u;
+    out.push({
+      x: v * v * v * p0.x + 3 * v * v * u * c0.x + 3 * v * u * u * c1.x + u * u * u * p1.x,
+      y: v * v * v * p0.y + 3 * v * v * u * c0.y + 3 * v * u * u * c1.y + u * u * u * p1.y
+    });
+  }
+  return out;
+}
+// A smooth path through points (Catmull-Rom).
+function through(points, n = 24) {
+  const out = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[Math.max(0, i - 1)], p1 = points[i], p2 = points[i + 1], p3 = points[Math.min(points.length - 1, i + 2)];
+    for (let j = 0; j < n; j++) {
+      const u = j / n, u2 = u * u, u3 = u2 * u;
+      out.push({
+        x: 0.5 * (2 * p1.x + (-p0.x + p2.x) * u + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * u2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * u3),
+        y: 0.5 * (2 * p1.y + (-p0.y + p2.y) * u + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * u2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * u3)
+      });
+    }
+  }
+  out.push(points[points.length - 1]);
+  return out;
+}
+
+// ——— haze and flare: light that answers the music's hits ———
+const haze = $('haze');
+const flare = $('flare');
+function lightAt(t) {
+  // [time, x, y, strength, decay]
+  const hits = [
+    [C.seal, 0.5, TALL ? 0.44 : 0.42, 1.0, 1.8],
+    [C.reveal, TALL ? 0.5 : 0.45, TALL ? 0.33 : 0.5, 0.8, 2.6],
+    [C.kanji, 0.5, TALL ? 0.42 : 0.42, 1.0, 2.2],
+    [C.end, 0.5, 0.42, 0.45, 2.4]
+  ];
+  let hz = '', fl = 0, fy = 0.5, best = 0;
+  const layers = [];
+  for (const [h, x, y, s, d] of hits) {
+    if (t < h - 0.05) continue;
+    const k = s * Math.exp(-(t - h) / d) * clamp01((t - h + 0.05) / 0.12);
+    if (k < 0.004) continue;
+    layers.push(`radial-gradient(ellipse ${TALL ? '70% 40%' : '45% 55%'} at ${x * 100}% ${y * 100}%, rgba(184,83,63,${(0.22 * k).toFixed(4)}) 0%, rgba(184,83,63,0) 70%)`);
+    const f = s * Math.exp(-(t - h) / 0.55) * clamp01((t - h + 0.03) / 0.06);
+    if (f > best) { best = f; fl = f; fy = y; }
+  }
+  haze.style.background = layers.length ? layers.join(',') : 'none';
+  if (fl > 0.004) {
+    flare.style.display = 'block';
+    flare.style.background =
+      `linear-gradient(180deg, rgba(0,0,0,0) calc(${fy * 100}% - 2px), rgba(255,200,180,${(0.55 * fl).toFixed(3)}) ${fy * 100}%, rgba(0,0,0,0) calc(${fy * 100}% + 2px)),` +
+      `radial-gradient(ellipse 60% 3% at 50% ${fy * 100}%, rgba(214,120,96,${(0.35 * fl).toFixed(3)}) 0%, rgba(184,83,63,0) 100%)`;
+    flare.style.webkitMaskImage = 'linear-gradient(90deg, transparent 0%, #000 30%, #000 70%, transparent 100%)';
+  } else flare.style.display = 'none';
+}
+
+// ——— 1 · the wall ———
+const TITLES = [
+  'Fullmetal Alchemist: Brotherhood', 'Steins;Gate', 'Cowboy Bebop', 'Attack on Titan', 'Hunter x Hunter', 'Spirited Away',
+  'Neon Genesis Evangelion', 'Code Geass', 'One Piece', 'Naruto', 'Bleach', 'Demon Slayer', 'Jujutsu Kaisen', 'Spy x Family',
+  'Bocchi the Rock!', 'Mob Psycho 100', 'One Punch Man', 'My Hero Academia', 'Haikyu!!', 'Your Name', 'A Silent Voice',
+  'Clannad', 'Toradora!', 'Re:Zero', 'Made in Abyss', 'Mushoku Tensei', 'Overlord', 'Sword Art Online', 'Tokyo Ghoul',
+  'Parasyte', 'Psycho-Pass', 'Death Parade', 'Erased', 'Dr. Stone', 'Fire Force', 'Black Clover', 'Blue Lock',
+  'Chainsaw Man', 'Kaguya-sama', 'Oshi no Ko', 'Horimiya', 'Golden Kamuy', 'Dorohedoro', 'Akira', 'Perfect Blue',
+  'Paprika', 'Princess Mononoke', 'Samurai Champloo', 'Trigun', 'Gurren Lagann', 'Kill la Kill', 'Bungo Stray Dogs',
+  'The Promised Neverland', 'Fruits Basket', 'Natsume’s Book of Friends', 'Anohana', 'Angel Beats!', 'Charlotte',
+  'Hellsing Ultimate', 'Berserk', 'Vinland Saga', 'Dandadan', 'Frieren', 'Solo Leveling', 'Kaiju No. 8', 'Pluto',
+  'Odd Taxi', 'Monster', 'Ping Pong', 'Banana Fish', 'Given', 'Violet Evergarden', 'K-On!', 'Nichijou', 'Lucky Star',
+  'Gintama', 'JoJo’s Bizarre Adventure', 'Dragon Ball Z', 'Sailor Moon', 'Cardcaptor Sakura', 'Ouran High School Host Club',
+  'Food Wars!', 'Assassination Classroom', 'Noragami', 'Seven Deadly Sins', 'The Rising of the Shield Hero', 'Konosuba',
+  'Log Horizon', 'No Game No Life', 'Tokyo Revengers', 'Blue Period', 'Cyberpunk: Edgerunners', 'Devilman Crybaby'
+];
+const wall = $('wall');
+const rows = [];
+(function buildWall() {
+  const r = rng(7);
+  const n = TALL ? 30 : 17;
+  const span = 1.24; // the wall is 124% of the stage
+  for (let i = 0; i < n; i++) {
+    const depth = r();
+    const size = lerp(17, 64, depth * depth);
+    const el = document.createElement('div');
+    el.className = 'row';
+    const pick = [];
+    for (let k = 0; k < 18; k++) pick.push(TITLES[Math.floor(r() * TITLES.length)]);
+    const unit = pick.join('    ·    ') + '    ·    ';
+    el.innerHTML = `<span>${unit}</span><span>${unit}</span><span>${unit}</span>`;
+    el.style.fontSize = size + 'px';
+    el.style.top = ((i + 0.5) / n) * 100 + '%';
+    el.style.marginTop = -size * 0.6 + 'px';
+    el.style.fontStyle = r() < 0.35 ? 'italic' : 'normal';
+    const op = lerp(0.07, 0.36, depth);
+    el.style.opacity = op;
+    const blur = Math.abs(depth - 0.55) * 5;
+    el.style.filter = blur > 0.3 ? `blur(${blur.toFixed(2)}px)` : 'none';
+    wall.appendChild(el);
+    rows.push({ el, depth, speed: lerp(16, 120, depth) * (r() < 0.5 ? -1 : 1), phase: r(), unitW: 0 });
+  }
+})();
+function measureWall() { rows.forEach((row) => { row.unitW = row.el.firstChild.getBoundingClientRect().width; }); }
+// Distance travelled, with the rush at the end of act one.
+const rushK = (t) => 1 + 46 * inExpo(seg(t, C.rush, C.cut));
+const rushTable = [];
+(function () { let s = 0; for (let i = 0; i <= C.cut * 600 + 10; i++) { rushTable.push(s); s += rushK(i / 600) / 600; } })();
+const travel = (t) => rushTable[Math.min(rushTable.length - 1, Math.max(0, Math.round(t * 600)))];
+
+function clockText(t) {
+  const start = 23 * 60 + 47;
+  let m = 0;
+  if (t > C.line1) m += Math.min(22, (t - C.line1) * (22 / (C.rush - C.line1)));
+  if (t > C.rush) m += 31 * inExpo(seg(t, C.rush, C.cut)) + (t - C.rush) * 2;
+  const total = Math.floor(start + m) % 1440;
+  const hh = Math.floor(total / 60), mm = total % 60;
+  const h12 = hh % 12 === 0 ? 12 : hh % 12;
+  return `${h12}:${String(mm).padStart(2, '0')} ${hh >= 12 ? 'PM' : 'AM'}`;
+}
+
+function sceneWall(t) {
+  if (!show('s-wall', t, 0, C.cut)) return;
+  const wk = outCubic(seg(t, C.wall, C.wall + 2.2));
+  const rush = seg(t, C.rush, C.cut);
+  wall.style.opacity = (wk * lerp(1, 1.6, rush)).toFixed(3);
+  const d = travel(t);
+  rows.forEach((row) => {
+    const x = -(((row.phase * row.unitW + d * row.speed) % row.unitW) + row.unitW) % row.unitW;
+    row.el.style.transform = `translateX(${(x - row.unitW * 0.5).toFixed(1)}px)`;
+  });
+  const blurX = Math.min(70, (rushK(t) - 1) * 2.2);
+  $('mblur-std').setAttribute('stdDeviation', `${blurX.toFixed(2)} 0`);
+  const bright = 1 + 1.6 * inCubic(rush);
+  wall.style.filter = (blurX > 0.2 ? 'url(#mblur) ' : '') + (bright > 1.01 ? `brightness(${bright.toFixed(3)})` : '') || 'none';
+  const cam = $('wall-cam');
+  const s = 1.06 - 0.04 * seg(t, 0, C.rush) + 0.10 * inCubic(rush);
+  cam.style.transform = `rotate(-4deg) scale(${s.toFixed(4)})`;
+  // The scrim keeps the words legible; it lifts during the rush.
+  $('wall-scrim').style.opacity = (wk * (1 - 0.7 * rush)).toFixed(3);
+
+  // The clock: centred at first, then up to the top as the wall arrives.
+  const clock = $('clock');
+  clock.textContent = clockText(t);
+  const up = inOutCubic(seg(t, 2.0, 2.9));
+  const cy = lerp(H / 2, TALL ? 210 : 120, up);
+  const size = lerp(30, 17, up);
+  const ck = outCubic(seg(t, C.clock, C.clock + 1.2));
+  clock.style.fontSize = size + 'px';
+  clock.style.opacity = ck * lerp(1, 0.8, up);
+  clock.style.filter = ck < 1 ? `blur(${(6 * (1 - ck)).toFixed(2)}px)` : 'none';
+  const cw = clock.getBoundingClientRect().width / (curScale || 1);
+  place(clock, { left: (W - cw) / 2 + 'px', top: cy - size * 0.6 + 'px' });
+
+  const l1 = $('wall-l1'), l2 = $('wall-l2');
+  place(l1, { top: H / 2 - (TALL ? 60 : 52) + 'px' });
+  place(l2, { top: H / 2 - (TALL ? 110 : 100) + 'px' });
+  words(l1.firstElementChild, t, C.line1, 4.9);
+  const [a, b] = l2.children;
+  words(a, t, C.line2, 7.5);
+  words(b, t, C.line2b, 7.5);
+}
+
+// ——— 2 · the question and the seal ———
+function sceneQ(t) {
+  if (!show('s-q', t, C.cut, C.reads)) return;
+  const q = $('q-text');
+  place(q, { top: H / 2 - (TALL ? 170 : 150) + 'px' });
+  const [a, b] = q.children;
+  words(a, t, C.q1, 14.05, { stagger: 0.11, dur: 1.2 });
+  words(b, t, C.q2, 14.05, { stagger: 0.13, dur: 1.2 });
+
+  // The dot: under the words, then to the centre to become the seal.
+  const dot = $('dot');
+  const dk = outExpo(seg(t, C.dot, C.dot + 0.5));
+  const move = inOutCubic(seg(t, 14.0, C.seal));
+  const sealY = TALL ? H * 0.44 : H * 0.42;
+  const dy = lerp(H / 2 + (TALL ? 150 : 130), sealY, move);
+  const breathe = 0.82 + 0.18 * Math.sin((t - C.dot) * 2.4);
+  const gone = seg(t, C.seal - 0.05, C.seal + 0.1);
+  const ds = dk * (1 + 0.6 * move) * (1 - gone);
+  dot.style.opacity = (dk * breathe * (1 - gone)).toFixed(3);
+  dot.style.transform = `scale(${ds.toFixed(3)})`;
+  place(dot, { left: W / 2 - 6 + 'px', top: dy - 6 + 'px' });
+
+  // The seal: the ring draws itself, the kanji blooms inside.
+  const seal = $('seal');
+  const up = inOutCubic(seg(t, C.word, C.word + 0.9));
+  const sScale = lerp(1, TALL ? 0.6 : 0.55, up);
+  const sy = lerp(sealY, H / 2 - (TALL ? 200 : 175), up);
+  place(seal, { left: W / 2 - 150 + 'px', top: sy - 150 + 'px' });
+  const out = inCubic(seg(t, 17.0, 17.5));
+  seal.style.opacity = (1 - out).toFixed(3);
+  seal.style.filter = out > 0 ? `blur(${(8 * out).toFixed(2)}px)` : 'none';
+  seal.style.transform = `scale(${sScale.toFixed(4)})`;
+  const ro = $('ring-o'), ri = $('ring-i');
+  const L = 2 * Math.PI * 146, Li = 2 * Math.PI * 128;
+  const rp = outQuint(seg(t, C.seal - 0.12, C.seal + 0.95));
+  ro.setAttribute('stroke-dasharray', `${L}`);
+  ro.setAttribute('stroke-dashoffset', `${(L * (1 - rp)).toFixed(2)}`);
+  ro.setAttribute('transform', 'rotate(-90 150 150)');
+  const rip = outQuint(seg(t, C.seal + 0.15, C.seal + 1.3));
+  ri.setAttribute('stroke-dasharray', `${Li}`);
+  ri.setAttribute('stroke-dashoffset', `${(-Li * (1 - rip)).toFixed(2)}`);
+  ri.setAttribute('transform', 'rotate(-90 150 150)');
+  bloom($('seal-kanji'), t, C.seal, null, { dur: 1.4, from: 0.9, blurPx: 10 });
+
+  // The wordmark.
+  const wd = $('q-word');
+  place(wd, { top: H / 2 - (TALL ? 70 : 62) + 'px' });
+  const en = $('q-en');
+  en.style.fontSize = (TALL ? 150 : 140) + 'px';
+  bloom(en, t, C.word + 0.25, 17.0, { dur: 1.4, from: 0.97, blurPx: 8, dout: 0.5 });
+  setP($('q-eyebrow'), t, C.word + 0.75, 17.0, { din: 1.0, dout: 0.5 });
+}
+
+// ——— 3 · reads your history ———
+const LIST = [
+  ['Odd Taxi', '9', 'love'],
+  ['March Comes in Like a Lion', '10', 'love'],
+  ['Tokyo Ghoul', 'dropped · ep 3', 'drop'],
+  ['Violet Evergarden', '9', 'love'],
+  ['Death Note', '8', ''],
+  ['Sword Art Online', 'dropped · ep 7', 'drop'],
+  ['Ping Pong the Animation', '10', 'love'],
+  ['Attack on Titan', '8', ''],
+  ['Monster', '9', 'love'],
+  ['Natsume’s Book of Friends', '10', 'love'],
+  ['Your Lie in April', '7', ''],
+  ['Vinland Saga', '9', 'love']
+];
+const listRows = $('list-rows');
+const ROW = 70;
+LIST.forEach(([title, meta, kind], i) => {
+  const el = document.createElement('div');
+  el.className = 'lrow';
+  el.style.top = i * ROW + 'px';
+  el.innerHTML = `<span class="t"><span class="pin"></span>${title}${kind === 'drop' ? '<span class="strike"></span>' : ''}</span><span class="m">${meta}</span>`;
+  listRows.appendChild(el);
+});
+const listGeom = TALL
+  ? { x: 110, y: 760, w: W - 220, h: 900 }
+  : { x: 1010, y: 200, w: 720, h: 780 };
+
+function sceneReads(t) {
+  if (!show('s-reads', t, C.reads, C.mood)) return;
+  const OUT = 22.75;
+  const cam = $('reads-cam');
+  const ex = inCubic(seg(t, OUT, OUT + 0.45));
+  cam.style.transform = `scale(${(1.0 + 0.025 * seg(t, C.reads, OUT + 0.5)).toFixed(4)})`;
+  cam.style.opacity = (1 - ex).toFixed(3);
+  cam.style.filter = ex > 0 ? `blur(${(10 * ex).toFixed(2)}px)` : 'none';
+
+  const copy = $('reads-copy');
+  if (TALL) place(copy, { left: '110px', right: '110px', top: '250px' });
+  else place(copy, { left: '190px', width: '720px', top: H / 2 - 150 + 'px' });
+  const h = $('reads-h');
+  h.style.fontSize = (TALL ? 92 : 96) + 'px';
+  h.style.margin = '30px 0 26px';
+  $('reads-sub').style.fontSize = (TALL ? 38 : 36) + 'px';
+  $('reads-sub').style.margin = 0;
+  setP($('reads-ch'), t, C.reads + 0.1, null, { din: 0.9 });
+  words(h, t, C.reads + 0.3, null, { stagger: 0.09 });
+  words($('reads-sub'), t, C.reads + 1.1, null, { stagger: 0.07 });
+
+  const wrap = $('list-wrap');
+  place(wrap, { left: listGeom.x + 'px', top: listGeom.y - 70 + 'px', width: listGeom.w + 'px', height: listGeom.h + 70 + 'px' });
+  setP(wrap, t, C.reads + 0.6, null, { din: 1.2, rise: 30 });
+  const list = $('list');
+  place(list, { left: 0, right: 0, top: '70px', height: listGeom.h + 'px' });
+  const count = Math.round(412 * outExpo(seg(t, C.reads + 0.8, C.reads + 2.6)));
+  $('count').textContent = `${count} titles`;
+
+  const scroll = -20 + 110 * inOutSine(seg(t, C.reads, C.mood));
+  listRows.style.transform = `translateY(${(-scroll).toFixed(2)}px)`;
+
+  // Read row by row: loves get a vermilion pin, drops get struck through.
+  const lovePts = [];
+  const rowsEls = listRows.children;
+  LIST.forEach(([, , kind], i) => {
+    const el = rowsEls[i];
+    const tr = C.readRows + i * 0.27;
+    const k = outCubic(seg(t, tr, tr + 0.5));
+    const tEl = el.querySelector('.t');
+    if (kind === 'love') {
+      el.querySelector('.pin').style.opacity = k.toFixed(3);
+      el.querySelector('.pin').style.transform = `scale(${lerp(2.2, 1, k).toFixed(3)})`;
+      tEl.style.color = `rgba(235,230,220,${lerp(0.55, 1, k).toFixed(3)})`;
+      const y = listGeom.y + i * ROW + ROW / 2 - scroll;
+      lovePts.push({ x: listGeom.x + 8.5, y, tr });
+    } else if (kind === 'drop') {
+      tEl.querySelector('.strike').style.width = `calc(${(k * 100).toFixed(1)}% - 30px)`;
+      tEl.style.color = `rgba(235,230,220,${lerp(0.55, 0.26, k).toFixed(3)})`;
+    } else {
+      tEl.style.color = `rgba(235,230,220,${lerp(0.55, 0.62, k).toFixed(3)})`;
+    }
+  });
+  // The thread joins the loves, in the order they're read.
+  if (lovePts.length) {
+    const pts = [{ x: listGeom.x - 70, y: lovePts[0].y - 70 }];
+    lovePts.forEach((p, i) => {
+      const swing = (i % 2 ? 1 : -1) * 46;
+      if (i > 0) pts.push({ x: p.x + swing - 30, y: (p.y + lovePts[i - 1].y) / 2 });
+      pts.push({ x: p.x, y: p.y });
+    });
+    const path = through(pts, 20);
+    // Progress follows the reading head.
+    const last = lovePts[lovePts.length - 1].tr;
+    const head = seg(t, C.readRows - 0.5, last + 0.15);
+    const fade = 1 - inCubic(seg(t, OUT, OUT + 0.45));
+    strokeThread(path, head, { alpha: fade, width: 1.8 });
+    // Only inside the list, fading at its edges like the rows do.
+    const top = listGeom.y, bot = listGeom.y + listGeom.h;
+    const m = tctx.createLinearGradient(0, top, 0, bot);
+    m.addColorStop(0, 'rgba(0,0,0,0)'); m.addColorStop(0.12, '#000'); m.addColorStop(0.84, '#000'); m.addColorStop(1, 'rgba(0,0,0,0)');
+    tctx.save();
+    tctx.globalCompositeOperation = 'destination-in';
+    tctx.fillStyle = m;
+    tctx.fillRect(0, 0, W, H);
+    tctx.restore();
+  }
+}
+
+// ——— 4 · how do you feel? ———
+function typingTimes(text, start) {
+  const ts = [];
+  let t = start;
+  for (let i = 0; i < text.length; i++) {
+    ts.push(t);
+    const c = text[i];
+    let d = 0.062 + 0.022 * Math.sin(i * 12.9898) * Math.sin(i * 4.1414);
+    if (c === ' ') d += 0.03;
+    if (c === '.' || c === ',') d += 0.32;
+    t += d;
+  }
+  return ts;
+}
+const TYPE_TIMES = typingTimes(C.typeText, C.type);
+function sceneMood(t) {
+  if (!show('s-mood', t, C.mood, C.think)) return;
+  const OUT = 28.05;
+  const cam = $('mood-cam');
+  const ex = inCubic(seg(t, OUT, OUT + 0.5));
+  cam.style.transform = `scale(${(1 + 0.035 * inOutSine(seg(t, C.mood, OUT + 0.5)) + 0.04 * ex).toFixed(4)})`;
+  cam.style.opacity = (1 - ex).toFixed(3);
+  cam.style.filter = ex > 0 ? `blur(${(10 * ex).toFixed(2)}px)` : 'none';
+
+  const block = $('mood-block');
+  const pw = TALL ? 900 : 960;
+  place(block, { top: (TALL ? H / 2 - 400 : H / 2 - 330) + 'px' });
+  setP($('mood-ch'), t, C.mood + 0.1, null);
+  const h = $('mood-h');
+  h.style.fontSize = (TALL ? 92 : 88) + 'px';
+  h.style.margin = '36px 0 22px';
+  words(h, t, C.mood + 0.25, null, { stagger: 0.1 });
+  const sub = $('mood-sub');
+  sub.style.fontSize = (TALL ? 32 : 30) + 'px';
+  sub.style.margin = `0 0 ${TALL ? 110 : 84}px`;
+  setP(sub, t, C.mood + 0.7, null);
+
+  const pill = $('pill');
+  place(pill, { width: pw + 'px', margin: '0 auto' });
+  if (TALL) pill.style.fontSize = '40px';
+  setP(pill, t, C.mood + 0.9, null, { rise: 24 });
+  const focus = outCubic(seg(t, C.type - 0.6, C.type));
+  pill.style.borderColor = `rgba(235,230,220,${lerp(0.2, 0.36, focus).toFixed(3)})`;
+  pill.style.boxShadow = `0 0 0 ${(6 * focus).toFixed(2)}px rgba(184,83,63,${(0.10 * focus).toFixed(3)}), 0 20px 70px -24px rgba(184,83,63,${(0.5 * focus).toFixed(3)})`;
+  let n = 0;
+  while (n < TYPE_TIMES.length && t >= TYPE_TIMES[n]) n++;
+  $('typed').textContent = C.typeText.slice(0, n);
+  $('pill-hint').style.opacity = n ? 0 : (1 - focus * 0.4).toFixed(3);
+  $('pill-hint').style.display = n ? 'none' : 'flex';
+  const typing = n > 0 && n < TYPE_TIMES.length && t - TYPE_TIMES[n - 1] < 0.5;
+  const blink = typing || ((t - C.type) % 1.0 + 1.0) % 1.0 < 0.55;
+  $('caret').style.opacity = focus > 0.5 && blink ? 1 : 0;
+  $('caret').style.display = n ? 'inline-block' : 'none';
+
+  const cw = $('consider-wrap');
+  cw.style.marginTop = (TALL ? 120 : 84) + 'px';
+  setP(cw, t, C.mood + 1.2, null);
+  const btn = $('consider');
+  const ready = n > 0 ? 1 : 0.4;
+  const press = seg(t, C.press - 0.35, C.press);
+  const release = seg(t, C.press, C.press + 0.3);
+  btn.style.opacity = (ready * (1 - 0.3 * press + 0.3 * release)).toFixed(3);
+  btn.style.letterSpacing = `${(0.24 + 0.04 * press).toFixed(3)}em`;
+  btn.style.color = press > 0 ? `rgb(${Math.round(lerp(235, 184, release))},${Math.round(lerp(230, 83, release))},${Math.round(lerp(220, 63, release))})` : 'var(--bone)';
+  btn.style.borderBottomColor = btn.style.color;
+}
+
+// ——— 5 · considering ———
+const THINK = ['Reading your history', '412 titles', 'Tonight sounds quiet, unhurried', 'Considering'];
+const tl = $('tlines');
+THINK.forEach((line) => { const d = document.createElement('div'); d.className = 'tline'; d.innerHTML = `<span class="tx">${line}<span class="el">…</span></span>`; tl.appendChild(d); });
+function sceneThink(t) {
+  if (!show('s-think', t, C.think, C.reveal)) return;
+  const cam = $('think-cam');
+  const ex = inCubic(seg(t, C.breath - 0.55, C.breath));
+  cam.style.transform = `scale(${(1 + 0.05 * inOutSine(seg(t, C.think, C.breath)) - 0.03 * ex).toFixed(4)})`;
+  cam.style.opacity = (1 - ex).toFixed(3);
+  cam.style.filter = ex > 0 ? `blur(${(12 * ex).toFixed(2)}px)` : 'none';
+  place($('think-block'), { top: H / 2 - (TALL ? 300 : 270) + 'px' });
+  setP($('think-ch'), t, C.think + 0.05, null);
+  $('think-ch').style.marginBottom = '64px';
+  const dot = $('think-dot');
+  const dk = outCubic(seg(t, C.think + 0.1, C.think + 0.6));
+  dot.style.opacity = (dk * (0.4 + 0.6 * (0.5 + 0.5 * Math.sin((t - C.think) * 2.1)))).toFixed(3);
+  dot.parentElement.style.marginBottom = '58px';
+  const lines = tl.children;
+  let phase = 0;
+  C.thinkLines.forEach((x) => { if (t >= x) phase++; });
+  C.thinkLines.forEach((x, i) => {
+    const el = lines[i];
+    if (TALL) el.style.fontSize = '42px';
+    const k = outCubic(seg(t, x, x + 0.7));
+    el.style.opacity = k.toFixed(3);
+    el.style.transform = `translateY(${(10 * (1 - k)).toFixed(2)}px)`;
+    el.style.filter = k < 1 ? `blur(${(5 * (1 - k)).toFixed(2)}px)` : 'none';
+    const current = i === phase - 1;
+    const after = seg(t, C.thinkLines[i + 1] ?? 1e9, (C.thinkLines[i + 1] ?? 1e9) + 1);
+    el.style.color = `rgba(235,230,220,${lerp(0.78, 0.32, i === phase - 1 ? 0 : after).toFixed(3)})`;
+    el.querySelector('.el').style.opacity = current ? 1 : 0;
+  });
+}
+
+// ——— 6 · the reveal, with an ink painting for a key visual ———
+const PW = TALL ? 520 : 400, PH = Math.round(PW * 340 / 240);
+const pc = $('poster-c');
+pc.width = PW * 2; pc.height = PH * 2;
+pc.style.width = PW + 'px'; pc.style.height = PH + 'px';
+const pctx = pc.getContext('2d');
+const ridgeR = rng(41);
+const NOISE = Array.from({ length: 512 }, () => ridgeR());
+function vnoise(x) {
+  const i = Math.floor(x), f = x - i;
+  const a = NOISE[((i % 512) + 512) % 512], b = NOISE[(((i + 1) % 512) + 512) % 512];
+  const u = (1 - Math.cos(f * Math.PI)) / 2;
+  return a * (1 - u) + b * u;
+}
+function fbm(x, oct = 5) { let s = 0, a = 0.5, f = 1; for (let i = 0; i < oct; i++) { s += a * vnoise(x * f + i * 37.1); a *= 0.5; f *= 2.03; } return s; }
+const RAIN = Array.from({ length: 170 }, () => ({ x: ridgeR(), y: ridgeR(), sp: 0.5 + ridgeR() * 0.6, len: 0.025 + ridgeR() * 0.05, a: 0.04 + ridgeR() * 0.09 }));
+function ridge(x) { return 1 - Math.abs(2 * vnoise(x) - 1); }
+// Sumi-e: peaks in ink that thin into mist below, far ranges pale, rain over all.
+const RANGES = [
+  { base: 0.50, amp: 0.30, freq: 1.6, seed: 3, ink: [138, 131, 120], a: 0.55, fade: 0.20 },
+  { base: 0.60, amp: 0.24, freq: 2.2, seed: 11, ink: [96, 90, 81], a: 0.78, fade: 0.17 },
+  { base: 0.71, amp: 0.20, freq: 2.9, seed: 23, ink: [58, 54, 48], a: 0.92, fade: 0.15 },
+  { base: 0.84, amp: 0.13, freq: 2.0, seed: 37, ink: [22, 20, 17], a: 1, fade: 0.5 }
+];
+const RIDGE_Y = RANGES.map((r) => {
+  const ys = [];
+  for (let i = 0; i <= 200; i++) {
+    const x = i / 200;
+    const shape = 0.55 * fbm(x * r.freq + r.seed, 5) + 0.45 * Math.pow(ridge(x * r.freq * 1.7 + r.seed * 1.3), 1.6);
+    const tilt = r.seed === 37 ? 0.35 * (1 - x) : 0;
+    ys.push(r.base - r.amp * (shape * 1.25 - 0.25 + tilt));
+  }
+  return ys;
+});
+function drawPoster(t) {
+  const w = pc.width, h = pc.height, c = pctx;
+  const bg = c.createLinearGradient(0, 0, 0, h);
+  bg.addColorStop(0, '#2a251f'); bg.addColorStop(0.45, '#1b1814'); bg.addColorStop(1, '#0e0c0a');
+  c.fillStyle = bg; c.fillRect(0, 0, w, h);
+  // The moon and its light.
+  const mx = w * 0.68, my = h * 0.17, mr = w * 0.075;
+  const mg = c.createRadialGradient(mx, my, mr * 0.6, mx, my, w * 0.7);
+  mg.addColorStop(0, 'rgba(240,228,206,0.20)'); mg.addColorStop(0.4, 'rgba(240,228,206,0.05)'); mg.addColorStop(1, 'rgba(240,228,206,0)');
+  c.fillStyle = mg; c.fillRect(0, 0, w, h);
+  const md = c.createRadialGradient(mx - mr * 0.3, my - mr * 0.3, 0, mx, my, mr);
+  md.addColorStop(0, 'rgba(246,238,222,0.95)'); md.addColorStop(1, 'rgba(226,214,192,0.88)');
+  c.fillStyle = md;
+  c.beginPath(); c.arc(mx, my, mr, 0, Math.PI * 2); c.fill();
+  // One wisp of cloud drifting across it.
+  const cx = w * (0.25 + ((t * 0.018) % 1.2));
+  const cg = c.createRadialGradient(cx, my + mr * 0.25, 0, cx, my + mr * 0.25, w * 0.4);
+  cg.addColorStop(0, 'rgba(27,24,20,0.5)'); cg.addColorStop(1, 'rgba(27,24,20,0)');
+  c.save(); c.translate(0, my); c.scale(1, 0.08); c.translate(0, -my);
+  c.fillStyle = cg; c.fillRect(0, 0, w, h * 2); c.restore();
+  // Ranges, far to near, each fading into the mist beneath it.
+  RANGES.forEach((r, k) => {
+    const ys = RIDGE_Y[k];
+    const top = (r.base - r.amp) * h;
+    const g = c.createLinearGradient(0, top, 0, top + (r.amp + r.fade) * h);
+    const [R, G, B] = r.ink;
+    g.addColorStop(0, `rgba(${R},${G},${B},${r.a})`);
+    g.addColorStop(0.55, `rgba(${R},${G},${B},${r.a * 0.85})`);
+    g.addColorStop(1, `rgba(${R},${G},${B},${k === 3 ? r.a : 0})`);
+    c.fillStyle = g;
+    c.beginPath();
+    c.moveTo(0, h);
+    ys.forEach((y, i) => c.lineTo((i / 200) * w, y * h));
+    c.lineTo(w, h); c.closePath(); c.fill();
+    // A drifting veil of mist in front of all but the nearest range.
+    if (k < 3) {
+      const my2 = (r.base + r.fade * 0.4) * h;
+      const drift = Math.sin(t * 0.25 + k * 1.7) * w * 0.04;
+      const mist = c.createRadialGradient(w * 0.5 + drift, my2, 0, w * 0.5 + drift, my2, w * 0.75);
+      mist.addColorStop(0, `rgba(205,197,183,${0.10 - k * 0.02})`);
+      mist.addColorStop(1, 'rgba(205,197,183,0)');
+      c.save(); c.translate(0, my2); c.scale(1, 0.18); c.translate(0, -my2);
+      c.fillStyle = mist; c.fillRect(0, 0, w, h * 6); c.restore();
+    }
+  });
+  // Pines on the near slope.
+  const near = RIDGE_Y[3];
+  [[0.12, 0.09], [0.19, 0.12], [0.24, 0.075], [0.31, 0.1]].forEach(([px, ph]) => {
+    const gy = near[Math.round(px * 200)] * h;
+    const x = px * w, th = ph * h;
+    c.strokeStyle = 'rgba(16,14,12,1)'; c.lineWidth = w * 0.006;
+    c.beginPath(); c.moveTo(x, gy + 4); c.lineTo(x, gy - th); c.stroke();
+    c.fillStyle = 'rgba(16,14,12,1)';
+    for (let i = 0; i < 5; i++) {
+      const yy = gy - th * (0.25 + i * 0.17), ww = w * (0.045 - i * 0.007);
+      c.beginPath(); c.moveTo(x - ww, yy + th * 0.06); c.lineTo(x, yy - th * 0.1); c.lineTo(x + ww, yy + th * 0.06); c.closePath(); c.fill();
+    }
+  });
+  // Rain.
+  c.lineWidth = 1.3;
+  RAIN.forEach((d) => {
+    const y = ((d.y + t * d.sp * 0.55) % 1) * h * 1.1 - h * 0.05;
+    const x = (d.x * w + (y / h) * w * 0.08) % w;
+    c.strokeStyle = `rgba(228,220,206,${(d.a * 0.9).toFixed(3)})`;
+    c.beginPath(); c.moveTo(x, y); c.lineTo(x - d.len * w * 0.18, y - d.len * h); c.stroke();
+  });
+  // The seal.
+  const s = w * 0.1, sx = w * 0.86 - s, sy = h * 0.92 - s;
+  c.fillStyle = 'rgba(184,83,63,0.9)';
+  c.beginPath(); c.roundRect(sx, sy, s, s, s * 0.08); c.fill();
+  c.fillStyle = 'rgba(20,16,12,0.9)';
+  c.font = `400 ${Math.round(s * 0.62)}px "Noto Serif JP"`;
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText('蟲', sx + s / 2, sy + s / 2 + s * 0.03);
+  const v = c.createRadialGradient(w / 2, h * 0.42, w * 0.25, w / 2, h * 0.5, w * 0.95);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,0.45)');
+  c.fillStyle = v; c.fillRect(0, 0, w, h);
+}
+
+function sceneReveal(t) {
+  if (!show('s-reveal', t, C.reveal, C.two)) return;
+  const R = C.reveal;
+  const cam = $('reveal-cam');
+  const dimK = inOutCubic(seg(t, C.one - 0.4, C.one + 0.3));
+  const goneK = inCubic(seg(t, C.two - 0.9, C.two - 0.3));
+  cam.style.transform = `scale(${(1 + 0.045 * inOutSine(seg(t, R, C.one + 1))).toFixed(4)})`;
+  cam.style.opacity = (lerp(1, 0.13, dimK) * (1 - goneK)).toFixed(3);
+  const bl = 9 * dimK;
+  cam.style.filter = bl > 0.05 ? `blur(${bl.toFixed(2)}px)` : 'none';
+
+  const ch = $('reveal-chrome');
+  place(ch, { left: TALL ? '64px' : '96px', right: TALL ? '64px' : '96px', top: TALL ? '80px' : '64px' });
+  setP(ch, t, R + 1.6, null, { din: 1.4, rise: 0, blur: 4 });
+
+  const scroll = $('scroll');
+  const vert = $('vert');
+  if (TALL) {
+    place(scroll, { left: '64px', right: '64px', top: '220px', gridTemplateColumns: 'auto 1fr', columnGap: '44px', rowGap: '56px' });
+    place(vert, { gridRow: '1 / span 2', fontSize: '34px', paddingRight: '24px', paddingTop: '14px' });
+    place($('center-col'), { gridColumn: 2, justifySelf: 'center' });
+    place($('copy-col'), { gridColumn: 2, maxWidth: '760px' });
+  } else {
+    place(scroll, { left: 0, right: 0, top: H / 2 - 360 + 'px', gridTemplateColumns: `auto ${PW}px 560px`, columnGap: '92px' });
+    place(vert, { fontSize: '40px', paddingRight: '26px', paddingTop: '16px' });
+  }
+  bloom(scroll, t, R, null, { dur: 1.6 });
+  bloom(vert, t, R + 0.15, null, { dur: 1.6 });
+  bloom($('center-col'), t, R + 0.35, null, { dur: 1.8, from: 0.94, blurPx: 10 });
+  bloom($('copy-col'), t, R + 0.6, null, { dur: 1.6 });
+  drawPoster(t - R + 3);
+
+  const title = $('pick-title');
+  title.style.fontSize = (TALL ? 124 : 128) + 'px';
+  title.style.margin = TALL ? '24px 0 34px' : '30px 0 40px';
+  const eb = $('pick-eyebrow');
+  setP(eb, t, R + 0.7, null, { rise: 0, blur: 6 });
+  bloom(title, t, R + 0.8, null, { dur: 1.6, from: 0.96, blurPx: 10 });
+  const hair = $('pick-hair');
+  hair.style.width = 90 * outCubic(seg(t, R + 1.2, R + 2.0)) + 'px';
+  hair.style.marginBottom = '40px';
+  const reason = $('reason');
+  reason.style.fontSize = (TALL ? 36 : 31) + 'px';
+  C.reasons.forEach((x, i) => setP($('r' + (i + 1)), t, x, null, { din: 1.1, rise: 0, blur: 7 }));
+  $('r1').style.display = $('r2').style.display = $('r3').style.display = 'inline';
+  const ww = $('watch-wrap');
+  ww.style.marginTop = TALL ? '48px' : '52px';
+  setP(ww, t, C.reasons[2] + 0.5, null, { din: 1.0, rise: 10 });
+  $('pick-meta').style.fontSize = TALL ? '17px' : '15px';
+  setP($('pick-meta'), t, R + 1.3, null, { rise: 0, blur: 4 });
+  const rs = $('reveal-seal');
+  place(rs, { bottom: TALL ? '70px' : '54px', fontSize: '17px' });
+  setP(rs, t, R + 2.2, null, { rise: 0 });
+}
+
+// ——— 7 · One anime. ———
+function sceneOne(t) {
+  if (!show('s-one', t, C.one - 0.1, C.two)) return;
+  const b = $('one-block');
+  place(b, { top: H / 2 - (TALL ? 120 : 110) + 'px' });
+  const h = $('one-h');
+  h.style.fontSize = (TALL ? 150 : 160) + 'px';
+  h.style.marginBottom = '40px';
+  words(h, t, C.one, C.two - 0.75, { stagger: 0.14, dur: 1.1, rise: 24 });
+  setP($('one-sub'), t, C.never, C.two - 0.75, { din: 1.2, rise: 0, blur: 6 });
+  $('one-sub').style.fontSize = (TALL ? 19 : 20) + 'px';
+}
+
+// ——— 8 · where it helps ———
+function cardFrame(id, t, a, b) {
+  if (!show(id, t, a - 0.05, b + 0.05)) return null;
+  const s = $(id);
+  const ex = inCubic(seg(t, b - 0.42, b));
+  const en = outCubic(seg(t, a, a + 0.5));
+  s.style.opacity = (en * (1 - ex)).toFixed(3);
+  s.style.filter = ex > 0 || en < 1 ? `blur(${(8 * ex + 6 * (1 - en)).toFixed(2)}px)` : 'none';
+  s.style.transform = `scale(${(1 + 0.03 * seg(t, a, b)).toFixed(4)})`;
+  return s;
+}
+function cardCap(id, t, a) {
+  const cap = $(id);
+  place(cap, { top: (TALL ? 300 : 150) + 'px' });
+  const [eyebrow, line] = cap.children;
+  line.style.fontSize = (TALL ? 52 : 50) + 'px';
+  line.style.margin = '22px auto 0';
+  if (TALL) line.style.maxWidth = '860px';
+  setP(eyebrow, t, a + 0.05, null, { rise: 0, blur: 5, din: 0.6 });
+  words(line, t, a + 0.15, null, { stagger: 0.06, dur: 0.8 });
+}
+function sceneTwo(t) {
+  const a = C.two, b = C.torn;
+  if (!cardFrame('s-two', t, a, b)) return;
+  cardCap('two-cap', t, a);
+  const cy = TALL ? H * 0.56 : H * 0.6;
+  const L = $('two-l'), R = $('two-r');
+  const side = TALL ? 90 : 230;
+  place(L, { left: side + 'px', top: cy - (TALL ? 380 : 90) + 'px' });
+  place(R, { right: side + 'px', top: cy - (TALL ? 380 : 90) + 'px' });
+  setP(L, t, a + 0.35, null, { rise: 0, x: -10 });
+  setP(R, t, a + 0.45, null, { rise: 0, x: 10 });
+  const pick = $('two-pick');
+  place(pick, { top: cy - (TALL ? -40 : 30) + 'px' });
+  const title = $('two-title');
+  title.style.fontSize = (TALL ? 140 : 132) + 'px';
+  title.style.marginTop = '20px';
+  bloom(pick, t, a + 1.45, null, { dur: 1.2, from: 0.95, blurPx: 10 });
+  // Two threads, one from each list, meeting at the pick.
+  const meetY = cy + (TALL ? 150 : 120);
+  const leftStart = TALL ? { x: side + 60, y: cy - 220 } : { x: side + 150, y: cy + 80 };
+  const rightStart = TALL ? { x: W - side - 60, y: cy - 220 } : { x: W - side - 150, y: cy + 80 };
+  const meet = { x: W / 2, y: meetY + (TALL ? 80 : 70) };
+  const p = inOutCubic(seg(t, a + 0.55, a + 1.55));
+  const fade = 1 - inCubic(seg(t, b - 0.42, b));
+  const reach = TALL ? 300 : 420;
+  strokeThread(bezierPts(leftStart, { x: leftStart.x + (TALL ? -60 : 40), y: meet.y + 40 }, { x: meet.x - reach, y: meet.y }, meet), p, { alpha: fade, head: p < 0.98 });
+  strokeThread(bezierPts(rightStart, { x: rightStart.x + (TALL ? 60 : -40), y: meet.y + 40 }, { x: meet.x + reach, y: meet.y }, meet), p, { alpha: fade, head: p < 0.98 });
+}
+function sceneTorn(t) {
+  const a = C.torn, b = C.resume;
+  if (!cardFrame('s-torn', t, a, b)) return;
+  cardCap('torn-cap', t, a);
+  const row = $('torn-row');
+  const cy = TALL ? H * 0.58 : H * 0.6;
+  if (TALL) place(row, { left: 0, right: 0, top: cy - 230 + 'px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '40px' });
+  else place(row, { left: 0, right: 0, top: cy - 40 + 'px', display: 'flex', justifyContent: 'center', gap: '110px', alignItems: 'baseline' });
+  const decide = a + 1.2;
+  [0, 1, 2].forEach((i) => {
+    const el = $('tt' + i);
+    el.style.fontSize = (TALL ? 84 : 72) + 'px';
+    setP(el, t, a + 0.3 + i * 0.12, null, { rise: 14 });
+    const k = outCubic(seg(t, decide + (i === 2 ? 0.12 : 0), decide + 0.5 + (i === 2 ? 0.12 : 0)));
+    if (i === 1) {
+      const win = outCubic(seg(t, decide + 0.15, decide + 0.9));
+      el.style.color = 'var(--bone)';
+      el.style.fontStyle = win > 0.5 ? 'italic' : 'normal';
+      el.style.transform += ` scale(${lerp(1, 1.5, win).toFixed(4)})`;
+    } else {
+      el.querySelector('.strike').style.width = `calc(${(k * 100).toFixed(1)}% + 8px)`;
+      el.style.color = `rgba(235,230,220,${lerp(0.78, 0.26, k).toFixed(3)})`;
+    }
+  });
+  const eb = $('torn-eyebrow');
+  place(eb, { top: (TALL ? cy + 300 : cy + 110) + 'px' });
+  setP(eb, t, decide + 0.35, null, { rise: 8 });
+}
+function sceneResume(t) {
+  const a = C.resume, b = C.learn;
+  if (!cardFrame('s-resume', t, a, b)) return;
+  cardCap('resume-cap', t, a);
+  const blk = $('resume-block');
+  const cy = TALL ? H * 0.52 : H * 0.48;
+  place(blk, { top: cy + 'px' });
+  setP(blk.firstElementChild, t, a + 0.35, null, { rise: 0 });
+  const title = $('resume-title');
+  title.style.fontSize = (TALL ? 150 : 140) + 'px';
+  title.style.margin = '22px 0 46px';
+  bloom(title, t, a + 0.45, null, { dur: 1.2 });
+  const bar = $('resume-bar');
+  bar.style.width = (TALL ? 760 : 640) + 'px';
+  bar.style.margin = '0 auto';
+  setP(bar, t, a + 0.7, null, { rise: 0, blur: 0 });
+  const k = inOutCubic(seg(t, a + 0.9, a + 1.9));
+  $('resume-fill').style.width = (k * 14 / 25 * 100).toFixed(2) + '%';
+  $('ep').textContent = Math.max(1, Math.round(14 * k));
+  setP($('resume-meta'), t, a + 0.9, null, { rise: 0 });
+  $('resume-meta').style.fontSize = '17px';
+}
+const STREAK = [1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+const streakEl = $('streak');
+STREAK.forEach(() => { const d = document.createElement('span'); d.className = 'hd'; streakEl.appendChild(d); });
+function sceneLearn(t) {
+  const a = C.learn, b = C.finale;
+  if (!cardFrame('s-learn', t, a, b)) return;
+  cardCap('learn-cap', t, a);
+  const blk = $('learn-block');
+  const cy = TALL ? H * 0.52 : H * 0.5;
+  place(blk, { top: cy + 'px' });
+  const ans = $('answers');
+  if (TALL) { ans.style.gap = '34px'; }
+  setP(ans, t, a + 0.3, null, { rise: 10 });
+  const good = $('a-good');
+  const g = outCubic(seg(t, a + 0.8, a + 1.1));
+  good.style.color = `rgb(${Math.round(lerp(150, 184, g))},${Math.round(lerp(146, 83, g))},${Math.round(lerp(140, 63, g))})`;
+  good.style.borderBottomColor = good.style.color;
+  if (g === 0) { good.style.color = ''; good.style.borderBottomColor = ''; }
+  streakEl.style.marginTop = '76px';
+  STREAK.forEach((hit, i) => {
+    const d = streakEl.children[i];
+    const tIn = a + 0.95 + i * 0.075;
+    const k = outCubic(seg(t, tIn, tIn + 0.35));
+    d.style.opacity = k.toFixed(3);
+    d.style.transform = `scale(${lerp(0.4, 1, k).toFixed(3)})`;
+    if (hit) {
+      d.style.background = `rgba(184,83,63,${k.toFixed(3)})`;
+      d.style.borderColor = `rgba(184,83,63,${k.toFixed(3)})`;
+      d.style.boxShadow = `0 0 14px rgba(184,83,63,${(0.6 * k).toFixed(3)})`;
+    }
+  });
+  const meta = $('learn-meta');
+  meta.style.marginTop = '30px';
+  meta.style.fontSize = '17px';
+  setP(meta, t, a + 1.7, null, { rise: 0 });
+}
+
+// ——— 9 · 縁 ———
+function sceneFinale(t) {
+  // The thread crosses the dark and settles straight.
+  const F = C.finale, K = C.kanji;
+  const cy = TALL ? H * 0.42 : H * 0.42;
+  if (t >= F && t < C.stop) {
+    const p = inOutSine(seg(t, F + 0.1, K + 0.1));
+    const amp = lerp(120, 0, inOutCubic(seg(t, F + 0.4, K + 0.3)));
+    const pts = [];
+    for (let i = 0; i <= 220; i++) {
+      const u = i / 220;
+      const x = lerp(-40, W + 40, u);
+      const y = cy + amp * Math.sin(u * Math.PI * 2.6 + (t - F) * 1.6) * Math.sin(u * Math.PI);
+      pts.push({ x, y });
+    }
+    const fade = 1 - inCubic(seg(t, 57.5, 58.05));
+    strokeThread(pts, p, { alpha: fade, width: 2.2, glow: 1.2 });
+  }
+  if (!show('s-fin', t, K - 0.1, C.stop)) return;
+  const wrap = $('big-kanji-wrap');
+  const size = TALL ? 420 : 380;
+  $('big-kanji').style.fontSize = size + 'px';
+  place(wrap, { top: cy - size * 0.55 + 'px' });
+  bloom(wrap, t, K, 57.5, { dur: 1.8, from: 0.9, blurPx: 16, dout: 0.55 });
+  const lines = $('fin-lines');
+  place(lines, { top: cy + size * 0.55 + (TALL ? 60 : 30) + 'px' });
+  setP($('fin-cap'), t, K + 0.7, 57.5, { rise: 0, blur: 5, dout: 0.55 });
+  $('fin-cap').style.fontSize = (TALL ? 17 : 16) + 'px';
+  $('fin-cap').style.marginBottom = '24px';
+  [$('fin-l1'), $('fin-l2')].forEach((el, i) => {
+    el.style.fontSize = (TALL ? 50 : 46) + 'px';
+    el.style.margin = '6px 0';
+    words(el, t, K + 1.0 + i * 0.75, 57.5, { stagger: 0.08 });
+  });
+}
+function sceneStop(t) {
+  if (!show('s-stop', t, C.stop - 0.1, C.end)) return;
+  place($('stop-block'), { top: H / 2 - (TALL ? 170 : 130) + 'px' });
+  const a = $('stop-1'), b = $('stop-2');
+  a.style.fontSize = (TALL ? 130 : 130) + 'px';
+  b.style.fontSize = (TALL ? 76 : 80) + 'px';
+  b.style.marginTop = '26px';
+  words(a, t, C.stop, C.end - 0.55, { stagger: 0.12, dur: 1.0, rise: 20 });
+  words(b, t, C.tonight, C.end - 0.55, { stagger: 0.1, dur: 1.0 });
+}
+function sceneEnd(t) {
+  if (!show('s-end', t, C.end - 0.1, 1e9)) return;
+  const blk = $('end-block');
+  place(blk, { top: H / 2 - (TALL ? 260 : 230) + 'px' });
+  const k = $('end-k'), en = $('end-en');
+  k.style.fontSize = (TALL ? 150 : 140) + 'px';
+  en.style.fontSize = (TALL ? 210 : 196) + 'px';
+  en.style.marginLeft = '40px';
+  bloom($('end-mark'), t, C.end, null, { dur: 2.0, from: 0.94, blurPx: 14 });
+  const tag = $('end-tag');
+  tag.style.fontSize = (TALL ? 48 : 46) + 'px';
+  tag.style.margin = '34px 0 46px';
+  setP(tag, t, C.end + 0.7, null, { din: 1.2 });
+  const hair = $('end-hair');
+  hair.style.width = 70 * outCubic(seg(t, C.end + 1.2, C.end + 2.0)) + 'px';
+  const url = $('end-url');
+  url.style.fontSize = (TALL ? 28 : 26) + 'px';
+  url.style.marginTop = '46px';
+  setP(url, t, C.end + 1.4, null, { din: 1.2, rise: 0, blur: 6 });
+  const foot = $('end-foot');
+  foot.style.fontSize = (TALL ? 15 : 14) + 'px';
+  foot.style.marginTop = '26px';
+  setP(foot, t, C.end + 1.9, null, { din: 1.2, rise: 0 });
+  // Fade to black.
+  const f = inOutSine(seg(t, C.fade, C.duration - 0.3));
+  blk.parentElement.style.opacity = (1 - f).toFixed(3);
+}
+
+// ——— frame ———
+let curScale = 1;
+function renderAt(t) {
+  tctx.clearRect(0, 0, W, H);
+  sceneWall(t);
+  sceneQ(t);
+  sceneReads(t);
+  sceneMood(t);
+  sceneThink(t);
+  sceneReveal(t);
+  sceneOne(t);
+  sceneTwo(t);
+  sceneTorn(t);
+  sceneResume(t);
+  sceneLearn(t);
+  sceneFinale(t);
+  sceneStop(t);
+  sceneEnd(t);
+  lightAt(t);
+}
+
+// Fit the stage to the window when watching in a browser.
+function fit() {
+  if (params.has('render')) return;
+  curScale = Math.min(innerWidth / W, innerHeight / H);
+  stage.style.transform = `translate(${(innerWidth - W * curScale) / 2}px, ${(innerHeight - H * curScale) / 2}px) scale(${curScale})`;
+}
+addEventListener('resize', fit);
+fit();
+
+window.ready = (async () => {
+  await document.fonts.ready;
+  const probes = [
+    ['300 40px "Cormorant Garamond"', 'Aa'], ['italic 300 40px "Cormorant Garamond"', 'Aa'],
+    ['300 20px "Inter"', 'Aa'], ['400 20px "Inter"', 'Aa'],
+    ['300 40px "Noto Serif JP"', '縁蟲師〇一二三四五六七八九十年月日・'], ['400 40px "Noto Serif JP"', '縁蟲']
+  ];
+  await Promise.all(probes.map(([f, s]) => document.fonts.load(f, s)));
+  await document.fonts.ready;
+  measureWall();
+  // Show every scene once so any font slice it needs is fetched before the
+  // first captured frame (Noto Serif JP arrives in many small pieces).
+  for (let t = 0; t < C.duration; t += 0.25) { renderAt(t); void stage.offsetHeight; }
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  await document.fonts.ready;
+  await new Promise((r) => setTimeout(r, 300));
+  await document.fonts.ready;
+  renderAt(0);
+  return true;
+})();
+window.renderAt = renderAt;
+window.CUES = C;
+
+if (params.has('play') || params.has('t')) {
+  window.ready.then(() => {
+    const t0 = parseFloat(params.get('t') || '0');
+    if (!params.has('play')) { renderAt(t0); return; }
+    const audio = new Audio(params.get('audio') || 'out/score.wav');
+    audio.currentTime = t0;
+    let start = null;
+    const go = () => {
+      audio.play().catch(() => {});
+      start = performance.now() - t0 * 1000;
+      const tick = () => {
+        const t = (performance.now() - start) / 1000;
+        renderAt(Math.min(t, C.duration));
+        if (t < C.duration) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    };
+    addEventListener('click', go, { once: true });
+    if (params.has('autoplay')) go();
+  });
+}
+</script>
+</body>
+</html>
