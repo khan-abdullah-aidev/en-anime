@@ -505,20 +505,16 @@ main.add(taiko(1, 1.25), K, -6, send=0.4)
 for name, p in [("D5", -0.3), ("F#5", 0.3), ("A5", -0.1), ("D6", 0.1)]:
     main.add(bell(hz(name), 8, 1), K, -20, pan=p, send=0.8)
 strum(main, ["D3", "A3", "D4", "F#4", "A4", "D5"], K, -9, bright=0.7, spread=0.04)
-main.add(pad(["D1", "D2", "A2", "D3", "F#3", "A3", "C#4", "E4", "F#4"], C["end"] - K + 0.2, attack=0.2, release=2.0, bright=3000), K, -11, send=0.45)
+main.add(pad(["D1", "D2", "A2", "D3", "F#3", "A3", "C#4", "E4", "F#4"], DUR - K, attack=0.2, release=DUR - C["fade"] + 1.0, bright=3000), K, -11, send=0.45)
 for at, name in [(K + 1.0, "A5"), (K + 1.9, "F#5"), (K + 2.8, "E5")]:
     piano(name, at, -11, 0.5, send=0.6)
 
-# The end card: home.
-E = C["end"]
-main.add(boom(4, f_hi=60, f_lo=32, vel=1), E, -11, send=0.3)
-main.add(pad(["D2", "A2", "E3", "F#3", "A3", "C#4", "E4"], DUR - E, attack=0.4, release=DUR - C["fade"] + 0.5, bright=2400), E, -12, send=0.5)
-for name, v in [("D3", 0.55), ("A3", 0.5), ("E4", 0.45), ("F#4", 0.5)]:
-    piano(name, E, -12 if name < "E" else -9, v, dur=6.5, send=0.6)
-main.add(koto(hz("D5"), 5, 0.75, t60=3.4), E, -10, send=0.65)
-main.add(bell(hz("A5"), 8, 1), E, -21, send=0.8)
-main.add(koto(hz("A5"), 5, 0.5, bright=0.45, t60=3.4), E + 2 * B, -15, send=0.75)
-piano("F#5", E + 4 * B, -12, 0.45, send=0.65)
+# Where to find it: the last notes, under the address.
+U = C["url"]
+main.add(koto(hz("D5"), 5, 0.7, t60=3.4), U, -12, send=0.65)
+main.add(bell(hz("A5"), 7, 1), U, -23, send=0.8)
+piano("F#4", U + 0.02, -14, 0.45, send=0.6)
+main.add(koto(hz("A5"), 5, 0.45, bright=0.45, t60=3.4), U + 2 * B, -17, send=0.75)
 
 
 # ——— mixdown ———
@@ -541,8 +537,12 @@ air = lambda f: 1 + 0.9 * (1 / (1 + (5500 / np.maximum(f, 1)) ** 2)) - 0.2 * np.
 mix = np.stack([fft_filter(mix[0], air), fft_filter(mix[1], air)])
 mix /= np.abs(mix).max()
 mix = np.tanh(mix * 1.6) / np.tanh(1.6)
-fade = int(0.25 * SR)
-mix[:, -fade:] *= np.linspace(1, 0, fade)
+# Fade with the picture.
+f0, f1 = int(C["fade"] * SR), min(N, int(DUR * SR))
+fade = np.ones(N)
+fade[f0:f1] = 0.5 + 0.5 * np.cos(np.pi * np.linspace(0, 1, f1 - f0))
+fade[f1:] = 0
+mix *= fade
 mix *= db(-1.5)
 
 

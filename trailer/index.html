@@ -79,16 +79,16 @@ body { -webkit-font-smoothing: antialiased; text-rendering: geometricPrecision; 
 #caret { display: inline-block; width: 3px; background: var(--shu); margin-left: 6px; box-shadow: 0 0 14px rgba(184,83,63,0.8); }
 
 /* The one. */
-#world { transform-origin: 50% 50%; }
-#world canvas { display: block; }
-#world-scrim { position: absolute; inset: 0; }
+#bd { position: absolute; left: 0; top: 0; transform-origin: 50% 50%; }
+#poster { position: absolute; left: 0; top: 0; overflow: hidden; background: #15130f; border: 1px solid var(--hair-strong); box-shadow: 0 50px 140px -40px rgba(0,0,0,0.9); }
+#poster img { display: block; width: 100%; height: 100%; object-fit: cover; }
+#vert { writing-mode: vertical-rl; font-family: var(--jp); font-weight: 300; color: var(--bone-3); letter-spacing: 0.3em; line-height: 1.4; border-right: 1px solid var(--hair-strong); }
+.meta { font-family: var(--sans); font-weight: 300; letter-spacing: 0.24em; color: rgba(235, 230, 220, 0.62); }
 #pick-title { font-style: italic; font-weight: 300; line-height: 0.95; margin: 0; letter-spacing: -0.01em; }
 .reason { font-style: italic; font-weight: 300; color: var(--bone-2); margin: 0; line-height: 1.5; }
 .hairline { height: 1px; background: var(--hair-strong); }
 
 #big-kanji { font-family: var(--jp); font-weight: 300; color: var(--bone); line-height: 1; }
-.wordmark-en { font-family: var(--serif); font-style: italic; font-weight: 300; line-height: 1; position: relative; }
-.wordmark-en .seal-dot { position: absolute; width: 0.07em; height: 0.07em; border-radius: 50%; background: var(--shu); right: -0.16em; top: 0.18em; }
 </style>
 </head>
 <body>
@@ -122,7 +122,10 @@ body { -webkit-font-smoothing: antialiased; text-rendering: geometricPrecision; 
 
   <!-- IV · The one. -->
   <section class="scene" id="s-world">
-    <div class="abs" id="world"><canvas id="world-c"></canvas><div id="world-scrim"></div></div>
+    <canvas id="bd"></canvas>
+    <div class="abs" id="vert">蟲師 ・ 二〇二六年十月十四日</div>
+    <div id="poster"><img id="poster-img" src="assets/mushishi.png" alt=""></div>
+    <div class="abs meta" id="pick-meta">2005 · 26 episodes · Slice of Life</div>
     <div class="abs" id="pick">
       <div class="cap shu" id="pick-eyebrow">・ For you, tonight</div>
       <h1 id="pick-title">Mushishi</h1>
@@ -147,19 +150,9 @@ body { -webkit-font-smoothing: antialiased; text-rendering: geometricPrecision; 
     <div class="abs center-x" id="en-lines">
       <div class="cap" id="en-cap" style="letter-spacing:0.5em">縁 · en</div>
       <p class="display it dim" data-split id="en-l1">the thread that leads you to the one.</p>
-    </div>
-  </section>
-
-  <section class="scene" id="s-end">
-    <div class="abs center-x" id="end-block">
-      <div id="end-mark" style="display:inline-flex;align-items:baseline">
-        <span id="end-k" style="font-family:var(--jp);font-weight:300;color:var(--bone-3)">縁</span>
-        <span class="wordmark-en" id="end-en">En<span class="seal-dot"></span></span>
-      </div>
-      <p class="display it dim" id="end-tag">One anime. Chosen for tonight.</p>
-      <div class="hairline" id="end-hair" style="margin:0 auto"></div>
-      <div id="end-url" style="font-family:var(--sans);font-weight:400;letter-spacing:0.3em;color:var(--bone)">en-anime.vercel.app</div>
-      <div class="cap" id="end-foot" style="color:var(--bone-4)">Free · Works with MyAnimeList &amp; AniList</div>
+      <div class="hairline" id="en-hair" style="margin:0 auto"></div>
+      <div id="en-url" style="font-family:var(--sans);font-weight:400;letter-spacing:0.3em;color:var(--bone)">en-anime.vercel.app</div>
+      <div class="cap" id="en-foot" style="color:var(--bone-4)">Free · Works with MyAnimeList &amp; AniList</div>
     </div>
   </section>
 
@@ -171,7 +164,7 @@ body { -webkit-font-smoothing: antialiased; text-rendering: geometricPrecision; 
 <!-- The cue sheet. score.py reads this too, so picture and music stay locked. -->
 <script id="cues" type="application/json">
 {
-  "duration": 68.0,
+  "duration": 64.4,
   "clock": 0.8,
   "field": 1.0,
   "l1": 4.2,
@@ -192,16 +185,16 @@ body { -webkit-font-smoothing: antialiased; text-rendering: geometricPrecision; 
   "only": 29.2,
   "window": 32.4,
   "world": 35.0,
-  "eyebrow": 35.9,
-  "title": 36.4,
+  "eyebrow": 36.6,
+  "title": 36.8,
   "reasons": [38.8, 41.4, 44.0],
   "one": 47.6,
   "chosen": 49.0,
   "never": 51.4,
   "thread": 54.2,
   "kanji": 56.2,
-  "end": 61.0,
-  "fade": 66.2
+  "url": 59.0,
+  "fade": 62.6
 }
 </script>
 
@@ -385,8 +378,7 @@ const haze = $('haze'), flare = $('flare');
 function lightAt(t) {
   const hits = [
     [C.world, 0.5, TALL ? 0.4 : 0.45, 0.7, 3.0],
-    [C.kanji, 0.5, TALL ? 0.44 : 0.45, 1.0, 2.6],
-    [C.end, 0.5, 0.45, 0.4, 2.6]
+    [C.kanji, 0.5, 0.4, 1.0, 2.6]
   ];
   const layers = [];
   let fl = 0, fy = 0.5;
@@ -712,157 +704,96 @@ function drawJourneyFx(t) {
   }
 }
 
-// ——— IV · the one: an ink painting, full frame ———
-const wc = $('world-c');
-wc.width = W; wc.height = H;
-const wctx = wc.getContext('2d');
-const pr = rng(41);
-const NOISE = Array.from({ length: 1024 }, () => pr());
-function vnoise(x) {
-  const i = Math.floor(x), f = x - i;
-  const a = NOISE[((i % 1024) + 1024) % 1024], b = NOISE[(((i + 1) % 1024) + 1024) % 1024];
-  const u = (1 - Math.cos(f * Math.PI)) / 2;
-  return a * (1 - u) + b * u;
-}
-function fbm(x, oct = 5) { let s = 0, a = 0.5, f = 1; for (let i = 0; i < oct; i++) { s += a * vnoise(x * f + i * 37.1); a *= 0.5; f *= 2.03; } return s; }
-const ridgeN = (x) => 1 - Math.abs(2 * vnoise(x) - 1);
-const ASPECT = W / H;
-const RANGES = [
-  { base: 0.52, amp: TALL ? 0.2 : 0.3, freq: 1.4, seed: 3, ink: [140, 133, 122], a: 0.5, fade: 0.2 },
-  { base: 0.62, amp: TALL ? 0.16 : 0.24, freq: 2.0, seed: 11, ink: [98, 92, 83], a: 0.75, fade: 0.17 },
-  { base: 0.73, amp: TALL ? 0.13 : 0.2, freq: 2.7, seed: 23, ink: [58, 54, 48], a: 0.92, fade: 0.15 },
-  { base: 0.86, amp: TALL ? 0.08 : 0.12, freq: 1.9, seed: 37, ink: [20, 18, 15], a: 1, fade: 0.5 }
-];
-const SAMPLES = 480;
-const RIDGES = RANGES.map((r) => {
-  const ys = [];
-  const fx = r.freq * Math.max(0.8, ASPECT * 0.75);
-  for (let i = 0; i <= SAMPLES; i++) {
-    const x = i / SAMPLES;
-    const shape = 0.55 * fbm(x * fx + r.seed, 5) + 0.45 * Math.pow(ridgeN(x * fx * 1.7 + r.seed * 1.3), 1.6);
-    const tilt = r.seed === 37 ? 0.35 * (1 - x) : 0;
-    ys.push(r.base - r.amp * (shape * 1.25 - 0.25 + tilt));
-  }
-  return ys;
-});
-const PRAIN = Array.from({ length: Math.round(320 * ASPECT + 120) }, () => ({ x: pr(), y: pr(), sp: 0.5 + pr() * 0.6, len: 0.02 + pr() * 0.04, a: 0.05 + pr() * 0.1 }));
-function drawWorld(t) {
-  const w = W, h = H, c = wctx;
-  const bg = c.createLinearGradient(0, 0, 0, h);
-  bg.addColorStop(0, '#2a251f'); bg.addColorStop(0.45, '#1b1814'); bg.addColorStop(1, '#0e0c0a');
-  c.fillStyle = bg; c.fillRect(0, 0, w, h);
-  const mx = w * (TALL ? 0.7 : 0.72), my = h * (TALL ? 0.17 : 0.22), mr = Math.min(w, h) * (TALL ? 0.09 : 0.075);
-  const mg = c.createRadialGradient(mx, my, mr * 0.6, mx, my, Math.max(w, h) * 0.6);
-  mg.addColorStop(0, 'rgba(240,228,206,0.2)'); mg.addColorStop(0.35, 'rgba(240,228,206,0.05)'); mg.addColorStop(1, 'rgba(240,228,206,0)');
-  c.fillStyle = mg; c.fillRect(0, 0, w, h);
-  const md = c.createRadialGradient(mx - mr * 0.3, my - mr * 0.3, 0, mx, my, mr);
-  md.addColorStop(0, 'rgba(246,238,222,0.95)'); md.addColorStop(1, 'rgba(226,214,192,0.88)');
-  c.fillStyle = md;
-  c.beginPath(); c.arc(mx, my, mr, 0, Math.PI * 2); c.fill();
-  // Two wisps of cloud crossing the moon.
-  [[0.012, 0.0, 0.55, 0.09], [0.008, 0.6, 0.35, 0.06]].forEach(([sp, off, a, thick], k) => {
-    const cx = w * (((off + t * sp) % 1.4) - 0.2);
-    const cy = my + mr * (k ? -0.5 : 0.35);
-    const cg = c.createRadialGradient(cx, cy, 0, cx, cy, w * 0.35);
-    cg.addColorStop(0, `rgba(27,24,20,${a})`); cg.addColorStop(1, 'rgba(27,24,20,0)');
-    c.save(); c.translate(0, cy); c.scale(1, thick); c.translate(0, -cy);
-    c.fillStyle = cg; c.fillRect(0, cy - h * 4, w, h * 8); c.restore();
-  });
-  RANGES.forEach((r, k) => {
-    const ys = RIDGES[k];
-    const top = (r.base - r.amp) * h;
-    const gr = c.createLinearGradient(0, top, 0, top + (r.amp + r.fade) * h);
-    const [R, G, B] = r.ink;
-    gr.addColorStop(0, `rgba(${R},${G},${B},${r.a})`);
-    gr.addColorStop(0.55, `rgba(${R},${G},${B},${r.a * 0.85})`);
-    gr.addColorStop(1, `rgba(${R},${G},${B},${k === 3 ? r.a : 0})`);
-    c.fillStyle = gr;
-    c.beginPath(); c.moveTo(0, h);
-    ys.forEach((y, i) => c.lineTo((i / SAMPLES) * w, y * h));
-    c.lineTo(w, h); c.closePath(); c.fill();
-    if (k < 3) {
-      const my2 = (r.base + r.fade * 0.4) * h;
-      const drift = Math.sin(t * 0.3 + k * 1.7) * w * 0.06;
-      const mist = c.createRadialGradient(w * 0.5 + drift, my2, 0, w * 0.5 + drift, my2, w * 0.8);
-      mist.addColorStop(0, `rgba(205,197,183,${0.11 - k * 0.02})`);
-      mist.addColorStop(1, 'rgba(205,197,183,0)');
-      c.save(); c.translate(0, my2); c.scale(1, 0.16); c.translate(0, -my2);
-      c.fillStyle = mist; c.fillRect(0, my2 - h * 6, w, h * 12); c.restore();
-    }
-  });
-  const near = RIDGES[3];
-  const pines = TALL ? [[0.1, 0.06], [0.17, 0.08], [0.22, 0.05], [0.28, 0.07]] : [[0.1, 0.1], [0.14, 0.13], [0.17, 0.08], [0.21, 0.11]];
-  pines.forEach(([px, ph]) => {
-    const gy = near[Math.round(px * SAMPLES)] * h;
-    const x = px * w, th = ph * h, base = Math.min(w, h);
-    c.strokeStyle = 'rgba(16,14,12,1)'; c.lineWidth = base * 0.005;
-    c.beginPath(); c.moveTo(x, gy + 4); c.lineTo(x, gy - th); c.stroke();
-    c.fillStyle = 'rgba(16,14,12,1)';
-    for (let i = 0; i < 5; i++) {
-      const yy = gy - th * (0.25 + i * 0.17), ww = base * (0.04 - i * 0.006);
-      c.beginPath(); c.moveTo(x - ww, yy + th * 0.06); c.lineTo(x, yy - th * 0.1); c.lineTo(x + ww, yy + th * 0.06); c.closePath(); c.fill();
-    }
-  });
-  c.lineWidth = 1.3;
-  PRAIN.forEach((d) => {
-    const y = ((d.y + t * d.sp * 0.5) % 1) * h * 1.1 - h * 0.05;
-    const x = (d.x * w + (y / h) * h * 0.06) % w;
-    c.strokeStyle = `rgba(228,220,206,${d.a.toFixed(3)})`;
-    c.beginPath(); c.moveTo(x, y); c.lineTo(x - d.len * h * 0.08, y - d.len * h); c.stroke();
-  });
-  // The painter's mark: 蟲師 down the side, and a seal.
-  const s = Math.min(w, h) * 0.05, sx = w - s - (TALL ? 70 : 96), sy = h - s - (TALL ? 120 : 84);
-  c.fillStyle = 'rgba(184,83,63,0.9)';
-  c.beginPath(); c.roundRect(sx, sy, s, s, s * 0.08); c.fill();
-  c.fillStyle = 'rgba(20,16,12,0.9)';
-  c.font = `400 ${Math.round(s * 0.62)}px "Noto Serif JP"`;
-  c.textAlign = 'center'; c.textBaseline = 'middle';
-  c.fillText('蟲', sx + s / 2, sy + s / 2 + s * 0.03);
-  c.fillStyle = 'rgba(235,230,220,0.55)';
-  c.font = `300 ${Math.round(s * 0.5)}px "Noto Serif JP"`;
-  c.fillText('蟲', sx + s / 2, sy - s * 1.25);
-  c.fillText('師', sx + s / 2, sy - s * 0.65);
-  const v = c.createRadialGradient(w / 2, h * 0.45, Math.min(w, h) * 0.3, w / 2, h * 0.5, Math.max(w, h) * 0.75);
-  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,0.5)');
-  c.fillStyle = v; c.fillRect(0, 0, w, h);
+// ——— IV · the one: the poster ———
+const posterImg = $('poster-img');
+const bd = $('bd');
+bd.width = W; bd.height = H;
+const PAR = 652 / 460;
+// Where the poster rests beside its copy (En's own reveal), and where it first opens, centred.
+const REST = TALL ? { w: 560, x: 320, y: 210 } : { w: 476, x: 430, y: 0 };
+REST.h = REST.w * PAR;
+if (!TALL) REST.y = (H - REST.h) / 2 - 22;
+const OPEN = { w: REST.w * 1.1 };
+OPEN.h = OPEN.w * PAR;
+OPEN.x = (W - OPEN.w) / 2;
+OPEN.y = (H - OPEN.h) / 2;
+function paintBackdrop() {
+  const c = bd.getContext('2d');
+  c.fillStyle = '#0d0c0b';
+  c.fillRect(0, 0, W, H);
+  const iw = posterImg.naturalWidth, ih = posterImg.naturalHeight;
+  const sc = Math.max(W / iw, H / ih) * 1.3;
+  c.filter = 'blur(56px) saturate(0.8) brightness(0.5)';
+  c.drawImage(posterImg, (W - iw * sc) / 2, (H - ih * sc) / 2, iw * sc, ih * sc);
+  c.filter = 'none';
+  const v = c.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.2, W / 2, H / 2, Math.max(W, H) * 0.7);
+  v.addColorStop(0, 'rgba(13,12,11,0.15)');
+  v.addColorStop(1, 'rgba(13,12,11,0.85)');
+  c.fillStyle = v;
+  c.fillRect(0, 0, W, H);
 }
 function sceneWorld(t) {
   if (!show('s-world', t, C.window, C.never + 0.6)) return;
-  drawWorld(t - C.window + 6);
-  const world = $('world');
-  place(world, { left: 0, top: 0, width: W + 'px', height: H + 'px' });
-  // A window opening onto it: a coin of light that becomes the whole frame.
-  const q = seg(t, C.window, C.world);
-  const k = lerp(0.012, 1, Math.pow(q, 2.6));
-  const settle = 1 + 0.07 * inOutSine(seg(t, C.world, C.one + 1.5));
-  const radius = lerp(32, 160, Math.pow(q, 1.6));
-  world.style.transform = `scale(${(k * settle).toFixed(5)}) translateY(${(-14 * inOutSine(seg(t, C.world, C.one + 1.5))).toFixed(2)}px)`;
-  world.style.webkitMaskImage = q < 1 ? `radial-gradient(circle at 50% 50%, #000 ${radius * 0.55}%, transparent ${radius}%)` : 'none';
   const dim = inOutCubic(seg(t, C.one - 0.6, C.one + 0.6));
   const gone = inCubic(seg(t, C.never - 0.6, C.never + 0.5));
-  world.style.opacity = (smooth(C.window, C.window + 0.6, t) * lerp(1, 0.14, dim) * (1 - gone)).toFixed(3);
-  world.style.filter = dim > 0.01 ? `blur(${(10 * dim).toFixed(2)}px)` : 'none';
-  $('world-scrim').style.background = TALL
-    ? 'linear-gradient(180deg, rgba(8,7,6,0) 45%, rgba(8,7,6,0.82) 88%)'
-    : 'linear-gradient(90deg, rgba(8,7,6,0.78) 0%, rgba(8,7,6,0.45) 38%, rgba(8,7,6,0) 62%)';
-  $('world-scrim').style.opacity = smooth(C.world + 0.4, C.eyebrow + 0.8, t).toFixed(3);
+  const sceneK = lerp(1, 0.14, dim) * (1 - gone);
+  const sceneBlur = 10 * dim;
 
+  // A wash of the poster's own colours, behind everything.
+  bd.style.opacity = (0.95 * smooth(C.world - 0.4, C.world + 1.6, t) * sceneK).toFixed(3);
+  bd.style.transform = `scale(${(1.04 + 0.05 * inOutSine(seg(t, C.world, C.one + 1))).toFixed(4)})`;
+  bd.style.filter = sceneBlur > 0.05 ? `blur(${sceneBlur.toFixed(2)}px)` : 'none';
+
+  // The light opens into the poster, then it settles beside its words.
+  const q = seg(t, C.window, C.world);
+  const glide = inOutCubic(seg(t, C.world + 0.6, C.world + 2.0));
+  const k = lerp(0.03, 1, Math.pow(q, 2.4));
+  const push = 1 + 0.025 * inOutSine(seg(t, C.world + 2.0, C.one + 1));
+  const w = lerp(OPEN.w * k, REST.w, glide) * push;
+  const h = w * PAR;
+  const cx = lerp(W / 2, REST.x + REST.w / 2, glide);
+  const cy = lerp(H / 2, REST.y + REST.h / 2, glide);
+  const poster = $('poster');
+  place(poster, { left: (cx - w / 2).toFixed(1) + 'px', top: (cy - h / 2).toFixed(1) + 'px', width: w.toFixed(1) + 'px', height: h.toFixed(1) + 'px' });
+  const hd = 0.5 * Math.hypot(w, h);
+  const r = lerp(0.3, 2.1, Math.pow(q, 1.3)) * hd;
+  poster.style.webkitMaskImage = q < 1 ? `radial-gradient(circle at 50% 50%, #000 ${(r * 0.52).toFixed(1)}px, transparent ${r.toFixed(1)}px)` : 'none';
+  const glowK = 1 - q;
+  const pf = [];
+  if (glowK > 0.01) pf.push(`brightness(${(1 + 1.2 * glowK).toFixed(3)})`, `blur(${(8 * glowK).toFixed(2)}px)`);
+  if (sceneBlur > 0.05) pf.push(`blur(${sceneBlur.toFixed(2)}px)`);
+  poster.style.filter = pf.length ? pf.join(' ') : 'none';
+  poster.style.opacity = (smooth(C.window, C.window + 0.5, t) * sceneK).toFixed(3);
+  poster.style.borderColor = `rgba(235,230,220,${(0.2 * q).toFixed(3)})`;
+
+  // The hanging scroll: name and date down the side, the copy alongside.
+  const vert = $('vert');
+  const meta = $('pick-meta');
   const pick = $('pick');
-  if (TALL) place(pick, { left: '90px', right: '90px', top: H * 0.6 + 'px', textAlign: 'left' });
-  else place(pick, { left: '150px', width: '820px', top: H * 0.26 + 'px' });
+  if (TALL) {
+    place(vert, { left: '70px', top: REST.y + 'px', height: REST.h + 470 + 'px', fontSize: '32px', paddingRight: '22px', paddingTop: '10px' });
+    place(meta, { left: REST.x + 'px', width: REST.w + 'px', top: REST.y + REST.h + 26 + 'px', textAlign: 'center', fontSize: '16px' });
+    place(pick, { left: '190px', right: '70px', top: REST.y + REST.h + 96 + 'px', textAlign: 'left' });
+  } else {
+    place(vert, { left: REST.x - 140 + 'px', top: REST.y + 'px', height: REST.h + 'px', fontSize: '36px', paddingRight: '24px', paddingTop: '12px' });
+    place(meta, { left: REST.x + 'px', width: REST.w + 'px', top: REST.y + REST.h + 24 + 'px', textAlign: 'center', fontSize: '15px' });
+    place(pick, { left: REST.x + REST.w + 100 + 'px', width: '720px', top: REST.y + 40 + 'px' });
+  }
   const out = C.one - 0.7;
+  setP(vert, t, C.eyebrow, out, { din: 1.8, rise: 0, blur: 8 });
+  setP(meta, t, C.title + 0.6, out, { din: 1.4, rise: 0, blur: 6 });
   setP($('pick-eyebrow'), t, C.eyebrow, out, { rise: 0, blur: 6 });
   $('pick-eyebrow').style.fontSize = '17px';
   const title = $('pick-title');
-  title.style.fontSize = (TALL ? 170 : 176) + 'px';
-  title.style.margin = TALL ? '26px 0 34px' : '30px 0 40px';
+  title.style.fontSize = (TALL ? 150 : 150) + 'px';
+  title.style.margin = TALL ? '22px 0 30px' : '28px 0 36px';
   bloom(title, t, C.title, out, { dur: 2.2, from: 0.96, blurPx: 14 });
   const hair = $('pick-hair');
   hair.style.width = 96 * outCubic(seg(t, C.title + 1.0, C.title + 2.2)) * (1 - seg(t, out, out + 0.6)) + 'px';
-  hair.style.marginBottom = '36px';
+  hair.style.marginBottom = '34px';
   C.reasons.forEach((x, i) => {
     const el = $('r' + (i + 1));
-    el.style.fontSize = (TALL ? 46 : 42) + 'px';
+    el.style.fontSize = (TALL ? 44 : 40) + 'px';
     setP(el, t, x, out, { din: 1.6, rise: 8, blur: 8 });
   });
 }
@@ -884,10 +815,11 @@ function sceneOne(t) {
   setP(n, t, C.never, C.thread - 1.0, { din: 1.6, dout: 0.9, rise: 0, blur: 8 });
 }
 
-// ——— 縁 ———
+// ——— 縁, and where to find it ———
 function sceneEn(t) {
-  const cy = TALL ? H * 0.44 : H * 0.45;
-  if (t >= C.thread && t < C.end) {
+  const cy = H * (TALL ? 0.4 : 0.38);
+  const endK = 1 - inOutSine(seg(t, C.fade, C.duration - 0.2));
+  if (t >= C.thread) {
     const p = inOutSine(seg(t, C.thread + 0.1, C.kanji + 0.2));
     const amp = lerp(110, 0, inOutCubic(seg(t, C.thread + 0.3, C.kanji + 0.4)));
     const pts = [];
@@ -896,50 +828,37 @@ function sceneEn(t) {
       const u = i / n;
       pts.push({ x: lerp(-40, W + 40, u), y: cy + amp * Math.sin(u * Math.PI * 2.6 + (t - C.thread) * 1.4) * Math.sin(u * Math.PI), s: 1 });
     }
-    const fade = 1 - inCubic(seg(t, C.end - 1.4, C.end - 0.6));
-    drawThread(pts, fade);
-    if (p < 0.999 && pts.length) glow(pts[pts.length - 1].x, pts[pts.length - 1].y, 30, 0.9 * fade);
+    drawThread(pts, endK);
+    if (p < 0.999 && pts.length) glow(pts[pts.length - 1].x, pts[pts.length - 1].y, 30, 0.9 * endK);
   }
-  if (!show('s-en', t, C.kanji - 0.1, C.end)) return;
-  const size = TALL ? 440 : 400;
+  if (!show('s-en', t, C.kanji - 0.1, 1e9)) return;
+  $('s-en').style.opacity = endK.toFixed(3);
+  const size = TALL ? 420 : 340;
   $('big-kanji').style.fontSize = size + 'px';
   const wrap = $('kanji-wrap');
   place(wrap, { top: cy - size * 0.55 + 'px' });
-  bloom(wrap, t, C.kanji, C.end - 1.4, { dur: 2.2, from: 0.9, blurPx: 18 });
+  bloom(wrap, t, C.kanji, null, { dur: 2.2, from: 0.9, blurPx: 18 });
   const lines = $('en-lines');
-  place(lines, { top: cy + size * 0.55 + (TALL ? 60 : 40) + 'px' });
+  place(lines, { top: cy + size * 0.55 + (TALL ? 60 : 34) + 'px' });
   const cap = $('en-cap');
   cap.style.fontSize = '17px';
-  cap.style.marginBottom = '24px';
-  setP(cap, t, C.kanji + 1.0, C.end - 1.4, { rise: 0, blur: 6 });
+  cap.style.marginBottom = TALL ? '24px' : '20px';
+  setP(cap, t, C.kanji + 1.0, null, { rise: 0, blur: 6 });
   const l1 = $('en-l1');
-  l1.style.fontSize = (TALL ? 52 : 50) + 'px';
+  l1.style.fontSize = (TALL ? 52 : 46) + 'px';
   if (TALL) l1.style.padding = '0 80px';
-  words(l1, t, C.kanji + 1.6, C.end - 1.4, { stagger: 0.12 });
-}
-function sceneEnd(t) {
-  if (!show('s-end', t, C.end - 0.1, 1e9)) return;
-  const blk = $('end-block');
-  place(blk, { top: H / 2 - (TALL ? 260 : 230) + 'px' });
-  $('end-k').style.fontSize = (TALL ? 150 : 140) + 'px';
-  const en = $('end-en');
-  en.style.fontSize = (TALL ? 210 : 196) + 'px';
-  en.style.marginLeft = '40px';
-  bloom($('end-mark'), t, C.end, null, { dur: 2.4, from: 0.94, blurPx: 14 });
-  const tag = $('end-tag');
-  tag.style.fontSize = (TALL ? 48 : 46) + 'px';
-  tag.style.margin = '34px 0 46px';
-  setP(tag, t, C.end + 0.9, null, { din: 1.6 });
-  $('end-hair').style.width = 70 * outCubic(seg(t, C.end + 1.5, C.end + 2.4)) + 'px';
-  const url = $('end-url');
-  url.style.fontSize = (TALL ? 28 : 26) + 'px';
-  url.style.marginTop = '46px';
-  setP(url, t, C.end + 1.8, null, { din: 1.4, rise: 0, blur: 6 });
-  const foot = $('end-foot');
+  words(l1, t, C.kanji + 1.6, null, { stagger: 0.12 });
+  const hair = $('en-hair');
+  hair.style.width = 70 * outCubic(seg(t, C.url - 0.4, C.url + 0.6)) + 'px';
+  hair.style.marginTop = TALL ? '48px' : '36px';
+  const url = $('en-url');
+  url.style.fontSize = (TALL ? 30 : 26) + 'px';
+  url.style.marginTop = TALL ? '44px' : '34px';
+  setP(url, t, C.url, null, { din: 1.4, rise: 0, blur: 6 });
+  const foot = $('en-foot');
   foot.style.fontSize = (TALL ? 15 : 14) + 'px';
-  foot.style.marginTop = '26px';
-  setP(foot, t, C.end + 2.4, null, { din: 1.4, rise: 0 });
-  blk.parentElement.style.opacity = (1 - inOutSine(seg(t, C.fade, C.duration - 0.3))).toFixed(3);
+  foot.style.marginTop = '22px';
+  setP(foot, t, C.url + 0.6, null, { din: 1.4, rise: 0 });
 }
 
 // ——— frame ———
@@ -952,9 +871,8 @@ function renderAt(t) {
   sceneWorld(t);
   sceneOne(t);
   sceneEn(t);
-  sceneEnd(t);
-  // Rain: it starts with the word, and the painting carries it on.
-  const rk = smooth(C.dropLand, C.dropLand + 3.0, t) * (1 - smooth(C.window + 1.2, C.world, t));
+  // Rain: it starts with the word and keeps falling over the one it led to.
+  const rk = smooth(C.dropLand, C.dropLand + 3.0, t) * (1 - 0.4 * smooth(C.window, C.world, t)) * (1 - smooth(C.one - 0.6, C.one + 1.0, t));
   drawRain(t, rk);
   // The first drop, landing on "rain".
   if (t >= C.drop && t < C.dropLand + 1.4) {
@@ -1004,6 +922,8 @@ window.ready = (async () => {
   ['s-noise', 's-journey'].forEach((id) => { $(id).style.display = 'none'; });
   measureWish();
   buildPath();
+  await posterImg.decode();
+  paintBackdrop();
   // Show every moment once so any font slice it needs is fetched before the first captured frame.
   for (let t = 0; t < C.duration; t += 0.25) { renderAt(t); void stage.offsetHeight; }
   await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
