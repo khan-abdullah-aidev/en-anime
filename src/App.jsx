@@ -42,7 +42,8 @@ import {
   summarizeRecentPatterns
 } from "./tasteProfile.js";
 import { answersFromList, buildWatchHistoryDigest, describeQueriedTitle } from "./watchHistory.js";
-import { buildOpenCandidatePool, buildTogetherPool, seedBench, toModelCandidate } from "./discovery.js";
+import { buildOpenCandidatePool, buildTogetherPool, rewatchCandidates, seedBench, toModelCandidate, totalMinutes } from "./discovery.js";
+import { STREAMING_SERVICES, onServices, servicesFilter } from "./streaming.js";
 import { animeTitleKeys, normalizeTitleForCompare, titleMatchesAnime, uniqueTitles } from "./titleUtils.js";
 import { describeNextAiring, fetchNextAiring, resolveAnimeOnAniList } from "./anilist.js";
 import { PARENT, VIEW, parsePath, pathFor } from "./routes.js";
@@ -74,6 +75,7 @@ import {
 } from "./sync.js";
 import { normalizeSnapshot } from "./syncMerge.js";
 import { sharePick } from "./shareCard.js";
+import { monthRecap, recapText } from "./recap.js";
 import { askAgainAfter, findCurrentPending, findReviewEntries, isAwaitingAnswer } from "./reviewQueue.js";
 import { readMood } from "./moodReading.js";
 import { buildTasteModel, describeModel, featuresOf, hitRate, learnedForModel, learnedRanker } from "./learning.js";
@@ -636,10 +638,40 @@ export default function App() {
   // Candidates from all of AniList (see discovery.js), or the curated
   // catalog if AniList can't be reached.
   async function findCandidates({ mood, list, signals, memory, partner: other, includeResume = false, moodReading = null, alsoExcluded = [], tasteModel = null }) {
+    const { services } = loadPreferences();
+    const found = await findCandidatesFrom({ mood, list, signals, memory, partner: other, includeResume, moodReading, alsoExcluded, tasteModel, services });
+    if (found.candidates.length || !services.length) return finishCandidates(found);
+    // Nothing on their services fits tonight: look everywhere instead. The
+    // pick then says it isn't on them (see ScreenReveal).
+    return finishCandidates(
+      await findCandidatesFrom({ mood, list, signals, memory, partner: other, includeResume, moodReading, alsoExcluded, tasteModel, services: [] })
+    );
+  }
+
+  function finishCandidates({ candidates, exclude, constraints, constraintsRelaxed, passedOver }) {
+    if (!candidates.length) {
+      throw new Error(
+        exclude.labels.length
+          ? `Leaving out ${joinList(exclude.labels)} left En nothing to pick from. Let one back in and ask again.`
+          : "En couldn't find anything left to pick tonight. Try again in a moment."
+      );
+    }
+    // Only sent when there's something to say, to keep the payload lean.
+    const steering = {
+      ...(Object.keys(constraints || {}).length ? { constraints } : {}),
+      ...(constraintsRelaxed ? { constraintsRelaxed: true } : {}),
+      ...(passedOver.length ? { passedOverTonight: passedOver.map(({ title, reason }) => ({ title, reason: reason || "not feeling it" })) } : {})
+    };
+    return { candidates, steering };
+  }
+
+  async function findCandidatesFrom({ mood, list, signals, memory, partner: other, includeResume, moodReading, alsoExcluded, tasteModel, services }) {
     const learned = learnedRanker(tasteModel);
     const passedOver = passedOverTonight();
     const { excludedGenres, mutedSeeds } = loadPreferences();
-    const exclude = exclusionFilter([...new Set([...excludedGenres, ...alsoExcluded])]);
+    const genres = exclusionFilter([...new Set([...excludedGenres, ...alsoExcluded])]);
+    const onlyOn = servicesFilter(services);
+    const exclude = { ...genres, matches: (candidate) => genres.matches(candidate) || onlyOn.matches(candidate) };
     const { candidates, source, constraints, constraintsRelaxed } = other
       ? await buildTogetherPool({
           mood,
@@ -666,21 +698,8 @@ export default function App() {
           moodReading,
           learned
         });
-    debugLog("[En debug] candidate pool", { source, count: candidates.length, constraints, constraintsRelaxed, leftOut: exclude.labels, moodReading });
-    if (!candidates.length) {
-      throw new Error(
-        exclude.labels.length
-          ? `Leaving out ${joinList(exclude.labels)} left En nothing to pick from. Let one back in and ask again.`
-          : "En couldn't find anything left to pick tonight. Try again in a moment."
-      );
-    }
-    // Only sent when there's something to say, to keep the payload lean.
-    const steering = {
-      ...(Object.keys(constraints || {}).length ? { constraints } : {}),
-      ...(constraintsRelaxed ? { constraintsRelaxed: true } : {}),
-      ...(passedOver.length ? { passedOverTonight: passedOver.map(({ title, reason }) => ({ title, reason: reason || "not feeling it" })) } : {})
-    };
-    return { candidates, steering };
+    debugLog("[En debug] candidate pool", { source, count: candidates.length, constraints, constraintsRelaxed, leftOut: exclude.labels, services, moodReading });
+    return { candidates, exclude, constraints, constraintsRelaxed, passedOver };
   }
 
   async function describeQueriedTitles(titles, list) {
@@ -735,7 +754,7 @@ export default function App() {
     }
   }
 
-  async function handleConsider(nextMood, { replace = false } = {}) {
+  async function handleConsider(nextMood, { replace = false, previousId = null } = {}) {
     if (!canAskEn()) {
       go(VIEW.LANDING, { replace: true });
       return;
@@ -755,11 +774,63 @@ export default function App() {
       revealPick(requestId, pick, {
         mood: nextMood || "Surprise me",
         request_mood: nextMood,
+        ...(previousId ? { previous_pick_id: previousId } : {}),
         ...(pick.resume ? { mode: "resume" } : {})
       });
     } catch (considerError) {
       handleRequestError(requestId, considerError);
     }
+  }
+
+  // ---------- Rewatch night ----------
+
+  // Something they've already seen and loved, read against tonight's mood.
+  async function handleRewatch(moodText, { replace = false, previousId = null } = {}) {
+    if (!canAskEn()) {
+      go(VIEW.LANDING, { replace: true });
+      return;
+    }
+
+    const requestId = beginThinking(moodText, { replace });
+    const say = (text) => isCurrent(requestId) && setStatus(text);
+    hearMood(requestId, moodText);
+    try {
+      const { list, signals, memory, unwatchedTitles } = await loadEnContext();
+      say("Going back through what you loved");
+      const candidateList = Array.isArray(list) ? rewatchCandidates({ list, history: loadHistory() }) : await typedRewatchCandidates(list);
+      if (!candidateList.length) {
+        throw new Error(
+          Array.isArray(list)
+            ? "En picks rewatches from shows you finished and scored 8 or higher. Score a few on your list and ask again."
+            : "En couldn't find the shows you typed. Check the names in your list and ask again."
+        );
+      }
+      say("Considering");
+      const rec = await askForAllowedRecommendation({ mood: moodText, signals: { ...signals, rewatch: true }, candidateList, memory, unwatchedTitles });
+      // List entries don't carry where a show streams; AniList does.
+      const meta = rec.watch_links?.length ? null : await resolveAnimeOnAniList(rec.title);
+      const pick = await withImage(
+        { ...rec, mode: "rewatch", ...(meta?.watch_links?.length ? { watch_links: meta.watch_links } : {}) },
+        [rec.title_jp]
+      );
+      revealPick(requestId, pick, {
+        mood: moodText || "a rewatch",
+        request_mood: moodText,
+        mode: "rewatch",
+        ...(previousId ? { previous_pick_id: previousId } : {})
+      });
+    } catch (rewatchError) {
+      handleRequestError(requestId, rewatchError);
+    }
+  }
+
+  // A typed list has no scores: every show on it is one they love.
+  async function typedRewatchCandidates(typed) {
+    const recent = new Set(loadHistory().filter((entry) => entry.mode === "rewatch").slice(0, 3).map((entry) => normalizeTitleForCompare(entry.recommendation?.title)));
+    const resolved = await Promise.all(splitShortlist(String(typed || "")).slice(0, 12).map((title) => resolveAnimeOnAniList(title)));
+    return resolved
+      .filter((meta) => meta && !recent.has(normalizeTitleForCompare(meta.title)))
+      .map((meta) => ({ ...meta, watchLinks: meta.watch_links, rewatch: { score: null, finished: null } }));
   }
 
   // ---------- For two ----------
@@ -801,7 +872,7 @@ export default function App() {
     go(VIEW.TOGETHER_MOOD);
   }
 
-  async function handleTogether(moodText, { replace = false } = {}) {
+  async function handleTogether(moodText, { replace = false, previousId = null } = {}) {
     const who = loadPartner();
     if (!who) {
       go(VIEW.TOGETHER, { replace: true });
@@ -850,6 +921,7 @@ export default function App() {
       revealPick(requestId, pick, {
         mood: moodText || `for two, with ${name}`,
         request_mood: moodText,
+        ...(previousId ? { previous_pick_id: previousId } : {}),
         mode: "together",
         partner_name: name
       });
@@ -1066,7 +1138,8 @@ export default function App() {
     }
     setHistory(nextHistory);
     // Answers read off the list itself don't need writing back to it.
-    if (!reflection && MAL_ACTION_FOR[answer]) shareWithMal(entry, MAL_ACTION_FOR[answer]);
+    // A rewatch is already finished there; nothing to change.
+    if (!reflection && MAL_ACTION_FOR[answer] && entry.mode !== "rewatch") shareWithMal(entry, MAL_ACTION_FOR[answer]);
     return nextHistory;
   }
 
@@ -1079,7 +1152,7 @@ export default function App() {
   function handleWatchTonight() {
     if (!revealEntry) return;
     setHistory(updateHistoryEntry(revealEntry.id, { watch_tonight: true }));
-    shareWithMal(revealEntry, "tonight");
+    if (revealEntry.mode !== "rewatch") shareWithMal(revealEntry, "tonight");
   }
 
   // "Not tonight": log why, then ask again with the same mood. The reason
@@ -1099,8 +1172,21 @@ export default function App() {
       }
       return;
     }
-    if (revealEntry.mode === "together") handleTogether(revealEntry.request_mood ?? "", { replace: true });
-    else handleConsider(revealEntry.request_mood ?? "", { replace: true });
+    // The next pick remembers this one, so it can offer to go back to it.
+    const again = { replace: true, previousId: revealEntry.id };
+    if (revealEntry.mode === "together") handleTogether(revealEntry.request_mood ?? "", again);
+    else if (revealEntry.mode === "rewatch") handleRewatch(revealEntry.request_mood ?? "", again);
+    else handleConsider(revealEntry.request_mood ?? "", again);
+  }
+
+  // "Back to <the last pick>": the one passed over comes back as tonight's
+  // pick, and this one is passed over instead.
+  function handleBackToPrevious() {
+    const previous = revealEntry && history.find((entry) => entry.id === revealEntry.previous_pick_id);
+    if (!previous) return;
+    answerEntry(revealEntry, "not-tonight");
+    setHistory(updateHistoryEntry(previous.id, { state: "unrated", note: "", pass_reason: "", not_tonight_at: null }));
+    go(VIEW.REVEAL, { replace: true, entryId: previous.id });
   }
 
   function handleSeenFeedback(feedback, feedbackNote = "") {
@@ -1632,6 +1718,7 @@ export default function App() {
     seenFeedback: handleSeenFeedback,
     watchTonight: handleWatchTonight,
     notTonight: handleNotTonight,
+    backToPrevious: handleBackToPrevious,
     pendingAnswer: handlePendingAnswer,
     pendingNotNow: handlePendingNotNow,
     answer: handleAnswer,
@@ -1661,7 +1748,11 @@ export default function App() {
   const canMarkSeen = isNewPick && !revealEntry.mode;
   // "Not tonight" re-asks the same question, which works for En's own picks
   // and for picks for two.
-  const canPassTonight = isNewPick && (!revealEntry.mode || revealEntry.mode === "together" || revealEntry.mode === "resume");
+  // The pick passed over to get this one, while it's still passed over.
+  const revealPrevious = isNewPick && revealEntry.previous_pick_id && !revealEntry.room_id
+    ? history.find((entry) => entry.id === revealEntry.previous_pick_id && entry.state === "not_tonight") || null
+    : null;
+  const canPassTonight = isNewPick && (!revealEntry.mode || ["together", "resume", "rewatch"].includes(revealEntry.mode));
 
   return (
     <NavContext.Provider value={nav}>
@@ -1691,6 +1782,7 @@ export default function App() {
             onSurprise={() => handleConsider("")}
             onShortlist={nav.shortlistStart}
             onTogether={nav.togetherStart}
+            onRewatch={() => handleRewatch(mood)}
             mood={mood}
             setMood={setMood}
             excluded={preferences.excludedGenres}
@@ -1780,6 +1872,8 @@ export default function App() {
             isNewPick={isNewPick}
             canMarkSeen={canMarkSeen}
             canPassTonight={canPassTonight}
+            services={preferences.services}
+            previous={revealPrevious}
           />
         )}
         {view === VIEW.FEEDBACK && revealEntry && (
@@ -2079,6 +2173,8 @@ function ScreenPending({ nav, pending }) {
               ? `Did you finish ${pending.recommendation.title}?`
               : pending.mode === "resume"
               ? `Did you get back to ${pending.recommendation.title}?`
+              : pending.mode === "rewatch"
+              ? `How was ${pending.recommendation.title} the second time?`
               : pending.mode === "together"
               ? `Did you and ${pending.partner_name || "them"} watch ${pending.recommendation.title}?`
               : `Did you watch ${pending.recommendation.title}?`}
@@ -2117,11 +2213,11 @@ function ScreenPending({ nav, pending }) {
   );
 }
 
-// Starters En already knows how to read: "a film" and "airing now" become
-// hard limits (discovery.js), the rest steer the mood.
-const MOOD_STARTERS = ["something cozy", "make me cry", "short, under 13 episodes", "a film tonight", "airing now", "something with a twist"];
+// Starters En already knows how to read: "two hours", "a film" and "airing
+// now" become hard limits (discovery.js), the rest steer the mood.
+const MOOD_STARTERS = ["something cozy", "make me cry", "I have about two hours", "a film tonight", "airing now", "something with a twist"];
 
-function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mood, setMood, excluded, onToggleGenre, onClearGenres }) {
+function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, onRewatch, mood, setMood, excluded, onToggleGenre, onClearGenres }) {
   const ref = useRef(null);
   const hints = useMemo(
     () => [
@@ -2230,7 +2326,8 @@ function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mo
               options={[
                 ["surprise me", onSurprise],
                 ["I have one in mind", onShortlist],
-                ["for two", onTogether]
+                ["for two", onTogether],
+                ["rewatch a favorite", onRewatch]
               ]}
             />
             <LeaveOut excluded={excluded} onToggle={onToggleGenre} onClear={onClearGenres} />
@@ -2996,7 +3093,7 @@ const NOT_TONIGHT_REASONS = [
   ["just not it", ""]
 ];
 
-function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight }) {
+function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight, services = [], previous = null }) {
   const pick = entry.recommendation;
   const [settled, setSettled] = useState("");
   const [choosingReason, setChoosingReason] = useState(false);
@@ -3057,6 +3154,8 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight }) {
             <div className="eyebrow shu">
               {pick.resume
                 ? "・ pick up where you left off"
+                : pick.mode === "rewatch"
+                ? "・ again, tonight"
                 : pick.mode === "together"
                 ? `・ for you and ${pick.partner_name || "them"}`
                 : pick.mode === "choose"
@@ -3107,9 +3206,13 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight }) {
                   ))}
                 </p>
                 <p className="meta watch-links__note">
-                  What plays depends on your region, so a link may be blocked or hidden where you are.
+                  {services.length && !onServices(pick.watch_links, services)
+                    ? "Not on your services: nothing there fit tonight."
+                    : "What plays depends on your region, so a link may be blocked or hidden where you are."}
                 </p>
               </>
+            ) : services.length ? (
+              <p className="meta watch-links__note">En couldn't tell where this one streams.</p>
             ) : null}
           </div>
 
@@ -3163,6 +3266,13 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight }) {
                       canPassTonight && !choosingReason && ownReason === null && ["not tonight", () => setChoosingReason(true)]
                     ]}
                   />
+                  {previous && !choosingReason && ownReason === null && (
+                    <div style={{ marginTop: 14 }}>
+                      <button className="btn-quiet back-to-previous" onClick={nav.backToPrevious}>
+                        ← back to {previous.recommendation.title}
+                      </button>
+                    </div>
+                  )}
                   {canPassTonight && (choosingReason || ownReason !== null) && (
                     <div style={{ marginTop: 14 }}>
                       {ownReason !== null ? (
@@ -3391,6 +3501,50 @@ function PastPickAnswer({ entry, onAnswer }) {
   );
 }
 
+// The month at the top of the log, and a way to send it to someone.
+function RecapCard({ history }) {
+  const recap = useMemo(() => monthRecap(history), [history]);
+  const [shared, setShared] = useState("");
+  if (!recap) return null;
+
+  async function share() {
+    const text = recapText(recap);
+    try {
+      if (navigator.share) {
+        await navigator.share({ text });
+        return;
+      }
+      await navigator.clipboard.writeText(text);
+      setShared("copied");
+    } catch (shareError) {
+      if (shareError?.name !== "AbortError") setShared("couldn't share it");
+    }
+  }
+
+  return (
+    <section className="recap fade-up delay-2" aria-labelledby="recap-title">
+      <div className="eyebrow" id="recap-title">{recap.label}</div>
+      <p className="recap__numbers">
+        <span><strong>{recap.picks}</strong> pick{recap.picks === 1 ? "" : "s"}</span>
+        <span><strong>{recap.watched}</strong> watched</span>
+        <span><strong>{recap.loved}</strong> loved</span>
+        {recap.hitRate != null ? <span><strong>{recap.hitRate}%</strong> landed</span> : null}
+      </p>
+      {recap.favorite || recap.topGenres.length || recap.moods.length ? (
+        <p className="recap__line">
+          {recap.favorite ? `Best of it: ${recap.favorite}. ` : ""}
+          {recap.topGenres.length ? `Mostly ${recap.topGenres.join(" and ").toLowerCase()}. ` : ""}
+          {recap.moods.length ? `You asked for ${joinList(recap.moods.map((mood) => `“${mood}”`))}.` : ""}
+        </p>
+      ) : null}
+      <div className="log-panel__actions" style={{ alignItems: "baseline" }}>
+        <button className="btn-quiet" onClick={share}>share your month</button>
+        <span className="meta" role="status">{shared}</span>
+      </div>
+    </section>
+  );
+}
+
 // The log's filters: everything, or one kind of pick to come back to.
 const LOG_FILTERS = [
   ["all", "all", () => true],
@@ -3474,6 +3628,8 @@ function ScreenHistory({ nav, history }) {
             </button>
           </div>
 
+          <RecapCard history={history} />
+
           {history.length ? (
             <div className="log-filters fade-up delay-2" role="group" aria-label="Show">
               {filters
@@ -3551,6 +3707,14 @@ function ScreenHistory({ nav, history }) {
                       style={{ marginTop: 10, fontSize: 9.5, letterSpacing: "0.16em", color: "var(--bone-4)" }}
                     >
                       chose · from a shortlist
+                    </div>
+                  )}
+                  {entry.mode === "rewatch" && (
+                    <div
+                      className="meta"
+                      style={{ marginTop: 10, fontSize: 9.5, letterSpacing: "0.16em", color: "var(--bone-4)" }}
+                    >
+                      a rewatch
                     </div>
                   )}
                   {entry.mode === "resume" && (
@@ -3700,20 +3864,17 @@ function ScreenHistory({ nav, history }) {
 }
 
 // The other ways to go, on one line after the main button:
-// "or  surprise me · I have one in mind · for two". Options can be false.
+// "or  surprise me   I have one in mind   for two". Options can be false.
 function OrLinks({ options, align = "center" }) {
   const shown = options.filter(Boolean);
   if (!shown.length) return null;
   return (
     <div className={align === "left" ? "or-links or-links--left" : "or-links"}>
       <span className="meta or-links__or" aria-hidden="true">or</span>
-      {shown.map(([label, onClick], index) => (
-        <span key={label} className="or-links__item">
-          {index ? <span className="or-links__dot" aria-hidden="true">·</span> : null}
-          <button className="btn-quiet" onClick={onClick}>
-            {label}
-          </button>
-        </span>
+      {shown.map(([label, onClick]) => (
+        <button key={label} className="btn-quiet" onClick={onClick}>
+          {label}
+        </button>
       ))}
     </div>
   );
@@ -4287,6 +4448,42 @@ function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre
             </>
           )}
 
+          <section className="knows-section fade-up delay-2" aria-labelledby="knows-watch">
+            <div className="eyebrow" id="knows-watch">Where you watch</div>
+            <p className="knows-section__lede">
+              Tap the services you have, and En only picks what's on one of them. If nothing there fits a night, it looks
+              everywhere and says so. None picked means anywhere.
+            </p>
+            <div className="chips chips--left services-chips" role="group" aria-label="Your streaming services">
+              {STREAMING_SERVICES.map(({ label }) => {
+                const on = preferences.services.includes(label);
+                return (
+                  <button
+                    key={label}
+                    className="chip"
+                    aria-pressed={on}
+                    onClick={() => onChange({ services: on ? preferences.services.filter((item) => item !== label) : [...preferences.services, label] })}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="knows-row" style={{ marginTop: 24 }}>
+              <div>
+                <span className="knows-row__label">I watch dubbed</span>
+                <span className="meta knows-row__why">
+                  {preferences.dub
+                    ? "En leans toward shows with an English dub. It goes by what it knows; dubs differ by region."
+                    : "Off: subtitles are fine."}
+                </span>
+              </div>
+              <button className="btn-quiet" aria-pressed={preferences.dub} onClick={() => onChange({ dub: !preferences.dub })}>
+                {preferences.dub ? "turn off" : "turn on"}
+              </button>
+            </div>
+          </section>
+
           <section className="knows-section fade-up delay-2" aria-labelledby="knows-account" style={{ paddingBottom: 96 }}>
             <div className="eyebrow" id="knows-account">Your list and devices</div>
             <p className="knows-section__lede">Where En reads your list from, and your log on other devices.</p>
@@ -4827,7 +5024,7 @@ function validateRecommendation(recommendation, candidateList, memory, unwatched
     return { ok: false, error: "that title isn't in candidateList; pick one that is" };
   }
 
-  if (!candidate.resume && (isMemoryExcludedTitle(recommendation.title, memory) || isMemoryExcludedTitle(recommendation.title_jp, memory))) {
+  if (!candidate.resume && !candidate.rewatch && (isMemoryExcludedTitle(recommendation.title, memory) || isMemoryExcludedTitle(recommendation.title_jp, memory))) {
     return { ok: false, error: "that title is already on the user's list or was recommended before" };
   }
 
@@ -4852,13 +5049,15 @@ function mergeCandidateMeta(recommendation, candidate) {
     title_jp: candidate.title_jp || recommendation.title_jp || candidate.title,
     year: candidate.year,
     episodes: candidate.episodes,
+    ...(candidate.duration ? { duration: candidate.duration, format: candidate.format } : {}),
     genre: candidate.genre,
     image_url: candidate.image_url || recommendation.image_url || "",
-    watch_links: candidate.watchLinks || [],
+    watch_links: candidate.watchLinks || candidate.watch_links || [],
     // What the pick was, for En to learn from how it lands (learning.js).
     features: featuresOf(candidate),
     // Saved with the pick so later pools can exclude it by id, not just name.
     ...(candidate.resume ? { resume: candidate.resume } : {}),
+    ...(candidate.rewatch ? { rewatch: candidate.rewatch } : {}),
     ...(candidate.anilistId ? { anilistId: candidate.anilistId } : {}),
     ...(candidate.malId ? { malId: candidate.malId } : {})
   };
@@ -4883,7 +5082,18 @@ function formatAnimeMeta(pick) {
     parts.push(pick.genre);
   }
 
+  // How long all of it takes, when AniList said how long an episode is.
+  const minutes = pick.duration ? totalMinutes(pick) : null;
+  if (minutes) parts.push(formatRuntime(minutes));
+
   return parts.filter(Boolean).join(" · ");
+}
+
+// "1 h 40 min" / "about 5 hours" / "about 26 hours".
+function formatRuntime(minutes) {
+  if (minutes < 60) return `${minutes} min`;
+  if (minutes < 120) return `${Math.floor(minutes / 60)} h ${minutes % 60 ? `${minutes % 60} min` : ""}`.trim();
+  return `about ${Math.round(minutes / 60)} hours`;
 }
 
 function formatJapaneseDate(date) {

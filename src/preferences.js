@@ -1,4 +1,5 @@
 import { normalizeTitleForCompare, uniqueTitles } from "./titleUtils.js";
+import { STREAMING_SERVICES } from "./streaming.js";
 
 // What the user has told En directly, as opposed to what En inferred: genres
 // to leave out of every pick, corrections to the inferred taste profile,
@@ -18,6 +19,10 @@ const DEFAULTS = {
   mutedSeeds: [],
   notes: "",
   malSync: null, // "on" | "off" | null (not asked yet)
+  // "Only what I can watch": streaming services (streaming.js labels); empty is anywhere.
+  services: [],
+  // Leans toward shows with an English dub.
+  dub: false,
   updatedAt: ""
 };
 
@@ -96,6 +101,8 @@ export function normalizePreferences(raw) {
       .slice(0, 60),
     notes: typeof value.notes === "string" ? value.notes.slice(0, NOTES_LIMIT) : "",
     malSync: value.malSync === "on" || value.malSync === "off" ? value.malSync : null,
+    services: (Array.isArray(value.services) ? value.services : []).filter((label) => STREAMING_SERVICES.some((service) => service.label === label)),
+    dub: value.dub === true,
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : ""
   };
 }
@@ -153,7 +160,8 @@ export function userSaidFor(preferences = loadPreferences()) {
     notes: preferences.notes.trim() || null,
     moreOf: preferences.moreOf.length ? preferences.moreOf : null,
     notReally: preferences.notFavorite.length ? preferences.notFavorite : null,
-    neverSuggest: preferences.excludedGenres.length ? preferences.excludedGenres : null
+    neverSuggest: preferences.excludedGenres.length ? preferences.excludedGenres : null,
+    prefersDub: preferences.dub || null
   };
   const present = Object.fromEntries(Object.entries(said).filter(([, value]) => value));
   return Object.keys(present).length ? present : null;
