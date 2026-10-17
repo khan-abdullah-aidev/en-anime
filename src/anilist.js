@@ -126,3 +126,44 @@ function toAniListResult(media) {
     watch_links: streamingLinks(media.externalLinks)
   };
 }
+
+const NEXT_AIRING_QUERY = `query ($id: Int) {
+  Media(id: $id, type: ANIME) { status nextAiringEpisode { episode airingAt } }
+}`;
+
+// The next episode of a show that's still airing, or null. Read fresh each
+// time a pick opens (it changes weekly), and never worth an error.
+export async function fetchNextAiring(anilistId) {
+  if (!Number.isInteger(anilistId)) return null;
+  try {
+    const data = await aniListRequest(NEXT_AIRING_QUERY, { id: anilistId });
+    const next = data?.Media?.nextAiringEpisode;
+    if (data?.Media?.status !== "RELEASING" || !next?.airingAt) return null;
+    return { episode: next.episode, airingAt: next.airingAt * 1000 };
+  } catch {
+    return null;
+  }
+}
+
+const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+// "episode 7 airs Thursday" / "today" / "tomorrow" / "on 12 Nov", in the
+// viewer's own time zone.
+export function describeNextAiring(next, now = Date.now()) {
+  if (!next?.airingAt || next.airingAt <= now) return "";
+  const startOfDay = (time) => {
+    const date = new Date(time);
+    date.setHours(0, 0, 0, 0);
+    return date.getTime();
+  };
+  const days = Math.round((startOfDay(next.airingAt) - startOfDay(now)) / 86400000);
+  const when =
+    days === 0
+      ? "today"
+      : days === 1
+        ? "tomorrow"
+        : days < 7
+          ? WEEKDAYS[new Date(next.airingAt).getDay()]
+          : `on ${new Date(next.airingAt).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`;
+  return `${next.episode ? `episode ${next.episode}` : "the next episode"} airs ${when}`;
+}

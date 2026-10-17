@@ -169,7 +169,7 @@ test("'What En knows about you' shows its evidence and takes corrections", async
   await seed(page, { "en.listSource": { kind: "anilist", username: "someone" }, "en.activeMode": "username" });
 
   await page.goto("/log");
-  await page.getByRole("button", { name: "what En knows about you →" }).click();
+  await page.getByRole("button", { name: "you · your list & settings →" }).click();
   await expect(page).toHaveURL(/\/what-en-knows$/);
   await expect(page.getByRole("heading", { name: "About you" })).toBeFocused();
   await expect(page.getByText(/Read from your AniList list: 12 finished, 4 dropped/)).toBeVisible();

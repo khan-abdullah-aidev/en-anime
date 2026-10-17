@@ -243,6 +243,30 @@ button:focus-visible {
 .log-entry-link:hover,
 .log-entry-link:focus-visible { text-decoration-color: var(--bone-3); }
 
+.log-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  margin: -40px 0 56px;
+}
+/* The filters are a choice, not a strike-through like "leave out". */
+.log-filters .chip[aria-pressed="true"] {
+  border-color: rgba(184, 83, 63, 0.55);
+  color: var(--shu);
+  text-decoration: none;
+}
+.log-entry { display: flex; gap: 22px; align-items: flex-start; }
+.log-entry__body { flex: 1; min-width: 0; }
+.log-entry__cover {
+  border: 1px solid var(--hairline);
+  flex-shrink: 0;
+  height: 96px;
+  margin-top: 4px;
+  object-fit: cover;
+  width: 68px;
+}
+.thinking-wait { font-size: 10.5px; letter-spacing: 0.18em; }
+
 .answer-controls {
   align-items: baseline;
   display: flex;
@@ -427,12 +451,20 @@ button:focus-visible {
   display: grid;
   gap: 64px;
   grid-template-columns: auto 240px minmax(280px, 320px);
+  /* The title sits over the reason beside the poster; on phones it moves
+     above the poster, so the first screen says what En picked. */
+  grid-template-areas:
+    "vertical center head"
+    "vertical center copy";
+  grid-template-rows: auto 1fr;
+  row-gap: 0;
   justify-content: center;
   max-width: 880px;
   width: 100%;
 }
 
 .reveal-scroll__vertical {
+  grid-area: vertical;
   align-self: stretch;
   border-right: 1px solid var(--hairline-strong);
   color: var(--bone-3);
@@ -445,15 +477,44 @@ button:focus-visible {
 }
 
 .reveal-scroll__center {
+  grid-area: center;
   align-items: center;
   display: flex;
   flex-direction: column;
   max-width: 280px;
 }
 
-.reveal-scroll__copy {
+.reveal-scroll__head {
+  grid-area: head;
   max-width: 320px;
   padding-top: 8px;
+}
+.reveal-scroll__copy {
+  grid-area: copy;
+  max-width: 320px;
+}
+/* The vertical strip carries the Japanese title on wider screens. */
+.reveal-scroll__jp {
+  color: var(--bone-3);
+  display: none;
+  font-size: 15px;
+  letter-spacing: 0.16em;
+  margin: -14px 0 0;
+}
+.key-hint {
+  color: var(--bone-4);
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  margin-left: 14px;
+}
+@media (hover: none) { .key-hint { display: none; } }
+.own-reason { margin-top: 4px; }
+.own-reason__input {
+  font-family: var(--serif);
+  font-size: 17px;
+  font-style: italic;
+  padding: 10px 20px;
+  width: 100%;
 }
 
 .reveal-scroll__title {
@@ -497,23 +558,28 @@ button:focus-visible {
   .reveal-scroll {
     gap: 28px;
     grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      "vertical head"
+      "vertical center"
+      "vertical copy";
+    grid-template-rows: auto auto 1fr;
     max-width: 560px;
   }
 
   .reveal-scroll__center {
-    grid-column: 2;
     justify-self: center;
   }
 
+  .reveal-scroll__head,
   .reveal-scroll__copy {
-    grid-column: 2;
     max-width: 360px;
   }
 
   .reveal-scroll__vertical {
-    grid-row: 1 / span 2;
     font-size: 22px;
   }
+
+  .chrome-step__name { display: none; }
 
   .reveal-scroll__title {
     font-size: 44px;
@@ -545,6 +611,20 @@ button:focus-visible {
   }
 
   .landing-footnote { margin-top: 48px; }
+
+  /* Phones: one column, title first, and the Japanese title as a line
+     under it instead of a strip that takes a sixth of the width. */
+  .reveal-a-top { margin-bottom: 28px; }
+  .reveal-scroll {
+    gap: 22px;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "head" "center" "copy";
+    grid-template-rows: auto;
+  }
+  .reveal-scroll__vertical { display: none; }
+  .reveal-scroll__jp { display: block; }
+  .reveal-scroll__title { font-size: 40px; margin: 16px 0 20px; }
+  .reveal-scroll__center .kv-placeholder { width: 200px !important; height: 284px !important; }
 
   /* Phones: smaller words in the pills so a short mood stays on one line.
      (The sizes are set inline per screen, hence the !important.) */
@@ -579,6 +659,16 @@ button:focus-visible {
   text-decoration-thickness: 1px;
 }
 .leave-out { margin-top: 16px; }
+.mood-chips { margin: 28px auto 0; max-width: 560px; }
+/* A starter is a choice, not a strike-through like "leave out". */
+.mood-chips .chip[aria-pressed="true"] { border-color: var(--bone-3); color: var(--bone); text-decoration: none; }
+.next-airing {
+  color: var(--shu);
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  margin: 8px 0 0;
+  text-align: center;
+}
 .leave-out__panel {
   margin: 12px auto 0;
   max-width: 560px;
@@ -614,6 +704,8 @@ button:focus-visible {
   font-size: 23px;
   font-weight: 300;
 }
+.account-links { display: flex; flex-wrap: wrap; gap: 4px 22px; margin-top: 4px; }
+.knows-row__year { color: var(--bone-3); font-style: normal; }
 .knows-row__why {
   display: block;
   margin-top: 4px;
@@ -688,6 +780,10 @@ button:focus-visible {
 .notice__yes { color: var(--shu); }
 
 @media (max-width: 520px) {
+  /* Phones: the date and state sit above the entry, not beside it. */
+  .log-row { gap: 14px !important; grid-template-columns: minmax(0, 1fr) !important; }
+  .log-entry { gap: 14px; }
+  .log-entry__cover { height: 72px; width: 51px; }
   .knows-section { margin-top: 56px; }
   .log-panel { margin-top: 56px; }
 }

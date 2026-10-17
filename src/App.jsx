@@ -45,7 +45,7 @@ import {
 import { answersFromList, buildWatchHistoryDigest, describeQueriedTitle } from "./watchHistory.js";
 import { buildOpenCandidatePool, buildTogetherPool, seedBench, toModelCandidate } from "./discovery.js";
 import { animeTitleKeys, normalizeTitleForCompare, titleMatchesAnime, uniqueTitles } from "./titleUtils.js";
-import { resolveAnimeOnAniList } from "./anilist.js";
+import { describeNextAiring, fetchNextAiring, resolveAnimeOnAniList } from "./anilist.js";
 import { PARENT, VIEW, parsePath, pathFor } from "./routes.js";
 import { fetchPublicList, sourceLabel } from "./lists.js";
 import { debugLog } from "./debug.js";
@@ -102,6 +102,7 @@ const MAX_RECOMMENDATION_ATTEMPTS = 3;
 // within one visit instead of refetching for every request.
 const MAL_LIST_TTL_MS = 10 * 60 * 1000;
 const MOOD_DRAFT_KEY = "en.moodDraft";
+const LOG_FILTER_KEY = "en.logFilter";
 
 // Works out what a URL (or a browser-history entry) should show right now.
 // Used on first load and on back/forward; in-app navigation calls go().
@@ -355,7 +356,7 @@ export default function App() {
       .catch((listError) =>
         !cancelled && setKnows({
           status: "error",
-          error: isMalAuthError(listError) ? "Your MyAnimeList session expired. Connect again from the log." : listError.message
+          error: isMalAuthError(listError) ? "Your MyAnimeList session expired. Connect again at the bottom of this page." : listError.message
         })
       );
     return () => {
@@ -364,7 +365,7 @@ export default function App() {
   }, [view, knows.reload]);
 
   useEffect(() => {
-    if (view === VIEW.HISTORY && syncState.available === null) {
+    if (view === VIEW.KNOWS && syncState.available === null) {
       syncAvailable().then((available) => setSyncState((current) => ({ ...current, available })));
     }
   }, [view]);
@@ -1664,6 +1665,7 @@ export default function App() {
     clearHistory: handleClearHistory,
     disconnect: handleDisconnect,
     knows: () => go(VIEW.KNOWS),
+    hasInput: hasRecommendationInput(),
     createRoom: handleCreateRoom,
     roomReady: handleRoomReady,
     joinRoom: handleJoinRoom,
@@ -1809,14 +1811,7 @@ export default function App() {
           <ScreenFeedback nav={nav} pick={revealEntry.recommendation} />
         )}
         {view === VIEW.HISTORY && (
-          <ScreenHistory
-            nav={nav}
-            history={history}
-            source={mode === "username" ? "username" : mode === "manual" || !tokens?.access_token ? "manual" : "mal"}
-            listSource={loadListSource()}
-            malSync={preferences.malSync}
-            sync={{ settings: syncSettings, ...syncState }}
-          />
+          <ScreenHistory nav={nav} history={history} />
         )}
         {view === VIEW.KNOWS && (
           <ScreenKnows
@@ -1830,6 +1825,9 @@ export default function App() {
             mode={mode}
             listSource={loadListSource()}
             catchingUp={catchingUp}
+            source={mode === "username" ? "username" : mode === "manual" || !tokens?.access_token ? "manual" : "mal"}
+            malSync={preferences.malSync}
+            sync={{ settings: syncSettings, ...syncState }}
           />
         )}
       </div>
@@ -1899,23 +1897,44 @@ function ChromeLeft() {
   );
 }
 
-function Chrome({ step, total, right, onLog }) {
+// Where tonight's request is, out of three: the question, En choosing, the pick.
+function StepCount({ step, name, total = 3 }) {
+  return (
+    <span className="meta chrome-step" style={{ letterSpacing: "0.18em" }} aria-label={`Step ${step} of ${total}: ${name}`}>
+      {String(step).padStart(2, "0")}{" "}
+      <span style={{ opacity: 0.5 }}>
+        / {String(total).padStart(2, "0")}
+      </span>
+      <span className="chrome-step__name"> · {name}</span>
+    </span>
+  );
+}
+
+// YOU (what En knows, your list, your devices) and LOG, once En has a list.
+function ChromeLinks({ onLog }) {
+  const nav = useContext(NavContext);
+  return (
+    <>
+      {nav?.hasInput && (
+        <button className="btn-quiet" onClick={nav.knows} aria-label="You: what En knows, your list and settings">
+          YOU
+        </button>
+      )}
+      <button className="btn-quiet" onClick={onLog}>
+        LOG
+      </button>
+    </>
+  );
+}
+
+function Chrome({ step, stepName, right, onLog }) {
   return (
     <div className="app-chrome">
       <ChromeLeft />
       <div className="chrome-right">
-        {step != null && (
-          <span className="meta chrome-step" style={{ letterSpacing: "0.18em" }}>
-            {String(step).padStart(2, "0")}{" "}
-            <span style={{ opacity: 0.5 }}>
-              / {String(total).padStart(2, "0")}
-            </span>
-          </span>
-        )}
+        {step != null && <StepCount step={step} name={stepName} />}
         {right}
-        <button className="btn-quiet" onClick={onLog}>
-          LOG
-        </button>
+        <ChromeLinks onLog={onLog} />
       </div>
     </div>
   );
@@ -1992,7 +2011,7 @@ function ScreenManual({ onLog, onSubmit, manualList, setManualList }) {
   const ref = useRef(null);
 
   useEffect(() => {
-    const t = setTimeout(() => ref.current?.focus(), 600);
+    const t = setTimeout(() => focusIfIdle(ref.current), 600);
     return () => clearTimeout(t);
   }, []);
 
@@ -2123,6 +2142,10 @@ function ScreenPending({ nav, pending }) {
   );
 }
 
+// Starters En already knows how to read: "a film" and "airing now" become
+// hard limits (discovery.js), the rest steer the mood.
+const MOOD_STARTERS = ["something cozy", "make me cry", "short, under 13 episodes", "a film tonight", "airing now", "something with a twist"];
+
 function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mood, setMood, excluded, onToggleGenre, onClearGenres }) {
   const ref = useRef(null);
   const hints = useMemo(
@@ -2138,7 +2161,7 @@ function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mo
   const [hintIdx, setHintIdx] = useState(0);
 
   useEffect(() => {
-    const t = setTimeout(() => ref.current?.focus(), 600);
+    const t = setTimeout(() => focusIfIdle(ref.current), 600);
     return () => clearTimeout(t);
   }, []);
 
@@ -2149,7 +2172,7 @@ function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mo
 
   return (
     <div className="app-frame">
-      <Chrome step={1} total={3} onLog={onLog} />
+      <Chrome step={1} stepName="your mood" onLog={onLog} />
       <div className="app-stage">
         <div className="column" style={{ textAlign: "center" }}>
           <div className="eyebrow fade-up">Tonight</div>
@@ -2164,7 +2187,7 @@ function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mo
             style={{
               color: "var(--bone-3)",
               fontSize: 15,
-              marginBottom: 80,
+              marginBottom: 56,
               fontStyle: "italic"
             }}
           >
@@ -2202,7 +2225,24 @@ function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mo
             )}
           </div>
 
-          <div className="fade-up delay-4" style={{ marginTop: 80 }}>
+          {/* For when nothing comes to mind: tap one, then change it if you like. */}
+          <div className="chips mood-chips fade-up delay-3" role="group" aria-label="Or start from one of these">
+            {MOOD_STARTERS.map((starter) => (
+              <button
+                key={starter}
+                className="chip"
+                aria-pressed={mood.trim() === starter}
+                onClick={() => {
+                  setMood(starter);
+                  ref.current?.focus();
+                }}
+              >
+                {starter}
+              </button>
+            ))}
+          </div>
+
+          <div className="fade-up delay-4" style={{ marginTop: 56 }}>
             <button
               className="btn-link"
               onClick={onConsider}
@@ -2238,13 +2278,13 @@ function ScreenShortlist({ onLog, onSubmit, shortlist, setShortlist }) {
   const ref = useRef(null);
 
   useEffect(() => {
-    const t = setTimeout(() => ref.current?.focus(), 600);
+    const t = setTimeout(() => focusIfIdle(ref.current), 600);
     return () => clearTimeout(t);
   }, []);
 
   return (
     <div className="app-frame">
-      <Chrome step={1} total={3} onLog={onLog} />
+      <Chrome step={1} stepName="your shortlist" onLog={onLog} />
       <div className="app-stage">
         <div className="column" style={{ textAlign: "center" }}>
           <div className="eyebrow fade-up">Instead of a mood</div>
@@ -2312,13 +2352,13 @@ function ScreenShortlistMood({ onLog, titles, mood, setMood, onSubmit, onSkip })
   const isSingle = titles.length <= 1;
 
   useEffect(() => {
-    const t = setTimeout(() => ref.current?.focus(), 600);
+    const t = setTimeout(() => focusIfIdle(ref.current), 600);
     return () => clearTimeout(t);
   }, []);
 
   return (
     <div className="app-frame">
-      <Chrome step={2} total={3} onLog={onLog} />
+      <Chrome step={2} stepName="your mood" onLog={onLog} />
       <div className="app-stage">
         <div className="column" style={{ textAlign: "center" }}>
           <div className="eyebrow fade-up">{isSingle ? "Considering" : "Choosing between"}</div>
@@ -2393,7 +2433,7 @@ function ScreenUsername({ onLog, source, checking, onSubmit }) {
   const submit = () => ready && onSubmit({ kind, username });
 
   useEffect(() => {
-    const t = setTimeout(() => ref.current?.focus(), 600);
+    const t = setTimeout(() => focusIfIdle(ref.current), 600);
     return () => clearTimeout(t);
   }, [kind]);
 
@@ -2470,7 +2510,7 @@ function ScreenTogether({ onLog, partner, checking, onSubmit, onCreateRoom, myNa
   };
 
   useEffect(() => {
-    const t = setTimeout(() => ref.current?.focus(), 600);
+    const t = setTimeout(() => focusIfIdle(ref.current), 600);
     return () => clearTimeout(t);
   }, [kind]);
 
@@ -2864,7 +2904,7 @@ function ScreenTogetherMood({ onLog, name, mood, setMood, onSubmit, onSurprise, 
   const ref = useRef(null);
 
   useEffect(() => {
-    const t = setTimeout(() => ref.current?.focus(), 600);
+    const t = setTimeout(() => focusIfIdle(ref.current), 600);
     return () => clearTimeout(t);
   }, []);
 
@@ -2945,16 +2985,19 @@ function ScreenThinking({ onLog, status, mood, heard, watchedCount, mode }) {
 
   return (
     <div className="app-frame">
-      <Chrome step={2} total={3} onLog={onLog} />
+      <Chrome step={2} stepName="choosing" onLog={onLog} />
       <div className="app-stage">
         <div className="column" style={{ textAlign: "center" }}>
           <h2 className="visually-hidden">En is choosing</h2>
           <p className="visually-hidden" role="status" aria-live="polite">
             {lines[phase - 1] || ""}
           </p>
-          <div className="breathe" style={{ marginBottom: 64 }} aria-hidden="true">
+          <div className="breathe" style={{ marginBottom: 24 }} aria-hidden="true">
             <span className="dot" style={{ width: 8, height: 8 }}></span>
           </div>
+          <p className="meta thinking-wait" style={{ marginBottom: 40 }}>
+            usually about twenty seconds
+          </p>
 
           <div style={{ minHeight: 140 }} aria-hidden="true">
             {lines.slice(0, phase).map((line, i) => (
@@ -2981,6 +3024,8 @@ function ScreenThinking({ onLog, status, mood, heard, watchedCount, mode }) {
   );
 }
 
+const OWN_REASON_LIMIT = 120;
+
 const NOT_TONIGHT_REASONS = [
   ["too long", "too long"],
   ["too heavy", "too heavy"],
@@ -2992,16 +3037,48 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight }) {
   const pick = entry.recommendation;
   const [settled, setSettled] = useState("");
   const [choosingReason, setChoosingReason] = useState(false);
+  // "Something else": the user's own words for why not, which steer the next
+  // pick the same way "too long" does.
+  const [ownReason, setOwnReason] = useState(null);
+  const [nextAiring, setNextAiring] = useState(null);
+  const canAccept = isNewPick && !settled;
+
+  // A show still airing: when the next episode is out.
+  useEffect(() => {
+    let cancelled = false;
+    fetchNextAiring(pick.anilistId).then((next) => !cancelled && setNextAiring(next));
+    return () => {
+      cancelled = true;
+    };
+  }, [pick.anilistId]);
+  const airing = describeNextAiring(nextAiring);
+
+  function watchTonight() {
+    nav.watchTonight();
+    setSettled("tonight");
+  }
+
+  // Enter takes the pick, unless focus is on something that already answers
+  // Enter itself (a button, a link, a field).
+  useEffect(() => {
+    if (!canAccept) return undefined;
+    function onKey(event) {
+      if (event.key !== "Enter" || event.repeat || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      if (event.target.closest?.("button, a, input, textarea, select, [contenteditable]")) return;
+      event.preventDefault();
+      watchTonight();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [canAccept]);
 
   return (
     <div className="app-frame reveal-a-frame">
       <div className="reveal-a-top">
         <ChromeLeft />
         <div className="chrome-right">
-          {isNewPick && <span className="meta chrome-step" style={{ letterSpacing: "0.2em" }}>03 / 03</span>}
-          <button className="btn-quiet" onClick={nav.log}>
-            LOG
-          </button>
+          {isNewPick && <StepCount step={3} name="the pick" />}
+          <ChromeLinks onLog={nav.log} />
         </div>
       </div>
 
@@ -3013,42 +3090,7 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight }) {
             {pick.title_jp} ・ {formatJapaneseDate(new Date(entry.date))}
           </div>
 
-          <div className="reveal-scroll__center ink-bloom delay-2">
-            <KV label="key visual" src={pick.image_url} w={240} h={340} />
-            <p
-              className="meta"
-              style={{
-                marginTop: 12,
-                fontSize: 10.5,
-                letterSpacing: "0.22em"
-              }}
-            >
-              {formatAnimeMeta(pick)}
-            </p>
-            {pick.resume ? (
-              <p className="meta" style={{ marginTop: 6, fontSize: 10.5, letterSpacing: "0.16em", textAlign: "center" }}>
-                you stopped at episode {pick.resume.watched}
-                {pick.resume.total ? ` of ${pick.resume.total}` : ""}
-              </p>
-            ) : null}
-            {pick.watch_links?.length ? (
-              <>
-                <p className="meta watch-links">
-                  <span>streams on</span>
-                  {pick.watch_links.map((link) => (
-                    <a key={link.site} href={link.url} target="_blank" rel="noopener noreferrer">
-                      {link.site}
-                    </a>
-                  ))}
-                </p>
-                <p className="meta watch-links__note">
-                  What plays depends on your region, so a link may be blocked or hidden where you are.
-                </p>
-              </>
-            ) : null}
-          </div>
-
-          <div className="reveal-scroll__copy ink-bloom delay-3">
+          <div className="reveal-scroll__head ink-bloom delay-2">
             <div className="eyebrow shu">
               {pick.resume
                 ? "・ pick up where you left off"
@@ -3069,7 +3111,46 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight }) {
             >
               {pick.title}
             </h1>
+            {pick.title_jp && pick.title_jp !== pick.title ? <p className="reveal-scroll__jp jp">{pick.title_jp}</p> : null}
+          </div>
 
+          <div className="reveal-scroll__center ink-bloom delay-2">
+            <KV label="key visual" src={pick.image_url} w={240} h={340} />
+            <p
+              className="meta"
+              style={{
+                marginTop: 12,
+                fontSize: 10.5,
+                letterSpacing: "0.22em"
+              }}
+            >
+              {formatAnimeMeta(pick)}
+            </p>
+            {pick.resume ? (
+              <p className="meta" style={{ marginTop: 6, fontSize: 10.5, letterSpacing: "0.16em", textAlign: "center" }}>
+                you stopped at episode {pick.resume.watched}
+                {pick.resume.total ? ` of ${pick.resume.total}` : ""}
+              </p>
+            ) : null}
+            {airing ? <p className="meta next-airing">airing now · {airing}</p> : null}
+            {pick.watch_links?.length ? (
+              <>
+                <p className="meta watch-links">
+                  <span>streams on</span>
+                  {pick.watch_links.map((link) => (
+                    <a key={link.site} href={link.url} target="_blank" rel="noopener noreferrer">
+                      {link.site}
+                    </a>
+                  ))}
+                </p>
+                <p className="meta watch-links__note">
+                  What plays depends on your region, so a link may be blocked or hidden where you are.
+                </p>
+              </>
+            ) : null}
+          </div>
+
+          <div className="reveal-scroll__copy ink-bloom delay-3">
             <hr
               className="hairline"
               style={{ width: 56, margin: "0 0 28px" }}
@@ -3101,15 +3182,10 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight }) {
                 </p>
               ) : (
                 <>
-                  <button
-                    className="btn-link"
-                    onClick={() => {
-                      nav.watchTonight();
-                      setSettled("tonight");
-                    }}
-                  >
+                  <button className="btn-link" onClick={watchTonight} aria-keyshortcuts="Enter">
                     Watch it tonight
                   </button>
+                  <span className="meta key-hint" aria-hidden="true">enter ↵</span>
                   <div style={{ marginTop: 20 }}>
                     <button
                       className="btn-quiet"
@@ -3130,7 +3206,33 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight }) {
                   )}
                   {canPassTonight && (
                     <div style={{ marginTop: 8 }}>
-                      {choosingReason ? (
+                      {ownReason !== null ? (
+                        <form
+                          className="own-reason fade-in"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            nav.notTonight(ownReason.trim());
+                          }}
+                        >
+                          <input
+                            autoFocus
+                            value={ownReason}
+                            maxLength={OWN_REASON_LIMIT}
+                            onChange={(event) => setOwnReason(event.target.value)}
+                            aria-label="What would be better tonight?"
+                            placeholder="same vibe, but a movie"
+                            className="meh-note-input own-reason__input"
+                          />
+                          <div className="choice-links" style={{ marginTop: 14, gap: 18, flexDirection: "row", justifyContent: "flex-start" }}>
+                            <button type="submit" className="btn-link" disabled={!ownReason.trim()}>
+                              Ask again
+                            </button>
+                            <button type="button" className="btn-quiet" onClick={() => setOwnReason(null)}>
+                              never mind
+                            </button>
+                          </div>
+                        </form>
+                      ) : choosingReason ? (
                         <div className="answer-controls" role="group" aria-label="Why not tonight?" style={{ marginTop: 0 }}>
                           <span className="meta answer-controls__prompt">why not?</span>
                           {NOT_TONIGHT_REASONS.map(([label, reason]) => (
@@ -3138,6 +3240,9 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight }) {
                               {label}
                             </button>
                           ))}
+                          <button className="btn-quiet" onClick={() => setOwnReason("")}>
+                            something else…
+                          </button>
                         </div>
                       ) : (
                         <button className="btn-quiet" onClick={() => setChoosingReason(true)}>
@@ -3331,14 +3436,32 @@ function PastPickAnswer({ entry, onAnswer }) {
   );
 }
 
-function ScreenHistory({ nav, history, source, listSource, malSync, sync }) {
+// The log's filters: everything, or one kind of pick to come back to.
+const LOG_FILTERS = [
+  ["all", "all", () => true],
+  ["later", "saved for later", (entry) => entry.state === "pending"],
+  ["watching", "watching", (entry) => entry.state === "watching"],
+  ["unrated", "not answered", (entry) => entry.state === "unrated"],
+  ["good", "good", (entry) => entry.state === "rated" && entry.feedback === "good"]
+];
+
+function ScreenHistory({ nav, history }) {
   const [editing, setEditing] = useState(false);
+  const [filter, setFilter] = useState(() => readSession(LOG_FILTER_KEY) || "all");
+  const filters = LOG_FILTERS.map(([key, label, test]) => ({ key, label, count: history.filter(test).length, test }));
+  const active = filters.find((option) => option.key === filter && (option.key === "all" || option.count)) || filters[0];
+  const shown = history.filter(active.test);
+
+  function chooseFilter(key) {
+    setFilter(key);
+    writeSession(LOG_FILTER_KEY, key);
+  }
 
   return (
     <div className="app-frame">
       <Chrome
         right={
-          <button className="btn-quiet" onClick={nav.newRecommendation}>
+          <button className="btn-quiet" onClick={nav.newRecommendation} aria-label="New recommendation">
             <span className="label-full">new recommendation</span>
             <span className="label-short">new</span> →
           </button>
@@ -3375,7 +3498,7 @@ function ScreenHistory({ nav, history, source, listSource, malSync, sync }) {
             }}
           >
             <button className="btn-quiet" onClick={nav.knows} style={{ color: "var(--bone-2)" }}>
-              what En knows about you →
+              you · your list & settings →
             </button>
             <button
               className="btn-quiet"
@@ -3394,51 +3517,38 @@ function ScreenHistory({ nav, history, source, listSource, malSync, sync }) {
             >
               clear log
             </button>
-            {source === "mal" ? (
-              <>
-                <button className="btn-quiet" onClick={nav.toggleMalSync} aria-pressed={malSync === "on"}>
-                  update MyAnimeList: {malSync === "on" ? "on" : "off"}
-                </button>
-                <button className="btn-quiet" onClick={nav.disconnect}>
-                  disconnect MyAnimeList
-                </button>
-              </>
-            ) : source === "username" ? (
-              <>
-                <button className="btn-quiet" onClick={nav.usernameStart}>
-                  change username{listSource ? ` (${listSource.username}, ${sourceLabel(listSource)})` : ""}
-                </button>
-                <button className="btn-quiet" onClick={nav.connect}>
-                  connect MyAnimeList
-                </button>
-              </>
-            ) : (
-              <>
-                <button className="btn-quiet" onClick={nav.editManualList}>
-                  edit your list
-                </button>
-                <button className="btn-quiet" onClick={nav.usernameStart}>
-                  use a username
-                </button>
-                <button className="btn-quiet" onClick={nav.connect}>
-                  connect MyAnimeList
-                </button>
-              </>
-            )}
           </div>
 
+          {history.length ? (
+            <div className="log-filters fade-up delay-2" role="group" aria-label="Show">
+              {filters
+                .filter((option) => option.key === "all" || option.count)
+                .map((option) => (
+                  <button
+                    key={option.key}
+                    className="chip"
+                    aria-pressed={active.key === option.key}
+                    onClick={() => chooseFilter(option.key)}
+                  >
+                    {option.label}
+                    {option.key === "all" ? "" : ` · ${option.count}`}
+                  </button>
+                ))}
+            </div>
+          ) : null}
+
           <div style={{ display: "flex", flexDirection: "column", gap: 56 }}>
-            {history.map((entry, i) => (
+            {shown.map((entry, i) => (
               <article
                 key={entry.id}
-                className="fade-up"
+                className="fade-up log-row"
                 style={{
                   animationDelay: `${0.3 + Math.min(i, 5) * 0.12}s`,
                   display: "grid",
                   gridTemplateColumns: "110px 1fr",
                   gap: 32,
                   paddingBottom: 56,
-                  borderBottom: i < history.length - 1 ? "1px solid var(--hairline)" : "none"
+                  borderBottom: i < shown.length - 1 ? "1px solid var(--hairline)" : "none"
                 }}
               >
                 <div>
@@ -3522,7 +3632,11 @@ function ScreenHistory({ nav, history, source, listSource, malSync, sync }) {
                   )}
                 </div>
 
-                <div>
+                <div className="log-entry">
+                  {entry.recommendation.image_url ? (
+                    <img className="log-entry__cover" src={entry.recommendation.image_url} alt="" loading="lazy" />
+                  ) : null}
+                  <div className="log-entry__body">
                   <div className="jp" style={{ fontSize: 14, color: "var(--bone-3)", marginBottom: 4 }}>
                     {entry.recommendation.title_jp}
                   </div>
@@ -3609,12 +3723,11 @@ function ScreenHistory({ nav, history, source, listSource, malSync, sync }) {
                       delete
                     </button>
                   )}
+                  </div>
                 </div>
               </article>
             ))}
           </div>
-
-          <SyncPanel nav={nav} sync={sync} source={source} hasLog={history.length > 0} />
 
           <div style={{ textAlign: "center", marginTop: 80, paddingBottom: 80 }}>
             <p
@@ -3810,7 +3923,7 @@ function SyncPanel({ nav, sync, source, hasLog }) {
             ? source === "mal"
               ? "Synced with your MyAnimeList account. Connect the same account on another device and the log is there."
               : "Synced with your MyAnimeList account. Connect MyAnimeList again to keep syncing."
-            : "Synced with this code. On another device, open the log, choose “I have a sync code” and type it in."}
+            : "Synced with this code. On another device, open YOU, choose “I have a sync code” and type it in."}
         </p>
         {!viaMal && <div className="sync-code" aria-label="Your sync code">{settings.code}</div>}
         <p className="meta" role="status" style={{ fontStyle: "normal", fontSize: 12 }}>
@@ -3916,7 +4029,7 @@ function SyncPanel({ nav, sync, source, hasLog }) {
 
 // "What En knows about you": the profile En inferred, with the evidence for
 // each part, and a way to correct every part of it.
-function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre, onRetry, mode, listSource, catchingUp }) {
+function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre, onRetry, mode, listSource, catchingUp, source, malSync, sync }) {
   const list = knows.status === "ready" ? knows.list : null;
   const isList = Array.isArray(list);
   const profile = useMemo(() => (list ? buildTasteProfile({ malList: list, feedbackHistory: history }) : null), [list, history]);
@@ -4131,13 +4244,19 @@ function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre
                     Your favorites. En's pools grow from what fans of these shows love. Take one out and it stops shaping your
                     picks. It stays on your list.
                   </p>
-                  {bench.map((entry) => {
+                  {bench.map((entry, _, all) => {
                     const muted = isMuted(entry);
+                    // Two seasons can share an English title ("Hunter x Hunter",
+                    // 1999 and 2011): tell them apart by year.
+                    const shared = entry.year && all.some((other) => other !== entry && listTitle(other) === listTitle(entry));
                     const score = entry.my_list_status?.score;
                     return (
                       <div key={entry.anilistId || entry.id} className={muted ? "knows-row knows-row--muted" : "knows-row"}>
                         <div>
-                          <span className="knows-row__label" style={{ fontStyle: "italic" }}>{listTitle(entry)}</span>
+                          <span className="knows-row__label" style={{ fontStyle: "italic" }}>
+                            {listTitle(entry)}
+                            {shared ? <span className="knows-row__year"> ({entry.year})</span> : null}
+                          </span>
                           <span className="meta knows-row__why">{score ? `you gave it ${score}` : "finished recently"}</span>
                         </div>
                         <button className="btn-quiet" onClick={() => toggleMuted(entry)}>
@@ -4163,7 +4282,7 @@ function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre
                 />
               ) : null}
 
-              <section className="knows-section" aria-labelledby="knows-notes" style={{ paddingBottom: 96 }}>
+              <section className="knows-section" aria-labelledby="knows-notes">
                 <div className="eyebrow" id="knows-notes">In your own words</div>
                 <p className="knows-section__lede">
                   Anything En should always keep in mind. It's read before every pick, and counts for more than anything En guessed.
@@ -4189,12 +4308,51 @@ function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre
                     {notesSaved && notes.trim() === preferences.notes.trim() ? "saved" : `${notes.length}/${NOTES_LIMIT}`}
                   </span>
                 </div>
-                <div style={{ marginTop: 72 }}>
-                  <SuggestionNote />
-                </div>
               </section>
             </>
           )}
+
+          <section className="knows-section fade-up delay-2" aria-labelledby="knows-account" style={{ paddingBottom: 96 }}>
+            <div className="eyebrow" id="knows-account">Your list and devices</div>
+            <p className="knows-section__lede">Where En reads your list from, and your log on other devices.</p>
+            <div className="account-links">
+            {source === "mal" ? (
+              <>
+                <button className="btn-quiet" onClick={nav.toggleMalSync} aria-pressed={malSync === "on"}>
+                  update MyAnimeList: {malSync === "on" ? "on" : "off"}
+                </button>
+                <button className="btn-quiet" onClick={nav.disconnect}>
+                  disconnect MyAnimeList
+                </button>
+              </>
+            ) : source === "username" ? (
+              <>
+                <button className="btn-quiet" onClick={nav.usernameStart}>
+                  change username{listSource ? ` (${listSource.username}, ${sourceLabel(listSource)})` : ""}
+                </button>
+                <button className="btn-quiet" onClick={nav.connect}>
+                  connect MyAnimeList
+                </button>
+              </>
+            ) : (
+              <>
+                <button className="btn-quiet" onClick={nav.editManualList}>
+                  edit your list
+                </button>
+                <button className="btn-quiet" onClick={nav.usernameStart}>
+                  use a username
+                </button>
+                <button className="btn-quiet" onClick={nav.connect}>
+                  connect MyAnimeList
+                </button>
+              </>
+            )}
+            </div>
+            <SyncPanel nav={nav} sync={sync} source={source} hasLog={history.length > 0} />
+            <div style={{ marginTop: 72 }}>
+              <SuggestionNote />
+            </div>
+          </section>
         </div>
       </div>
     </div>
@@ -4797,4 +4955,12 @@ function formatDate(date) {
     day: "numeric",
     weekday: "long"
   }).format(new Date(date));
+}
+
+// A screen's field takes focus a moment after it appears, unless the user has
+// already moved on to something else (a button, a chip) in that moment.
+function focusIfIdle(element) {
+  const current = document.activeElement;
+  if (!element || (current && current !== document.body && !current.matches?.("h1, h2"))) return;
+  element.focus();
 }
