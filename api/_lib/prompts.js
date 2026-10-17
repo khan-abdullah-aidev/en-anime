@@ -7,13 +7,15 @@ const HISTORY_RULES = `watchHistory is the user's own history. After tonight's m
 - If watchHistory.source is "self-described": lovedTitles is what the user typed when asked what they've seen and loved. It's short and unscored, but it's what they chose to tell you.
 Weight recent activity much more heavily than older signals. Pay special attention to recent drops, low scores, and where they stopped. Reference specific titles from watchHistory by name whenever it sharpens the observation. Never invent history the user doesn't have.
 tasteProfile and recentPatterns are computed from the same history. favoriteGenres and dislikedTropes come from how the user scored and dropped shows relative to their own average, already corrected by what the user said (userSaid).
-userSaid, when present, is what the user told En directly about themselves: notes in their own words, genres they want more of (moreOf), genres En wrongly took for favorites (notReally), and genres they never want suggested (neverSuggest; candidateList already leaves those out). prefersDub means they watch dubbed: lean toward shows you know have an English dub, and don't pick one you know was never dubbed unless nothing else fits. Unlike tasteProfile, these are stated preferences: after tonight's mood they outrank everything else. Honor them without quoting the notes back. If the user names a title themselves, a neverSuggest genre alone is not a reason to veto it.
+userSaid, when present, is what the user told En directly about themselves: notes in their own words, genres they want more of (moreOf), genres En wrongly took for favorites (notReally), and genres they never want suggested (neverSuggest; candidateList already leaves those out). nothingLongerThanEpisodes is a length they never want to go past (candidateList already holds to it unless tonight's mood asks for something long). prefersDub means they watch dubbed: lean toward shows you know have an English dub, and don't pick one you know was never dubbed unless nothing else fits. Unlike tasteProfile, these are stated preferences: after tonight's mood they outrank everything else. Honor them without quoting the notes back. If the user names a title themselves, a neverSuggest genre alone is not a reason to veto it.
 learned, when present, is what En has worked out over time from how its own picks landed with this user: answeredPicks is how many they've answered, recentHitRate how many of the latest landed, landed the traits of picks that worked for them and missed the traits of picks that didn't, with counts. It is evidence about this particular person and grows more reliable as answeredPicks grows: weigh it after tonight's mood and userSaid, alongside watchHistory. A pattern from it can be the reason ("the last three quiet ones landed"), but never invent one.
 feedbackHistory is how En's past picks landed. good means the user liked that direction. meh means avoid that direction unless the mood clearly asks for it. pending means they saved it for later; treat it as a positive signal. watching means they've started it and are partway through; a mild positive signal, not a verdict. skipped means they passed on it without watching; a mild sign the pick didn't appeal, not a verdict on the show.
 If previousAttemptRejected is present, your last answer was rejected by En's checks for that reason. Don't repeat the mistake.`;
 
 const CANDIDATE_RULES = `candidateList is drawn from across AniList, not a fixed list: titles that fans of the user's highest-rated shows recommend, top titles in the genres they score highest, titles matching tonight's mood, and strong recent releases. It is already filtered: nothing on the user's list, nothing En has recommended before, and no sequels to shows they haven't finished. Each entry has genres, tags and an AniList score (out of 100). becauseYouLiked names the user's own highly rated titles whose fans recommend this one, which is a concrete, nameable link to their history. continues means it's the next part of a show they finished. airing means it's still coming out weekly. pastFit (strong, good, mixed, weak, poor), when present, is how picks like this one have landed with this user before; strong and good are real evidence for it, weak and poor against. Neither is a reason by itself: the mood still decides what tonight is for.
 If constraints is present, those are hard limits read from the mood (formats, maxEpisodes/minEpisodes, status, yearMin/yearMax, maxMinutes as the total time they have, which the whole show fits inside) and every candidate already meets them. If constraintsRelaxed is true, nothing met all of them: say so plainly in one short clause, then pick the closest fit.`;
+
+const DAY_RULES = `dayPattern, when present, is how En's picks have landed on weekend nights (Friday, Saturday) versus weeknights for this user, and what tonight is. It's a lean, not a rule: weigh it most when no mood is given, and let any mood that says otherwise win. Don't mention the day unless it's the real reason.`;
 
 const PASSED_OVER_RULES = `passedOverTonight lists picks En already showed the user tonight that they passed on, with why (too long, too heavy, too light, or not feeling it). Move away from that reason: too long means shorter, too heavy means lighter, too light means weightier. Don't mention those titles, and don't apologize for them.`;
 
@@ -33,6 +35,7 @@ Use watchHistory, tonight's mood, and feedbackHistory. When a mood is given, it 
 ${HISTORY_RULES}
 ${CANDIDATE_RULES}
 ${PASSED_OVER_RULES}
+${DAY_RULES}
 A candidate with resume is the exception to "nothing on the user's list": it's a show they started and set aside (resume.status, resume.stoppedAt as episodes watched / total, resume.since as when they last touched it). Pick one only when finishing it suits tonight better than anything new; if you do, name where they stopped, and the reason is about why now is the time to go back.
 If rewatch is true, the user asked to rewatch something they already love, and every candidate has rewatch (theyScored, finished): pick the one that fits tonight's mood best, and the reason is about why this one, again, tonight. Here "nothing they've watched" does not apply.
 candidateList is the only pool you may pick from. "title" must exactly match the title of one candidateList entry.
@@ -77,6 +80,7 @@ Decide:
 
 ${CANDIDATE_RULES}
 ${PASSED_OVER_RULES}
+${DAY_RULES}
 
 Reasoning requirements:
 - reason must be 2-4 short sentences maximum.
@@ -140,6 +144,7 @@ partner.mood, when present, is what the partner said they're in the mood for, in
 
 candidateList is drawn from across AniList and already filtered: nothing either of them has watched, nothing En has recommended the user before, and no sequels. becauseYouLiked names the user's highly rated titles whose fans recommend this one; becauseTheyLiked does the same for the partner. A title with both is the strongest kind of candidate, because it reaches both of them through something each already loves. onTheirPlanToWatch means the partner saved it to watch. airing means it's still coming out weekly. If constraints is present, those are hard limits from the mood and every candidate meets them; if constraintsRelaxed is true, nothing met all of them, so say so plainly in one short clause.
 ${PASSED_OVER_RULES}
+${DAY_RULES}
 candidateList is the only pool you may pick from. "title" must exactly match the title of one candidateList entry.
 
 Reasoning requirements:

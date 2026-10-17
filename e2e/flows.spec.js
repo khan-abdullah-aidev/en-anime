@@ -505,3 +505,23 @@ test("month by month on YOU", async ({ page }) => {
   await expect(months).toContainText("1 pick · 1 loved · 100% landed");
   await expect(months).toContainText("2 picks · 0 loved");
 });
+
+test("never like this: a pass becomes a standing rule, and an unsure pick says so", async ({ page }) => {
+  await stubServices(page);
+  await seed(page, typedList);
+  await page.goto("/tonight");
+  await page.getByRole("button", { name: "surprise me" }).click();
+  // Two typed shows is little to go on.
+  await expect(page.getByText("En doesn't know your taste well yet, so this is more of a guess.")).toBeVisible({ timeout: 15000 });
+  const first = await page.getByRole("heading", { level: 1 }).textContent();
+
+  await page.getByRole("button", { name: "not tonight" }).click();
+  await page.getByRole("button", { name: "never like this…" }).click();
+  await page.getByRole("group", { name: "Never suggest" }).getByRole("button", { name: "drama", exact: true }).click();
+
+  await expect(page.getByText("En won't suggest drama again. Change it any time under YOU.")).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1 })).not.toHaveText(first, { timeout: 15000 });
+  expect((await page.evaluate(() => JSON.parse(localStorage.getItem("en.preferences")))).excludedGenres).toEqual(["Drama"]);
+  const passed = (await page.evaluate(() => JSON.parse(localStorage.getItem("en.recommendationHistory")))).find((entry) => entry.recommendation.title === first);
+  expect(passed.pass_reason).toBe("never like this: drama");
+});

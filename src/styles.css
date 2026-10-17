@@ -543,7 +543,10 @@ button:focus-visible {
 }
 @media (hover: none) { .key-hint { display: none; } }
 .own-reason { margin-top: 4px; }
+.never-like { margin-top: 14px; }
+.never-like__prompt { font-family: var(--serif); font-size: 14px; font-style: italic; margin: 0 0 10px; }
 .ask-about__open { margin-top: 14px; }
+.pick-doubt { color: var(--bone-3); font-family: var(--serif); font-size: 14px; font-style: italic; margin: 10px 0 0; }
 .ask-about { margin-top: 18px; }
 .ask-about__exchange { margin-bottom: 14px; }
 .ask-about__q { font-size: 10.5px; letter-spacing: 0.16em; margin: 0 0 6px; }

@@ -90,8 +90,8 @@ const NO_EXCLUSIONS = { labels: [], genres: [], tags: [], matches: () => false }
 // nothing it matches gets into the pool, from any source. mutedSeeds are
 // favorites the user asked En not to start from.
 // moodReading is the model's reading of the mood (moodReading.js), or null.
-export async function buildOpenCandidatePool({ mood = "", passedOver = [], list, history = [], tasteProfile, recentPatterns, memory, includeResume = false, exclude = NO_EXCLUSIONS, mutedSeeds = [], moodReading = null, learned = null, limit = POOL_LIMIT }) {
-  const pool = await buildFreshPool({ mood, passedOver, list, history, tasteProfile, recentPatterns, memory, exclude, mutedSeeds, moodReading, learned, limit });
+export async function buildOpenCandidatePool({ mood = "", passedOver = [], list, history = [], tasteProfile, recentPatterns, memory, includeResume = false, exclude = NO_EXCLUSIONS, mutedSeeds = [], moodReading = null, learned = null, standing = {}, limit = POOL_LIMIT }) {
+  const pool = await buildFreshPool({ mood, passedOver, list, history, tasteProfile, recentPatterns, memory, exclude, mutedSeeds, moodReading, learned, standing, limit });
   if (!includeResume) return pool;
   // A couple of shows they started and set aside ride along; the model picks
   // one only when finishing it suits tonight better than anything new.
@@ -102,8 +102,8 @@ export async function buildOpenCandidatePool({ mood = "", passedOver = [], list,
   return { ...pool, candidates: [...pool.candidates, ...resume] };
 }
 
-async function buildFreshPool({ mood = "", passedOver = [], list, history = [], tasteProfile, recentPatterns, memory, exclude = NO_EXCLUSIONS, mutedSeeds = [], moodReading = null, learned = null, limit = POOL_LIMIT }) {
-  const { constraints, discoveryMood, moodWanted, avoid } = buildRequestFilters({ mood, passedOver, reading: moodReading });
+async function buildFreshPool({ mood = "", passedOver = [], list, history = [], tasteProfile, recentPatterns, memory, exclude = NO_EXCLUSIONS, mutedSeeds = [], moodReading = null, learned = null, standing = {}, limit = POOL_LIMIT }) {
+  const { constraints, discoveryMood, moodWanted, avoid } = buildRequestFilters({ mood, passedOver, reading: moodReading, standing });
   const queryExclude = withAvoided(exclude, avoid);
   let fetched = null;
   try {
@@ -152,8 +152,8 @@ async function buildFreshPool({ mood = "", passedOver = [], list, history = [], 
 // are left out entirely, since a continuation only works if both finished
 // the first part. Titles that fans of BOTH people's favorites recommend rank
 // highest.
-export async function buildTogetherPool({ mood = "", passedOver = [], you, partner, recentPatterns, exclude = NO_EXCLUSIONS, mutedSeeds = [], moodReading = null, learned = null, limit = POOL_LIMIT }) {
-  const { constraints, discoveryMood, moodWanted, avoid } = buildRequestFilters({ mood, passedOver, reading: moodReading });
+export async function buildTogetherPool({ mood = "", passedOver = [], you, partner, recentPatterns, exclude = NO_EXCLUSIONS, mutedSeeds = [], moodReading = null, learned = null, standing = {}, limit = POOL_LIMIT }) {
+  const { constraints, discoveryMood, moodWanted, avoid } = buildRequestFilters({ mood, passedOver, reading: moodReading, standing });
   const queryExclude = withAvoided(exclude, avoid);
   const tasteProfile = combineTasteProfiles(you.tasteProfile, partner.tasteProfile);
   let fetched = null;
@@ -433,7 +433,9 @@ export function totalMinutes(candidate) {
 // Limits the model read from the mood fill in only what the patterns didn't
 // catch; the patterns are exact, the model's reading isn't. Also returns what
 // to look for (moodWanted) and what to steer around (avoid).
-export function buildRequestFilters({ mood = "", passedOver = [], reading = null }) {
+// standing is what the user told En always holds ("nothing over 26
+// episodes"); tonight's mood can still ask for something long.
+export function buildRequestFilters({ mood = "", passedOver = [], reading = null, standing = {} }) {
   const constraints = parseConstraints(mood);
   if (reading) {
     if (reading.film && !constraints.formats) constraints.formats = ["MOVIE"];
@@ -446,6 +448,9 @@ export function buildRequestFilters({ mood = "", passedOver = [], reading = null
       if (reading.yearMin) constraints.yearMin = reading.yearMin;
       if (reading.yearMax) constraints.yearMax = reading.yearMax;
     }
+  }
+  if (standing.maxEpisodes && constraints.minEpisodes == null) {
+    constraints.maxEpisodes = Math.min(constraints.maxEpisodes ?? Infinity, standing.maxEpisodes);
   }
   let discoveryMood = mood;
   for (const pass of passedOver) {
