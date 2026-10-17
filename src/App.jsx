@@ -1,5 +1,4 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { flushSync } from "react-dom";
 import { askEn, askEnChoose, askEnTogether, askEnVerdict } from "./openrouter.js";
 import { isEnConfigError } from "./llmProviders.js";
 import { beginMalOauth, finishMalOauth, refreshMalOauth } from "./oauth.js";
@@ -235,11 +234,7 @@ export default function App() {
       if (route.view !== target.view || (route.entryId || null) !== (target.entryId || null)) {
         writeHistory("replace", route);
       }
-      // A phone's back swipe already animates; don't animate on top of it.
-      showRoute(route, window.history.state?.idx ?? 0, {
-        scrollY: event.state?.scrollY || 0,
-        animate: !event.hasUAVisualTransition
-      });
+      showRoute(route, window.history.state?.idx ?? 0, { scrollY: event.state?.scrollY || 0 });
     }
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
@@ -397,39 +392,19 @@ export default function App() {
     showRoute(route, writeHistory(replace ? "replace" : "push", route));
   }
 
-  // Screen changes cross-fade where the browser supports it (the View
-  // Transitions API), with the wordmark holding still. The new screen is
-  // rendered synchronously inside the transition so it's captured complete.
-  function showRoute({ view: nextView, entryId, titles, roomId: nextRoomId }, idx, { scrollY = 0, animate = true } = {}) {
-    const apply = () => {
-      if (entryId) setRevealEntryId(entryId);
-      if (nextRoomId) setRoomId(nextRoomId);
-      if (titles) setShortlistTitles(titles);
-      setRouteIdx(idx);
-      setView(nextView);
-      arrival.current = { scrollY };
-      setArrivals((count) => count + 1);
-    };
+  // Each screen fades itself in (styles.css). No View Transitions cross-fade:
+  // Chrome on Linux paints its snapshots white for a few frames, a white
+  // flash on every screen change.
+  function showRoute({ view: nextView, entryId, titles, roomId: nextRoomId }, idx, { scrollY = 0 } = {}) {
     // After the first screen, entrances are quicker (see styles.css).
     document.documentElement.classList.add("en-settled");
-    if (!animate || !canAnimateScreens()) {
-      apply();
-      return;
-    }
-    // The browser only swaps screens on its next frame; if it isn't drawing
-    // (a covered window), don't leave the old screen up waiting for one.
-    let applied = false;
-    const run = () => {
-      if (applied) return;
-      applied = true;
-      flushSync(apply);
-    };
-    const transition = document.startViewTransition(run);
-    setTimeout(() => {
-      if (applied) return;
-      transition.skipTransition();
-      run();
-    }, 400);
+    if (entryId) setRevealEntryId(entryId);
+    if (nextRoomId) setRoomId(nextRoomId);
+    if (titles) setShortlistTitles(titles);
+    setRouteIdx(idx);
+    setView(nextView);
+    arrival.current = { scrollY };
+    setArrivals((count) => count + 1);
   }
 
   // Arriving on a screen: the right scroll position (the top, or where you
@@ -2251,21 +2226,13 @@ function ScreenMood({ onLog, onConsider, onSurprise, onShortlist, onTogether, mo
             >
               Let En consider
             </button>
-            <div style={{ marginTop: 24 }}>
-              <button className="btn-quiet" onClick={onSurprise}>
-                or — surprise me
-              </button>
-            </div>
-            <div style={{ marginTop: 16 }}>
-              <button className="btn-quiet" onClick={onShortlist}>
-                or — I already have one in mind
-              </button>
-            </div>
-            <div style={{ marginTop: 16 }}>
-              <button className="btn-quiet" onClick={onTogether}>
-                or — for two
-              </button>
-            </div>
+            <OrLinks
+              options={[
+                ["surprise me", onSurprise],
+                ["I have one in mind", onShortlist],
+                ["for two", onTogether]
+              ]}
+            />
             <LeaveOut excluded={excluded} onToggle={onToggleGenre} onClear={onClearGenres} />
           </div>
         </div>
@@ -2945,16 +2912,12 @@ function ScreenTogetherMood({ onLog, name, mood, setMood, onSubmit, onSurprise, 
             <button className="btn-link" onClick={onSubmit} disabled={!mood.trim()} style={{ transition: "opacity 0.4s ease" }}>
               Let En choose for two
             </button>
-            <div style={{ marginTop: 20 }}>
-              <button className="btn-quiet" onClick={onSurprise}>
-                or — surprise us
-              </button>
-            </div>
-            <div style={{ marginTop: 12 }}>
-              <button className="btn-quiet" onClick={onChangePartner}>
-                or — watching with someone else
-              </button>
-            </div>
+            <OrLinks
+              options={[
+                ["surprise us", onSurprise],
+                ["someone else", onChangePartner]
+              ]}
+            />
             <LeaveOut excluded={excluded} onToggle={onToggleGenre} onClear={onClearGenres} />
           </div>
         </div>
@@ -3186,26 +3149,22 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight }) {
                     Watch it tonight
                   </button>
                   <span className="meta key-hint" aria-hidden="true">enter ↵</span>
-                  <div style={{ marginTop: 20 }}>
-                    <button
-                      className="btn-quiet"
-                      onClick={() => {
-                        nav.saveForLater();
-                        setSettled("later");
-                      }}
-                    >
-                      or — save for later
-                    </button>
-                  </div>
-                  {canMarkSeen && (
-                    <div style={{ marginTop: 8 }}>
-                      <button className="btn-quiet" onClick={nav.seenIt}>
-                        or — I've already seen it
-                      </button>
-                    </div>
-                  )}
-                  {canPassTonight && (
-                    <div style={{ marginTop: 8 }}>
+                  <OrLinks
+                    align="left"
+                    options={[
+                      [
+                        "save for later",
+                        () => {
+                          nav.saveForLater();
+                          setSettled("later");
+                        }
+                      ],
+                      canMarkSeen && ["seen it", nav.seenIt],
+                      canPassTonight && !choosingReason && ownReason === null && ["not tonight", () => setChoosingReason(true)]
+                    ]}
+                  />
+                  {canPassTonight && (choosingReason || ownReason !== null) && (
+                    <div style={{ marginTop: 14 }}>
                       {ownReason !== null ? (
                         <form
                           className="own-reason fade-in"
@@ -3244,11 +3203,7 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight }) {
                             something else…
                           </button>
                         </div>
-                      ) : (
-                        <button className="btn-quiet" onClick={() => setChoosingReason(true)}>
-                          or — not tonight
-                        </button>
-                      )}
+                      ) : null}
                     </div>
                   )}
                 </>
@@ -3744,6 +3699,26 @@ function ScreenHistory({ nav, history }) {
   );
 }
 
+// The other ways to go, on one line after the main button:
+// "or  surprise me · I have one in mind · for two". Options can be false.
+function OrLinks({ options, align = "center" }) {
+  const shown = options.filter(Boolean);
+  if (!shown.length) return null;
+  return (
+    <div className={align === "left" ? "or-links or-links--left" : "or-links"}>
+      <span className="meta or-links__or" aria-hidden="true">or</span>
+      {shown.map(([label, onClick], index) => (
+        <span key={label} className="or-links__item">
+          {index ? <span className="or-links__dot" aria-hidden="true">·</span> : null}
+          <button className="btn-quiet" onClick={onClick}>
+            {label}
+          </button>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 // "Leave some genres out": a standing filter on every pick En makes, shown
 // where tonight's pick is asked for.
 function LeaveOut({ excluded = [], onToggle, onClear }) {
@@ -3753,7 +3728,7 @@ function LeaveOut({ excluded = [], onToggle, onClear }) {
     return (
       <div className="leave-out">
         <button className="btn-quiet" onClick={() => setOpen(true)} aria-expanded="false">
-          {excluded.length ? `leaving out ${joinList(excluded)} · change` : "or — leave some genres out"}
+          {excluded.length ? `leaving out ${joinList(excluded)} · change` : "leave some genres out"}
         </button>
       </div>
     );
@@ -4539,14 +4514,6 @@ function formatTimeAgo(date) {
 
 // Cross-fading screens is a nicety: only where the browser has it, the tab
 // is visible, and the user hasn't asked for less motion.
-function canAnimateScreens() {
-  return (
-    typeof document.startViewTransition === "function" &&
-    document.visibilityState === "visible" &&
-    !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
-  );
-}
-
 // The way in the user chose last, if it's still set up; otherwise MAL login,
 // then a username, then a typed list.
 function initialMode() {

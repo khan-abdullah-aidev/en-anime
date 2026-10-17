@@ -63,7 +63,7 @@ test("genres left out stay out of every pick, and the choice is remembered", asy
   await seed(page, typedList);
   await page.goto("/tonight");
 
-  await page.getByRole("button", { name: "or — leave some genres out" }).click();
+  await page.getByRole("button", { name: "leave some genres out" }).click();
   await page.getByRole("button", { name: "Horror", exact: true }).click();
   await expect(page.getByRole("button", { name: "Horror, left out" })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "done" }).click();
@@ -72,7 +72,7 @@ test("genres left out stay out of every pick, and the choice is remembered", asy
   await page.reload();
   await expect(page.getByRole("button", { name: /leaving out Horror/ })).toBeVisible();
 
-  await page.getByRole("button", { name: "or — surprise me" }).click();
+  await page.getByRole("button", { name: "surprise me" }).click();
   await expect(page).toHaveURL(/\/pick\//);
   const candidates = log.en.find((body) => body.kind === "recommend").payload.candidateList;
   expect(candidates.length).toBeGreaterThan(0);
@@ -93,10 +93,10 @@ test("clear all lets every genre back in at once", async ({ page }) => {
   await expect(page.getByRole("button", { name: "clear all" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "done" })).toBeFocused();
   await page.getByRole("button", { name: "done" }).click();
-  await expect(page.getByRole("button", { name: "or — leave some genres out" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "leave some genres out" })).toBeVisible();
 
   await page.reload();
-  await expect(page.getByRole("button", { name: "or — leave some genres out" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "leave some genres out" })).toBeVisible();
 });
 
 test("'Watching it' stops the question coming back every visit", async ({ page }) => {
@@ -201,7 +201,7 @@ test("the share card comes out as an image", async ({ page }) => {
   await stubServices(page);
   await seed(page, typedList);
   await page.goto("/tonight");
-  await page.getByRole("button", { name: "or — surprise me" }).click();
+  await page.getByRole("button", { name: "surprise me" }).click();
   await expect(page).toHaveURL(/\/pick\//);
 
   const download = page.waitForEvent("download");
@@ -311,7 +311,7 @@ test("two phones, one pick: a link, both lists and moods, the same pick on each"
   await expect(guest.getByText("・ for you and Abdullah")).toBeVisible();
 
   // Their "not tonight" reaches the host's phone, which picks again for both.
-  await guest.getByRole("button", { name: "or — not tonight" }).click();
+  await guest.getByRole("button", { name: "not tonight" }).click();
   await guest.getByRole("button", { name: "too heavy" }).click();
   await expect(guest.getByRole("heading", { name: "Told Abdullah" })).toBeVisible();
   await expect(host.getByRole("status").filter({ hasText: "Sam passed on" })).toBeVisible({ timeout: 10000 });
@@ -361,7 +361,7 @@ test("En learns from every pick, past ones included, and shows what it's learned
 
   // Next pick, the model is told what En has learned.
   await page.goto("/tonight");
-  await page.getByRole("button", { name: "or — surprise me" }).click();
+  await page.getByRole("button", { name: "surprise me" }).click();
   await expect(page).toHaveURL(/\/pick\//);
   const payload = log.en.find((body) => body.kind === "recommend").payload;
   expect(payload.learned.answeredPicks).toBe(7);
