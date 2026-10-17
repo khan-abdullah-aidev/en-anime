@@ -127,6 +127,8 @@ export function answersFromList({ list, history = [], sourceName = "MyAnimeList"
   const answers = [];
   for (const logged of history) {
     if (!["unrated", "pending", "watching"].includes(logged.state)) continue;
+    // A rewatch is already finished on the list; that says nothing about tonight.
+    if (logged.mode === "rewatch") continue;
     const rec = logged.recommendation || {};
     const match =
       (rec.malId && byId.get(rec.malId)) ||

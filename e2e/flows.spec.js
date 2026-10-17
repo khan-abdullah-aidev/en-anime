@@ -373,3 +373,81 @@ test("En learns from every pick, past ones included, and shows what it's learned
   await expect(learned.locator(".knows-row", { hasText: "Iyashikei" })).toHaveCount(0);
   await expect(learned.getByRole("button", { name: /bring them back/ })).toBeVisible();
 });
+
+test("after 'not tonight', the next pick can go back to the one passed over", async ({ page }) => {
+  await stubServices(page);
+  await seed(page, typedList);
+  await page.goto("/tonight");
+  await page.getByRole("textbox", { name: /How do you feel/ }).fill("something quiet");
+  await page.getByRole("button", { name: "Let En consider" }).click();
+  const first = await page.getByRole("heading", { level: 1 }).textContent({ timeout: 15000 });
+  await page.getByRole("button", { name: "not tonight" }).click();
+  await page.getByRole("button", { name: "too heavy" }).click();
+
+  const back = page.getByRole("button", { name: `← back to ${first}` });
+  await expect(back).toBeVisible({ timeout: 15000 });
+  await expect(page.getByRole("heading", { level: 1 })).not.toHaveText(first);
+  await back.click();
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText(first);
+  await expect(page.getByRole("button", { name: "Watch it tonight" })).toBeVisible();
+
+  const entries = await page.evaluate(() => JSON.parse(localStorage.getItem("en.recommendationHistory")));
+  expect(entries.find((entry) => entry.recommendation.title === first).state).toBe("unrated");
+  expect(entries.filter((entry) => entry.state === "not_tonight")).toHaveLength(1);
+});
+
+test("only what I can watch: services are remembered, and a pick off them says so", async ({ page }) => {
+  await stubServices(page);
+  await seed(page, typedList);
+  await page.goto("/what-en-knows");
+  await page.getByRole("button", { name: "Netflix", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Netflix", exact: true })).toHaveAttribute("aria-pressed", "true");
+  expect((await page.evaluate(() => JSON.parse(localStorage.getItem("en.preferences")))).services).toEqual(["Netflix"]);
+
+  // Everything here streams on Crunchyroll only, so En looks everywhere and says so.
+  await page.getByRole("button", { name: "En, home" }).click();
+  await page.getByRole("button", { name: "surprise me" }).click();
+  await expect(page.getByText("Not on your services: nothing there fit tonight.")).toBeVisible({ timeout: 15000 });
+});
+
+test("rewatch a favorite: picked from their own best-loved, and not answered from the list", async ({ page }) => {
+  const list = [
+    listEntry(11, "Mushishi", "COMPLETED", 10, ["Slice of Life"]),
+    listEntry(12, "Frieren", "COMPLETED", 9, ["Fantasy"]),
+    listEntry(13, "Fine Show", "COMPLETED", 6, ["Drama"])
+  ];
+  const log = await stubServices(page, { aniListList: list });
+  await seed(page, { "en.listSource": { kind: "anilist", username: "someone" }, "en.activeMode": "username" });
+  await page.goto("/tonight");
+  await page.getByRole("button", { name: "rewatch a favorite" }).click();
+  await expect(page.getByText("・ again, tonight")).toBeVisible({ timeout: 15000 });
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText(/Mushishi|Frieren/);
+
+  const sent = log.en.find((request) => request.payload?.rewatch);
+  expect(sent.payload.candidateList.map((candidate) => candidate.title).sort()).toEqual(["Frieren", "Mushishi"]);
+  await page.reload();
+  const entries = await page.evaluate(() => JSON.parse(localStorage.getItem("en.recommendationHistory")));
+  expect(entries[0].mode).toBe("rewatch");
+  expect(entries[0].state).toBe("unrated");
+});
+
+test("the log's month: picks, watched, loved", async ({ page }) => {
+  await stubServices(page);
+  const day = (n, fields) => ({
+    id: `m${n}`,
+    date: new Date(Date.now() - n * 60 * 1000).toISOString(),
+    recommendation: { title: `Pick ${n}`, title_jp: `Pick ${n}`, genre: "Drama", reason: "r", log_line: "l" },
+    note: "",
+    ...fields
+  });
+  await seed(page, {
+    ...typedList,
+    "en.recommendationHistory": [day(1, { state: "rated", feedback: "good" }), day(2, { state: "rated", feedback: "meh" }), day(3, { state: "unrated" })]
+  });
+  await page.goto("/log");
+  const recap = page.locator("section.recap");
+  await expect(recap).toContainText("3 picks");
+  await expect(recap).toContainText("2 watched");
+  await expect(recap).toContainText("1 loved");
+  await expect(recap).toContainText("Best of it: Pick 1.");
+});

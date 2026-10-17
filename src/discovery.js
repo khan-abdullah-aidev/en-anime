@@ -23,7 +23,7 @@ const SEED_LIMIT = 10;
 const RECS_PER_SEED = 12;
 const SEED_CACHE_TTL_MS = 3 * 24 * 60 * 60 * 1000;
 const DISCOVERY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const CACHE_KEY = "en.discoveryCache.v3"; // v3 adds filterTags (for "leave out")
+const CACHE_KEY = "en.discoveryCache.v4"; // v3 adds filterTags (for "leave out"), v4 duration (time budgets)
 // Each seed's recommendations are cached on their own (so rotating seeds
 // doesn't refetch the ones already seen), hence room for a few dozen.
 const CACHE_MAX_ENTRIES = 60;
@@ -78,7 +78,7 @@ const MOOD_HINTS = [
   { words: ["fantasy", "magic", "magical", "witch", "dragon"], genres: ["Fantasy"] }
 ];
 
-const MEDIA_FIELDS = `id idMal title { romaji english native } synonyms format status episodes isAdult
+const MEDIA_FIELDS = `id idMal title { romaji english native } synonyms format status episodes duration isAdult
   startDate { year } genres averageScore popularity coverImage { extraLarge large }
   tags { name rank isMediaSpoiler isGeneralSpoiler }
   relations { edges { relationType(version: 2) node { id idMal type title { romaji english } } } }
@@ -215,6 +215,42 @@ const RESUME_LIMIT = 2;
 const RESUME_STALE_MS = 21 * 24 * 60 * 60 * 1000;
 const RESUME_REPEAT_MS = 30 * 24 * 60 * 60 * 1000;
 
+// "Rewatch something I loved": shows they finished and scored highly (at
+// least 8, and above their own average), leaving out any En put up for a
+// rewatch in the last three months. Best-loved first, with a little shuffle
+// so the same favorite doesn't top every pool.
+const REWATCH_REPEAT_MS = 90 * 24 * 60 * 60 * 1000;
+const REWATCH_LIMIT = 15;
+
+export function rewatchCandidates({ list, history = [], now = Date.now(), random = Math.random }) {
+  if (!Array.isArray(list)) return [];
+  const recent = new Set(
+    history
+      .filter((entry) => entry.mode === "rewatch" && now - (Date.parse(entry.date || "") || 0) < REWATCH_REPEAT_MS)
+      .map((entry) => normalizeTitleForCompare(entry.recommendation?.title))
+  );
+  const completed = list.filter((entry) => entry.my_list_status?.status === "completed" && scoreOf(entry) > 0);
+  const average = completed.length ? completed.reduce((sum, entry) => sum + scoreOf(entry), 0) / completed.length : 0;
+  return completed
+    .filter((entry) => scoreOf(entry) >= Math.max(8, Math.ceil(average)) && !recent.has(normalizeTitleForCompare(entry.alternative_titles?.en || entry.title)))
+    .map((entry) => ({ entry, rank: scoreOf(entry) + random() * 1.5 }))
+    .sort((a, b) => b.rank - a.rank)
+    .slice(0, REWATCH_LIMIT)
+    .map(({ entry }) => ({
+      title: entry.alternative_titles?.en || entry.title,
+      title_jp: entry.alternative_titles?.ja || entry.title,
+      alternative_titles: { en: entry.alternative_titles?.en || null, synonyms: uniqueTitles([entry.title, ...(entry.alternative_titles?.synonyms || [])]) },
+      malId: entry.id || null,
+      anilistId: entry.anilistId || null,
+      year: entry.year ?? null,
+      episodes: entry.episodes ?? null,
+      genres: entry.genres || [],
+      genre: (entry.genres || []).slice(0, 2).join(", "),
+      image_url: entry.image_url || "",
+      rewatch: { score: scoreOf(entry), finished: entry.my_list_status?.finish_date || entry.my_list_status?.updated_at?.slice(0, 10) || null }
+    }));
+}
+
 export function resumeCandidates({ list, history = [], now = Date.now() }) {
   if (!Array.isArray(list)) return [];
 
@@ -346,6 +382,9 @@ export function parseConstraints(mood) {
 
   if (/\b(airing|currently airing|this season|ongoing|weekly)\b/.test(text)) constraints.status = "RELEASING";
 
+  const minutes = parseTimeBudget(text);
+  if (minutes) constraints.maxMinutes = minutes;
+
   const nineteen = text.match(/\b(?:19)?([5-9]0)'?s\b/);
   const twenty = text.match(/\b20([0-2])0'?s\b/);
   if (twenty || nineteen) {
@@ -359,6 +398,35 @@ export function parseConstraints(mood) {
   }
 
   return constraints;
+}
+
+const NUMBER_WORDS = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+
+// How long the user has, in minutes: "45 minutes", "an hour", "a couple of
+// hours", "2.5 hrs", "this weekend". Null when the mood doesn't say.
+export function parseTimeBudget(mood) {
+  const text = ` ${String(mood || "").toLowerCase()} `;
+  if (/\bhalf an? hour\b/.test(text)) return 30;
+  const mins = text.match(/\b(\d{1,3})\s*(?:min|mins|minutes)\b/);
+  if (mins) return Number(mins[1]) || null;
+  if (/\b(?:a )?couple(?: of)? hours\b/.test(text)) return 120;
+  const hours = text.match(/\b(\d{1,2}(?:\.\d)?|an?|one|two|three|four|five|six)\s*(?:hours?|hrs?)\b/);
+  if (hours) {
+    const value = NUMBER_WORDS[hours[1]] ?? Number(hours[1]);
+    return value > 0 ? Math.round(value * 60) : null;
+  }
+  if (/\b(?:this|a|the|over the) weekend\b/.test(text)) return 12 * 60;
+  return null;
+}
+
+// Minutes to watch all of it: episodes x minutes each. Without AniList's
+// duration, a film counts as 100 minutes and an episode as 24.
+export function totalMinutes(candidate) {
+  const episodes = Number(candidate?.episodes) || 0;
+  if (!episodes) return null;
+  const format = candidate.format || (episodes === 1 ? "MOVIE" : "TV");
+  const each = Number(candidate.duration) || (format === "MOVIE" ? 100 : 24);
+  return episodes * each;
 }
 
 // Tonight's limits: the mood's, plus whatever "not tonight" reasons rule out.
@@ -438,6 +506,10 @@ export function meetsConstraints(candidate, constraints = {}) {
   if (constraints.status && status !== constraints.status) return false;
   if (constraints.yearMin != null && !(candidate.year >= constraints.yearMin)) return false;
   if (constraints.yearMax != null && !(candidate.year <= constraints.yearMax)) return false;
+  if (constraints.maxMinutes != null) {
+    const total = totalMinutes(candidate);
+    if (!(total && total <= constraints.maxMinutes)) return false;
+  }
   return true;
 }
 
@@ -452,6 +524,13 @@ function discoveryFilter(constraints = {}, exclude = NO_EXCLUSIONS) {
   parts.push(constraints.status ? `status: ${constraints.status}` : "status_in: [FINISHED, RELEASING]");
   if (constraints.maxEpisodes != null) parts.push(`episodes_lesser: ${constraints.maxEpisodes + 1}`);
   if (constraints.minEpisodes != null) parts.push(`episodes_greater: ${constraints.minEpisodes - 1}`);
+  // A time budget can't be queried as a total; ask for what could fit (no
+  // episode longer than the budget, no more than one per ten minutes of it)
+  // and let meetsConstraints check the real total.
+  if (constraints.maxMinutes != null) {
+    parts.push(`duration_lesser: ${constraints.maxMinutes + 1}`);
+    if (constraints.maxEpisodes == null) parts.push(`episodes_lesser: ${Math.max(1, Math.floor(constraints.maxMinutes / 10)) + 1}`);
+  }
   if (constraints.yearMin != null) parts.push(`startDate_greater: ${constraints.yearMin * 10000}`);
   if (constraints.yearMax != null) parts.push(`startDate_lesser: ${(constraints.yearMax + 1) * 10000}`);
   return parts.join(", ");
@@ -466,6 +545,7 @@ export function toModelCandidate(candidate) {
     year: candidate.year,
     format: candidate.format,
     episodes: candidate.episodes,
+    minutesPerEpisode: candidate.duration || null,
     genres: candidate.genres,
     tags: candidate.tags?.length ? candidate.tags : candidate.themes,
     score: candidate.score,
@@ -475,6 +555,7 @@ export function toModelCandidate(candidate) {
     resume: candidate.resume
       ? { status: candidate.resume.status, stoppedAt: `${candidate.resume.watched}/${candidate.resume.total || "?"}`, since: candidate.resume.since }
       : null,
+    rewatch: candidate.rewatch ? { theyScored: candidate.rewatch.score || null, finished: candidate.rewatch.finished || null } : null,
     continues: candidate.continues || null,
     airing: candidate.status === "RELEASING" || null,
     pastFit: pastFitLabel(candidate.learnedFit, candidate.learnedEvidence)
@@ -899,6 +980,7 @@ export function toCandidate(media) {
     format: media.format,
     status: media.status,
     episodes: media.episodes ?? null,
+    duration: media.duration ?? null,
     year: media.startDate?.year ?? null,
     genres: media.genres || [],
     genre: (media.genres || []).slice(0, 2).join(", "),

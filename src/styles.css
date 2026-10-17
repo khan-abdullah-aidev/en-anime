@@ -243,12 +243,46 @@ button:focus-visible {
 .log-entry-link:hover,
 .log-entry-link:focus-visible { text-decoration-color: var(--bone-3); }
 
+.recap {
+  border-bottom: 1px solid var(--hairline);
+  border-top: 1px solid var(--hairline);
+  margin: -24px 0 64px;
+  padding: 28px 0 24px;
+}
+.recap__numbers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 28px;
+  margin: 16px 0 0;
+  color: var(--bone-3);
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.recap__numbers strong {
+  color: var(--bone);
+  font-family: var(--serif);
+  font-size: 30px;
+  font-weight: 300;
+  letter-spacing: 0;
+  margin-right: 8px;
+}
+.recap__line {
+  color: var(--bone-2);
+  font-size: 16px;
+  font-style: italic;
+  line-height: 1.6;
+  margin: 14px 0 0;
+  max-width: 520px;
+}
 .log-filters {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 10px;
   margin: -40px 0 56px;
 }
+.recap + .log-filters { margin-top: -32px; }
 /* The filters are a choice, not a strike-through like "leave out". */
 .log-filters .chip[aria-pressed="true"] {
   border-color: rgba(184, 83, 63, 0.55);
@@ -509,6 +543,7 @@ button:focus-visible {
 }
 @media (hover: none) { .key-hint { display: none; } }
 .own-reason { margin-top: 4px; }
+.back-to-previous { color: var(--bone-3); letter-spacing: 0.12em; text-transform: none; font-family: var(--serif); font-style: italic; font-size: 15px; }
 .own-reason__input {
   font-family: var(--serif);
   font-size: 17px;
@@ -662,7 +697,7 @@ button:focus-visible {
   align-items: baseline;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 0;
+  gap: 6px 22px;
   justify-content: center;
   margin-top: 24px;
 }
@@ -671,12 +706,12 @@ button:focus-visible {
   font-family: var(--serif);
   font-size: 15px;
   font-style: italic;
-  margin-right: 14px;
 }
-.or-links__item { white-space: nowrap; }
-.or-links__dot { color: var(--bone-4); margin: 0 12px; }
+
 .leave-out { margin-top: 16px; }
 .mood-chips { margin: 28px auto 0; max-width: 560px; }
+/* Services are a choice, not a strike-through like "leave out". */
+.services-chips .chip[aria-pressed="true"] { border-color: rgba(184, 83, 63, 0.55); color: var(--shu); text-decoration: none; }
 /* A starter is a choice, not a strike-through like "leave out". */
 .mood-chips .chip[aria-pressed="true"] { border-color: var(--bone-3); color: var(--bone); text-decoration: none; }
 .next-airing {
