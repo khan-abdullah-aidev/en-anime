@@ -53,6 +53,7 @@ import {
   EXCLUDABLE,
   GENRE_OPTIONS,
   NOTES_LIMIT,
+  neverOptions,
   applyTasteCorrections,
   exclusionFilter,
   loadPreferences,
@@ -76,6 +77,8 @@ import {
 import { normalizeSnapshot } from "./syncMerge.js";
 import { sharePick } from "./shareCard.js";
 import { monthRecap, recapText, recentMonths } from "./recap.js";
+import { doubtFor } from "./doubt.js";
+import { dayPattern } from "./dayPattern.js";
 import { leaveReminder, remindersOn, remindersSupported, turnOffReminders, turnOnReminders } from "./reminders.js";
 import { askAgainAfter, findCurrentPending, findReviewEntries, isAwaitingAnswer } from "./reviewQueue.js";
 import { readMood } from "./moodReading.js";
@@ -638,6 +641,7 @@ export default function App() {
     const userSaid = userSaidFor(preferences);
     const tasteModel = buildTasteModel(history, { ignored: preferences.unlearned });
     const learned = learnedForModel(tasteModel, history);
+    const nights = dayPattern(history);
 
     const memory = buildRecommendationMemory({
       malList: list,
@@ -663,7 +667,8 @@ export default function App() {
         recentPatterns: summarizeRecentPatterns(list, history),
         feedbackHistory: compactFeedbackHistory(history),
         ...(userSaid ? { userSaid } : {}),
-        ...(learned ? { learned } : {})
+        ...(learned ? { learned } : {}),
+        ...(nights ? { dayPattern: nights } : {})
       }
     };
   }
@@ -701,7 +706,8 @@ export default function App() {
   async function findCandidatesFrom({ mood, list, signals, memory, partner: other, includeResume, moodReading, alsoExcluded, tasteModel, services }) {
     const learned = learnedRanker(tasteModel);
     const passedOver = passedOverTonight();
-    const { excludedGenres, mutedSeeds } = loadPreferences();
+    const { excludedGenres, mutedSeeds, maxEpisodes } = loadPreferences();
+    const standing = maxEpisodes ? { maxEpisodes } : {};
     const genres = exclusionFilter([...new Set([...excludedGenres, ...alsoExcluded])]);
     const onlyOn = servicesFilter(services);
     const exclude = { ...genres, matches: (candidate) => genres.matches(candidate) || onlyOn.matches(candidate) };
@@ -715,7 +721,8 @@ export default function App() {
           exclude,
           mutedSeeds,
           moodReading,
-          learned
+          learned,
+          standing
         })
       : await buildOpenCandidatePool({
           mood,
@@ -729,7 +736,8 @@ export default function App() {
           exclude,
           mutedSeeds,
           moodReading,
-          learned
+          learned,
+          standing
         });
     debugLog("[En debug] candidate pool", { source, count: candidates.length, constraints, constraintsRelaxed, leftOut: exclude.labels, services, moodReading });
     return { candidates, exclude, constraints, constraintsRelaxed, passedOver };
@@ -804,9 +812,11 @@ export default function App() {
 
       const rec = await askForAllowedRecommendation({ mood: nextMood, signals: { ...signals, ...steering }, candidateList, memory, unwatchedTitles });
       const pick = await withImage(rec, [rec.title_jp]);
+      const doubt = doubtFor({ pick, candidateList, steering, list });
       revealPick(requestId, pick, {
         mood: nextMood || "Surprise me",
         request_mood: nextMood,
+        ...(doubt ? { doubt } : {}),
         ...(previousId ? { previous_pick_id: previousId } : {}),
         ...(pick.resume ? { mode: "resume" } : {})
       });
@@ -951,7 +961,9 @@ export default function App() {
         label: "together"
       });
       const pick = await withImage({ ...rec, mode: "together", partner_name: name }, [rec.title_jp]);
+      const doubt = doubtFor({ pick, candidateList, steering, list });
       revealPick(requestId, pick, {
+        ...(doubt ? { doubt } : {}),
         mood: moodText || `for two, with ${name}`,
         request_mood: moodText,
         ...(previousId ? { previous_pick_id: previousId } : {}),
@@ -1242,6 +1254,19 @@ export default function App() {
     answerEntry(revealEntry, "not-tonight");
     setHistory(updateHistoryEntry(previous.id, { state: "unrated", note: "", pass_reason: "", not_tonight_at: null }));
     go(VIEW.REVEAL, { replace: true, entryId: previous.id });
+  }
+
+  // "Never like this": the pass becomes a standing rule (a genre left out,
+  // or nothing past a length), then En picks again.
+  function handleNeverLikeThis(option) {
+    if (!revealEntry) return;
+    if (option.kind === "genre") {
+      changePreferences({ excludedGenres: [...new Set([...loadPreferences().excludedGenres, option.label])] });
+    } else if (option.kind === "length") {
+      changePreferences({ maxEpisodes: option.maxEpisodes });
+    }
+    setNotice({ kind: "info", text: `En won't suggest ${option.text} again. Change it any time under YOU.` });
+    handleNotTonight(`never like this: ${option.text}`);
   }
 
   function handleSeenFeedback(feedback, feedbackNote = "") {
@@ -1774,6 +1799,7 @@ export default function App() {
     watchTonight: handleWatchTonight,
     notTonight: handleNotTonight,
     backToPrevious: handleBackToPrevious,
+    neverLikeThis: handleNeverLikeThis,
     pendingAnswer: handlePendingAnswer,
     pendingNotNow: handlePendingNotNow,
     answer: handleAnswer,
@@ -3155,6 +3181,8 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight, serv
   // "Something else": the user's own words for why not, which steer the next
   // pick the same way "too long" does.
   const [ownReason, setOwnReason] = useState(null);
+  const [choosingNever, setChoosingNever] = useState(false);
+  const never = useMemo(() => neverOptions(pick), [pick]);
   const [nextAiring, setNextAiring] = useState(null);
   const canAccept = isNewPick && !settled;
 
@@ -3291,6 +3319,7 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight, serv
             >
               {stripMarkdown(pick.reason)}
             </p>
+            {entry.doubt ? <p className="meta pick-doubt">{entry.doubt}</p> : null}
             <AskAboutPick key={entry.id} pick={pick} />
 
             {/* The pick is already in the log; these only say what happens next. */}
@@ -3334,6 +3363,21 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight, serv
                       </button>
                     </div>
                   )}
+                  {choosingNever && (
+                    <div className="never-like fade-in" role="group" aria-label="Never suggest">
+                      <p className="meta never-like__prompt">from now on, En won't suggest:</p>
+                      <div className="chips chips--left">
+                        {never.map((option) => (
+                          <button key={option.text} className="chip" onClick={() => nav.neverLikeThis(option)}>
+                            {option.text}
+                          </button>
+                        ))}
+                      </div>
+                      <button className="btn-quiet" style={{ marginTop: 10 }} onClick={() => setChoosingNever(false)}>
+                        never mind
+                      </button>
+                    </div>
+                  )}
                   {canPassTonight && (choosingReason || ownReason !== null) && (
                     <div style={{ marginTop: 14 }}>
                       {ownReason !== null ? (
@@ -3373,6 +3417,11 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight, serv
                           <button className="btn-quiet" onClick={() => setOwnReason("")}>
                             something else…
                           </button>
+                          {never.length ? (
+                            <button className="btn-quiet" onClick={() => setChoosingNever(true)} aria-expanded={choosingNever}>
+                              never like this…
+                            </button>
+                          ) : null}
                         </div>
                       ) : null}
                     </div>
@@ -4501,6 +4550,18 @@ function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre
                   </div>
                 ) : null}
               </section>
+
+              {preferences.maxEpisodes ? (
+                <div className="knows-row" style={{ marginTop: -40, marginBottom: 56 }}>
+                  <div>
+                    <span className="knows-row__label">Nothing over {preferences.maxEpisodes} episodes</span>
+                    <span className="meta knows-row__why">unless tonight's mood asks for something long</span>
+                  </div>
+                  <button className="btn-quiet" onClick={() => onChange({ maxEpisodes: null })}>
+                    any length
+                  </button>
+                </div>
+              ) : null}
 
               {bench.length ? (
                 <section className="knows-section" aria-labelledby="knows-seeds">

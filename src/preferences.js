@@ -23,6 +23,8 @@ const DEFAULTS = {
   services: [],
   // Leans toward shows with an English dub.
   dub: false,
+  // "Nothing over N episodes", from "never like this" on a pass; null is any length.
+  maxEpisodes: null,
   updatedAt: ""
 };
 
@@ -103,6 +105,7 @@ export function normalizePreferences(raw) {
     malSync: value.malSync === "on" || value.malSync === "off" ? value.malSync : null,
     services: (Array.isArray(value.services) ? value.services : []).filter((label) => STREAMING_SERVICES.some((service) => service.label === label)),
     dub: value.dub === true,
+    maxEpisodes: Number.isInteger(value.maxEpisodes) && value.maxEpisodes > 0 && value.maxEpisodes < 1000 ? value.maxEpisodes : null,
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : ""
   };
 }
@@ -161,7 +164,8 @@ export function userSaidFor(preferences = loadPreferences()) {
     moreOf: preferences.moreOf.length ? preferences.moreOf : null,
     notReally: preferences.notFavorite.length ? preferences.notFavorite : null,
     neverSuggest: preferences.excludedGenres.length ? preferences.excludedGenres : null,
-    prefersDub: preferences.dub || null
+    prefersDub: preferences.dub || null,
+    nothingLongerThanEpisodes: preferences.maxEpisodes || null
   };
   const present = Object.fromEntries(Object.entries(said).filter(([, value]) => value));
   return Object.keys(present).length ? present : null;
@@ -170,4 +174,25 @@ export function userSaidFor(preferences = loadPreferences()) {
 function exclusionFilterKeys(excludedGenres = []) {
   return EXCLUDABLE.filter((option) => excludedGenres.includes(option.label))
     .flatMap((option) => [option.label, ...(option.genres || []), ...(option.aliases || [])]);
+}
+
+// "Never like this", offered on a pass: what of the pick could become a
+// standing rule. Genres and tags it has that "leave out" knows, not already
+// left out, and its length when it's longer than a cour.
+export function neverOptions(pick, preferences = loadPreferences()) {
+  const features = pick?.features || {};
+  const candidate = {
+    genres: features.g || String(pick?.genre || "").split(",").map((genre) => genre.trim()).filter(Boolean),
+    tags: features.t || []
+  };
+  const options = EXCLUDABLE
+    .filter((option) => !preferences.excludedGenres.includes(option.label) && exclusionFilter([option.label]).matches(candidate))
+    .slice(0, 4)
+    .map((option) => ({ kind: "genre", label: option.label, text: option.label.toLowerCase() }));
+  const episodes = Number(pick?.episodes) || 0;
+  const limit = episodes > 26 ? 26 : episodes > 13 ? 13 : null;
+  if (limit && !(preferences.maxEpisodes && preferences.maxEpisodes <= limit)) {
+    options.push({ kind: "length", maxEpisodes: limit, text: `anything over ${limit} episodes` });
+  }
+  return options;
 }
