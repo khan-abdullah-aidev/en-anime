@@ -49,6 +49,24 @@ export async function askEnChoose(payload) {
   return choice;
 }
 
+export const QUESTION_LIMIT = 200;
+
+// One question about a pick ("is it sad?"), answered without spoilers.
+export async function askEnAbout(pick, question) {
+  const content = await requestEn("ask", {
+    pick: { title: pick.title, year: pick.year, episodes: pick.episodes, genre: pick.genre, reason: pick.reason },
+    question: String(question).trim().slice(0, QUESTION_LIMIT)
+  });
+  let answer = "";
+  try {
+    answer = JSON.parse(content)?.answer;
+  } catch {
+    answer = "";
+  }
+  if (typeof answer !== "string" || !answer.trim()) throw new Error("En didn't have an answer. Try asking another way.");
+  return answer.trim();
+}
+
 function parseVerdict(content) {
   const trimmed = content.trim();
   const jsonText = trimmed.match(/\{[\s\S]*\}/)?.[0] || trimmed;

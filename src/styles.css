@@ -543,6 +543,11 @@ button:focus-visible {
 }
 @media (hover: none) { .key-hint { display: none; } }
 .own-reason { margin-top: 4px; }
+.ask-about__open { margin-top: 14px; }
+.ask-about { margin-top: 18px; }
+.ask-about__exchange { margin-bottom: 14px; }
+.ask-about__q { font-size: 10.5px; letter-spacing: 0.16em; margin: 0 0 6px; }
+.ask-about__a { color: var(--bone-2); font-size: 15px; font-style: italic; line-height: 1.6; margin: 0; }
 .back-to-previous { color: var(--bone-3); letter-spacing: 0.12em; text-transform: none; font-family: var(--serif); font-style: italic; font-size: 15px; }
 .own-reason__input {
   font-family: var(--serif);
@@ -755,6 +760,15 @@ button:focus-visible {
   font-family: var(--serif);
   font-size: 23px;
   font-weight: 300;
+}
+.month-row { flex-wrap: wrap; position: relative; }
+.month-row__bar {
+  background: var(--shu);
+  bottom: -1px;
+  height: 1px;
+  left: 0;
+  opacity: 0.7;
+  position: absolute;
 }
 .account-links { display: flex; flex-wrap: wrap; gap: 4px 22px; margin-top: 4px; }
 .knows-row__year { color: var(--bone-3); font-style: normal; }

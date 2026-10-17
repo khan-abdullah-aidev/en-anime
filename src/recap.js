@@ -56,3 +56,15 @@ export function recapText(recap) {
   if (recap.moods.length) lines.push(`Moods: ${recap.moods.map((mood) => `"${mood}"`).join(", ")}.`);
   return lines.join("\n");
 }
+
+// The last few months, newest first, for "taste over time": only months
+// with at least one pick.
+export function recentMonths(history = [], now = new Date(), count = 6) {
+  const months = [];
+  for (let back = 0; back < count; back += 1) {
+    const date = new Date(now.getFullYear(), now.getMonth() - back, 1);
+    const recap = recapFor(history, date.getFullYear(), date.getMonth(), now);
+    if (recap.picks) months.push(recap);
+  }
+  return months;
+}

@@ -664,6 +664,20 @@ function mutedCheck(muted = []) {
     );
 }
 
+// Fetches (and caches) what fans of every show on the seed bench recommend,
+// so the request that follows finds whichever seeds it draws already
+// cached. Run while the user is still typing tonight's mood.
+export async function warmSeedCache({ list, muted = [] }) {
+  if (!Array.isArray(list)) return;
+  const { by, favorites, recentGood } = seedBench(list, { muted });
+  const idOf = (entry) => (by === "anilistId" ? entry.anilistId : entry.id);
+  const ids = [...new Set([...recentGood, ...favorites].map(idOf).filter(Boolean))];
+  const missing = ids.filter((id) => !readCache(`seed:${by}:${id}`, SEED_CACHE_TTL_MS));
+  for (let start = 0; start < missing.length; start += SEED_LIMIT) {
+    await fetchSeedRecommendations({ by, seeds: missing.slice(start, start + SEED_LIMIT).map((id) => ({ [by]: id })) });
+  }
+}
+
 async function fetchSeedRecommendations({ by, seeds }) {
   if (!seeds.length) return [];
   const recsById = new Map();

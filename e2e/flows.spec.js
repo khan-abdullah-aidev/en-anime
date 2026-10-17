@@ -451,3 +451,57 @@ test("the log's month: picks, watched, loved", async ({ page }) => {
   await expect(recap).toContainText("1 loved");
   await expect(recap).toContainText("Best of it: Pick 1.");
 });
+
+test("ask about a pick: one question, answered on the pick", async ({ page }) => {
+  const log = await stubServices(page);
+  await seed(page, typedList);
+  await page.goto("/tonight");
+  await page.getByRole("button", { name: "surprise me" }).click();
+  await page.getByRole("button", { name: "ask about it" }).click({ timeout: 15000 });
+  await page.getByRole("textbox", { name: "Ask En about this pick" }).fill("is it sad?");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("Quiet, and never cruel. (is it sad?)")).toBeVisible();
+  // Enter in the question box asks; it doesn't take the pick.
+  await expect(page.getByRole("button", { name: "Watch it tonight" })).toBeVisible();
+  const asked = log.en.find((request) => request.kind === "ask");
+  expect(asked.payload.question).toBe("is it sad?");
+  expect(asked.payload.pick.title).toBeTruthy();
+});
+
+test("a pick that landed and has a next part offers to ask about it", async ({ page }) => {
+  await stubServices(page);
+  await seed(page, {
+    ...typedList,
+    "en.recommendationHistory": [
+      {
+        id: "landed",
+        date: new Date(Date.now() - 3 * DAY).toISOString(),
+        state: "unrated",
+        note: "",
+        recommendation: { title: "First Part", title_jp: "First Part", year: 2015, episodes: 12, genre: "Drama", reason: "r", log_line: "l", anilistId: 4242 }
+      }
+    ]
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "It was good" }).click();
+  const offer = page.getByRole("dialog", { name: "The Next Part is next" });
+  await expect(offer).toBeVisible();
+  await offer.getByRole("button", { name: "not now" }).click();
+  await expect(offer).toBeHidden();
+});
+
+test("month by month on YOU", async ({ page }) => {
+  await stubServices(page);
+  const at = (months, id, fields = {}) => {
+    const date = new Date();
+    date.setDate(1);
+    date.setMonth(date.getMonth() - months);
+    return { id, date: date.toISOString(), note: "", state: "unrated", recommendation: { title: id, title_jp: id, genre: "Drama", reason: "r", log_line: "l" }, ...fields };
+  };
+  await seed(page, { ...typedList, "en.recommendationHistory": [at(0, "a", { state: "rated", feedback: "good" }), at(1, "b"), at(1, "c")] });
+  await page.goto("/what-en-knows");
+  const months = page.locator("section", { has: page.getByText("Month by month", { exact: true }) });
+  await expect(months.locator(".month-row")).toHaveCount(2);
+  await expect(months).toContainText("1 pick · 1 loved · 100% landed");
+  await expect(months).toContainText("2 picks · 0 loved");
+});

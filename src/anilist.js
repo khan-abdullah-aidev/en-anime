@@ -128,7 +128,7 @@ function toAniListResult(media) {
 }
 
 const NEXT_AIRING_QUERY = `query ($id: Int) {
-  Media(id: $id, type: ANIME) { status nextAiringEpisode { episode airingAt } }
+  Media(id: $id, type: ANIME) { status episodes nextAiringEpisode { episode airingAt } }
 }`;
 
 // The next episode of a show that's still airing, or null. Read fresh each
@@ -139,7 +139,7 @@ export async function fetchNextAiring(anilistId) {
     const data = await aniListRequest(NEXT_AIRING_QUERY, { id: anilistId });
     const next = data?.Media?.nextAiringEpisode;
     if (data?.Media?.status !== "RELEASING" || !next?.airingAt) return null;
-    return { episode: next.episode, airingAt: next.airingAt * 1000 };
+    return { episode: next.episode, airingAt: next.airingAt * 1000, total: data.Media.episodes ?? null };
   } catch {
     return null;
   }
@@ -166,4 +166,40 @@ export function describeNextAiring(next, now = Date.now()) {
           ? WEEKDAYS[new Date(next.airingAt).getDay()]
           : `on ${new Date(next.airingAt).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`;
   return `${next.episode ? `episode ${next.episode}` : "the next episode"} airs ${when}`;
+}
+
+// Worth starting now? With three or more episodes out there's enough to get
+// into; with fewer, saving it until more are out is an option worth naming.
+export function airingAdvice(next) {
+  if (!next?.episode) return "";
+  const out = Math.max(0, next.episode - 1);
+  const of = next.total ? ` of ${next.total}` : "";
+  if (next.total && out >= next.total - 1) return `${out}${of} out: nearly done, start now`;
+  if (out >= 3) return `${out}${of} out: enough to start now`;
+  return out ? `only ${out}${of} out so far: you could save it for later` : "it's only just starting: you could save it for later";
+}
+
+const SEQUEL_QUERY = `query ($id: Int) {
+  Media(id: $id, type: ANIME) {
+    relations { edges { relationType(version: 2) node { id idMal type format status title { english romaji } } } }
+  }
+}`;
+
+// The next part of a show, if it has one that's out: a TV season, film,
+// ONA or OVA linked as its SEQUEL. Null otherwise, and never an error.
+export async function fetchSequel(anilistId) {
+  if (!Number.isInteger(anilistId)) return null;
+  try {
+    const data = await aniListRequest(SEQUEL_QUERY, { id: anilistId });
+    const edge = (data?.Media?.relations?.edges || []).find((item) =>
+      item.relationType === "SEQUEL" &&
+      item.node?.type === "ANIME" &&
+      ["TV", "TV_SHORT", "MOVIE", "ONA", "OVA"].includes(item.node.format) &&
+      item.node.status !== "NOT_YET_RELEASED"
+    );
+    if (!edge) return null;
+    return { anilistId: edge.node.id, malId: edge.node.idMal || null, title: edge.node.title?.english || edge.node.title?.romaji || "" };
+  } catch {
+    return null;
+  }
 }
