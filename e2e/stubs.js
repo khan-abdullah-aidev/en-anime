@@ -49,6 +49,7 @@ export async function stubServices(page, { aniListList = [], moodReading = MOOD_
 function modelAnswer(body, moodReading) {
   const { kind, payload } = body;
   if (kind === "mood") return moodReading;
+  if (kind === "ask") return { answer: `Quiet, and never cruel. (${payload.question})` };
   if (kind === "choose" || kind === "verdict") {
     const title = payload.queriedTitles[0];
     return { verdict: "yes", queried_title: title, title, title_jp: title, year: 2015, episodes: 12, genre: "Drama", reason: "It fits tonight.", log_line: "It fits." };
@@ -73,6 +74,9 @@ function aniListAnswer(query, variables, list, mediaById) {
   // Past picks, looked up by id so En can learn from them.
   if (query.includes("id_in: $ids") && !query.includes("recommendations(")) {
     return { Page: { media: (variables.ids || []).map((id) => (mediaById ? mediaById(id) : media(id, `Show ${id}`))) } };
+  }
+  if (query.includes("relations { edges") && query.includes("Media(id: $id")) {
+    return { Media: { relations: { edges: [{ relationType: "SEQUEL", node: { id: variables.id + 1, idMal: null, type: "ANIME", format: "TV", status: "FINISHED", title: { english: "The Next Part", romaji: "The Next Part" } } }] } } };
   }
   if (query.includes("MediaListCollection")) {
     return { MediaListCollection: { lists: [{ entries: list }] } };

@@ -10,6 +10,7 @@ const PICK_FIELDS = ["title", "title_jp", "year", "episodes", "genre", "reason",
 
 export function buildResponseSchema(kind, payload) {
   if (kind === "mood") return moodSchema();
+  if (kind === "ask") return { type: "OBJECT", properties: { answer: STRING }, required: ["answer"] };
   if (kind === "recommend" || kind === "together") {
     const schema = pickSchema(titlesFrom(payload.candidateList));
     // From two phones, the partner gets the reason addressed to them.

@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { askEn, askEnChoose, askEnTogether, askEnVerdict } from "./openrouter.js";
+import { QUESTION_LIMIT, askEn, askEnAbout, askEnChoose, askEnTogether, askEnVerdict } from "./openrouter.js";
 import { isEnConfigError } from "./llmProviders.js";
 import { beginMalOauth, finishMalOauth, refreshMalOauth } from "./oauth.js";
 import { MalAuthError, fetchAnimeImage, fetchAnimeList, fetchPartnerList, isMalAuthError, updateMalListStatus } from "./mal.js";
@@ -42,10 +42,10 @@ import {
   summarizeRecentPatterns
 } from "./tasteProfile.js";
 import { answersFromList, buildWatchHistoryDigest, describeQueriedTitle } from "./watchHistory.js";
-import { buildOpenCandidatePool, buildTogetherPool, rewatchCandidates, seedBench, toModelCandidate, totalMinutes } from "./discovery.js";
+import { buildOpenCandidatePool, buildTogetherPool, rewatchCandidates, seedBench, toModelCandidate, totalMinutes, warmSeedCache } from "./discovery.js";
 import { STREAMING_SERVICES, onServices, servicesFilter } from "./streaming.js";
 import { animeTitleKeys, normalizeTitleForCompare, titleMatchesAnime, uniqueTitles } from "./titleUtils.js";
-import { describeNextAiring, fetchNextAiring, resolveAnimeOnAniList } from "./anilist.js";
+import { airingAdvice, describeNextAiring, fetchNextAiring, fetchSequel, resolveAnimeOnAniList } from "./anilist.js";
 import { PARENT, VIEW, parsePath, pathFor } from "./routes.js";
 import { fetchPublicList, sourceLabel } from "./lists.js";
 import { debugLog } from "./debug.js";
@@ -75,7 +75,8 @@ import {
 } from "./sync.js";
 import { normalizeSnapshot } from "./syncMerge.js";
 import { sharePick } from "./shareCard.js";
-import { monthRecap, recapText } from "./recap.js";
+import { monthRecap, recapText, recentMonths } from "./recap.js";
+import { leaveReminder, remindersOn, remindersSupported, turnOffReminders, turnOnReminders } from "./reminders.js";
 import { askAgainAfter, findCurrentPending, findReviewEntries, isAwaitingAnswer } from "./reviewQueue.js";
 import { readMood } from "./moodReading.js";
 import { buildTasteModel, describeModel, featuresOf, hitRate, learnedForModel, learnedRanker } from "./learning.js";
@@ -205,6 +206,7 @@ export default function App() {
   // picks from earlier visits, never one the user was just handed.
   const sessionEntryIds = useRef(new Set());
   const malListCache = useRef(null);
+  const listInFlight = useRef(null);
   const partnerListCache = useRef(null);
   // The screen showing right now, for async work that finishes later.
   const viewRef = useRef(view);
@@ -245,6 +247,11 @@ export default function App() {
   useEffect(() => {
     writeSession(MOOD_DRAFT_KEY, mood);
   }, [mood]);
+
+  // What a saved-pick reminder would be about (reminders.js), if they're on.
+  useEffect(() => {
+    leaveReminder(history);
+  }, [history]);
 
   // Picks the user has since completed or dropped on MyAnimeList don't need a
   // "did you watch it?" question; check the list in the background on open.
@@ -342,6 +349,21 @@ export default function App() {
   useEffect(() => {
     if (view === VIEW.KNOWS && knows.status === "ready") catchUpPastPicks(knows.list);
   }, [view, knows.status]);
+
+  // While tonight's mood is being typed, read the list and fetch what fans of
+  // its favorites recommend, so asking doesn't wait on either. Quietly: the
+  // request itself surfaces any error.
+  const warming = useRef(false);
+  useEffect(() => {
+    if (![VIEW.MOOD, VIEW.TOGETHER_MOOD, VIEW.SHORTLIST_MOOD].includes(view) || warming.current || !canAskEn()) return;
+    warming.current = true;
+    fetchOwnList()
+      .then((list) => warmSeedCache({ list, muted: loadPreferences().mutedSeeds }))
+      .catch(() => {})
+      .finally(() => {
+        warming.current = false;
+      });
+  }, [view]);
 
   // "What En knows about you" reads the list when it opens.
   useEffect(() => {
@@ -483,7 +505,18 @@ export default function App() {
 
   // The user's own list, from wherever they chose: MAL login, a public
   // MAL/AniList username, or what they typed.
-  async function fetchOwnList() {
+  // One read at a time: a request made while the mood screen's warm-up is
+  // still reading the list waits for that read instead of starting another.
+  function fetchOwnList() {
+    if (!listInFlight.current) {
+      listInFlight.current = readOwnList().finally(() => {
+        listInFlight.current = null;
+      });
+    }
+    return listInFlight.current;
+  }
+
+  async function readOwnList() {
     if (mode === "manual") return manualList;
     if (mode !== "username") return fetchAnimeListWithRefresh();
 
@@ -1140,7 +1173,29 @@ export default function App() {
     // Answers read off the list itself don't need writing back to it.
     // A rewatch is already finished there; nothing to change.
     if (!reflection && MAL_ACTION_FOR[answer] && entry.mode !== "rewatch") shareWithMal(entry, MAL_ACTION_FOR[answer]);
+    if (answer === "good" && !reflection) offerSequel(entry);
     return nextHistory;
+  }
+
+  // A pick that landed and has a next part they haven't seen: offer to ask
+  // En about it, quietly, unless something else is already being said.
+  async function offerSequel(entry) {
+    const sequel = await fetchSequel(entry.recommendation?.anilistId);
+    if (!sequel?.title) return;
+    const list = malListCache.current?.list;
+    const seenOnList = Array.isArray(list) && list.some((item) =>
+      (sequel.malId && item.id === sequel.malId) || (item.anilistId && item.anilistId === sequel.anilistId) || titleMatchesAnime(sequel.title, item)
+    );
+    const picked = loadHistory().some((item) => item.recommendation?.anilistId === sequel.anilistId || titleMatchesAnime(sequel.title, item.recommendation || {}));
+    if (seenOnList || picked) return;
+    setNotice((current) => current || { kind: "sequel", title: sequel.title, after: entry.recommendation.title });
+  }
+
+  // "Ask En about it" on the sequel notice: the same as naming it under
+  // "I already have one in mind".
+  function askAboutSequel(title) {
+    setNotice(null);
+    handleVerdict(title, "");
   }
 
   function handleSaveForLater() {
@@ -1758,7 +1813,7 @@ export default function App() {
     <NavContext.Provider value={nav}>
       <div style={{ minHeight: "100vh", position: "relative" }}>
         {error ? <ErrorRibbon message={error} onDismiss={() => setError("")} /> : null}
-        <Notice notice={notice} onDismiss={() => setNotice(null)} onMalOffer={answerMalOffer} />
+        <Notice notice={notice} onDismiss={() => setNotice(null)} onMalOffer={answerMalOffer} onSequel={askAboutSequel} />
         {view === VIEW.LANDING && <ScreenLanding nav={nav} status={status} />}
         {view === VIEW.MANUAL && (
           <ScreenManual
@@ -3194,7 +3249,12 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight, serv
                 {pick.resume.total ? ` of ${pick.resume.total}` : ""}
               </p>
             ) : null}
-            {airing ? <p className="meta next-airing">airing now · {airing}</p> : null}
+            {airing ? (
+              <>
+                <p className="meta next-airing">airing now · {airing}</p>
+                <p className="meta watch-links__note">{airingAdvice(nextAiring)}</p>
+              </>
+            ) : null}
             {pick.watch_links?.length ? (
               <>
                 <p className="meta watch-links">
@@ -3231,6 +3291,7 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight, serv
             >
               {stripMarkdown(pick.reason)}
             </p>
+            <AskAboutPick key={entry.id} pick={pick} />
 
             {/* The pick is already in the log; these only say what happens next. */}
             <div style={{ marginTop: 36 }}>
@@ -3326,6 +3387,57 @@ function ScreenReveal({ nav, entry, isNewPick, canMarkSeen, canPassTonight, serv
         </div>
         <div className="reveal-scroll__seal meta jp">縁</div>
       </div>
+    </div>
+  );
+}
+
+// "Ask about it": one question about the pick, answered without spoilers.
+function AskAboutPick({ pick }) {
+  const [open, setOpen] = useState(false);
+  const [question, setQuestion] = useState("");
+  const [asked, setAsked] = useState(null); // { question, answer } | { question, error } | { question, pending }
+
+  async function ask(event) {
+    event.preventDefault();
+    const text = question.trim();
+    if (!text || asked?.pending) return;
+    setAsked({ question: text, pending: true });
+    try {
+      setAsked({ question: text, answer: await askEnAbout(pick, text) });
+      setQuestion("");
+    } catch (askError) {
+      setAsked({ question: text, error: askError.message });
+    }
+  }
+
+  if (!open) {
+    return (
+      <button className="btn-quiet ask-about__open" onClick={() => setOpen(true)}>
+        ask about it
+      </button>
+    );
+  }
+  return (
+    <div className="ask-about fade-in">
+      {asked ? (
+        <div className="ask-about__exchange" role="status" aria-live="polite">
+          <p className="meta ask-about__q">you · {asked.question}</p>
+          <p className="ask-about__a">
+            {asked.pending ? "…" : asked.error ? asked.error : asked.answer}
+          </p>
+        </div>
+      ) : null}
+      <form onSubmit={ask}>
+        <input
+          autoFocus
+          value={question}
+          maxLength={QUESTION_LIMIT}
+          onChange={(event) => setQuestion(event.target.value)}
+          aria-label="Ask En about this pick"
+          placeholder={asked ? "anything else?" : "is it sad? how slow does it start?"}
+          className="meh-note-input own-reason__input"
+        />
+      </form>
     </div>
   );
 }
@@ -3937,7 +4049,7 @@ function GenreChips({ excluded, onToggle, align = "center" }) {
   );
 }
 
-function Notice({ notice, onDismiss, onMalOffer }) {
+function Notice({ notice, onDismiss, onMalOffer, onSequel }) {
   useEffect(() => {
     if (notice?.kind !== "info") return undefined;
     const timer = setTimeout(onDismiss, 6000);
@@ -3945,6 +4057,23 @@ function Notice({ notice, onDismiss, onMalOffer }) {
   }, [notice]);
 
   if (!notice) return null;
+  if (notice.kind === "sequel") {
+    return (
+      <div className="notice fade-in" role="dialog" aria-label={`${notice.title} is next`}>
+        <p>
+          {notice.after} landed. Its next part, {notice.title}, is out. Should En weigh in on watching it next?
+        </p>
+        <div className="notice__actions">
+          <button className="btn-quiet notice__yes" onClick={() => onSequel(notice.title)}>
+            ask En about it
+          </button>
+          <button className="btn-quiet" onClick={onDismiss}>
+            not now
+          </button>
+        </div>
+      </div>
+    );
+  }
   if (notice.kind === "mal-offer") {
     return (
       <div className="notice fade-in" role="dialog" aria-label="Update MyAnimeList too?">
@@ -4448,6 +4577,8 @@ function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre
             </>
           )}
 
+          <TasteOverTime history={history} />
+
           <section className="knows-section fade-up delay-2" aria-labelledby="knows-watch">
             <div className="eyebrow" id="knows-watch">Where you watch</div>
             <p className="knows-section__lede">
@@ -4521,6 +4652,7 @@ function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre
             )}
             </div>
             <SyncPanel nav={nav} sync={sync} source={source} hasLog={history.length > 0} />
+            <RemindersRow history={history} />
             <div style={{ marginTop: 72 }}>
               <SuggestionNote />
             </div>
@@ -4535,6 +4667,76 @@ function ScreenKnows({ nav, knows, history, preferences, onChange, onToggleGenre
 const MAL_ACTION_FOR = { good: "good", meh: "meh", later: "later", watching: "tonight" };
 
 const ROOM_POLL_MS = 3000;
+
+// How the picks have gone month by month: how many, how many landed, and
+// what kind of thing they were.
+function TasteOverTime({ history }) {
+  const months = useMemo(() => recentMonths(history), [history]);
+  if (months.length < 2) return null;
+  const most = Math.max(...months.map((month) => month.picks));
+  return (
+    <section className="knows-section fade-up delay-2" aria-labelledby="knows-months">
+      <div className="eyebrow" id="knows-months">Month by month</div>
+      <p className="knows-section__lede">How En's picks have gone lately, and what kind of thing they were.</p>
+      {months.map((month) => (
+        <div key={month.label} className="knows-row month-row">
+          <div>
+            <span className="knows-row__label">{month.label.replace(" so far", "")}</span>
+            <span className="meta knows-row__why">
+              {month.picks} pick{month.picks === 1 ? "" : "s"} · {month.loved} loved
+              {month.hitRate != null ? ` · ${month.hitRate}% landed` : ""}
+              {month.topGenres.length ? ` · mostly ${month.topGenres.join(" and ").toLowerCase()}` : ""}
+            </span>
+          </div>
+          <span className="month-row__bar" aria-hidden="true" style={{ width: `${Math.round((month.picks / most) * 100)}%` }} />
+        </div>
+      ))}
+    </section>
+  );
+}
+
+// "Remind me about saved picks", on this device only.
+function RemindersRow({ history }) {
+  const [on, setOn] = useState(() => remindersOn());
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const supported = remindersSupported();
+
+  async function toggle() {
+    setBusy(true);
+    if (on) {
+      await turnOffReminders();
+      setOn(false);
+      setMessage("");
+    } else {
+      const result = await turnOnReminders(history).catch(() => ({ ok: false, reason: "En couldn't turn reminders on here." }));
+      setOn(result.ok);
+      setMessage(result.ok ? "" : result.reason);
+    }
+    setBusy(false);
+  }
+
+  return (
+    <div className="knows-row" style={{ marginTop: 40 }}>
+      <div>
+        <span className="knows-row__label">Remind me about saved picks</span>
+        <span className="meta knows-row__why" role="status">
+          {message ||
+            (!supported
+              ? "This browser can't remind you on its own. Chrome on Android or desktop can, once En is installed."
+              : on
+                ? "On this device: a nudge on a quiet evening, at most every few days."
+                : "Off. A nudge on a quiet evening about a pick you saved, on this device only.")}
+        </span>
+      </div>
+      {supported ? (
+        <button className="btn-quiet" aria-pressed={on} disabled={busy} onClick={toggle}>
+          {on ? "turn off" : "turn on"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
 
 // "What En has learned": its hit rate, and the traits behind hits and
 // misses, each of which can be forgotten.

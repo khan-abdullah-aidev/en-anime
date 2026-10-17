@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { monthRecap, recapText } from "../src/recap.js";
+import { monthRecap, recapText, recentMonths } from "../src/recap.js";
 
 const now = new Date(2026, 9, 17);
 const pick = (day, month, fields = {}) => ({
@@ -36,4 +36,9 @@ test("this month's recap counts picks, what was watched and what landed", () => 
 test("with nothing yet this month, last month's recap shows; with nothing at all, none", () => {
   assert.equal(monthRecap([pick(20, 8)], now).label, "September");
   assert.equal(monthRecap([], now), null);
+});
+
+test("month by month lists recent months with picks, newest first", () => {
+  const months = recentMonths([pick(2, 9), pick(3, 9), pick(20, 7)], now);
+  assert.deepEqual(months.map((month) => [month.label, month.picks]), [["October so far", 2], ["August", 1]]);
 });
