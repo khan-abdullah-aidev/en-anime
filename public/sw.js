@@ -1,6 +1,6 @@
 // En's service worker: opens instantly (and offline) from the home screen,
 // and reminds about a saved pick on a quiet evening when the user asked for
-// that. Never caches /api: picks, sync and MAL always go to the network.
+// that. Never caches /api (picks, sync, MAL) or /_vercel (analytics).
 
 const SHELL = "en-shell-v1";
 const REMINDER_KEY = "/__en/reminder";
@@ -34,7 +34,7 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   const url = new URL(request.url);
-  if (request.method !== "GET" || url.origin !== self.location.origin || url.pathname.startsWith("/api/") || url.pathname === REMINDER_KEY) return;
+  if (request.method !== "GET" || url.origin !== self.location.origin || url.pathname.startsWith("/api/") || url.pathname.startsWith("/_vercel/") || url.pathname === REMINDER_KEY) return;
 
   // Pages: the network first, so a deploy shows up at once; the last copy
   // when offline. Every screen is the same index.html.
