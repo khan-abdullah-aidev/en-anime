@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { beforeEach, describe, it } from "node:test";
 import {
   buildOpenCandidatePool,
   buildUserContext,
@@ -13,6 +13,7 @@ import {
 import { buildRecommendationMemory } from "../src/recommendationEngine.js";
 import { buildTasteProfile } from "../src/tasteProfile.js";
 import { MAL_LIST, aniListMedia, json, relation, withFetch } from "./fixtures.js";
+import { resetAniListDown } from "../src/anilist.js";
 
 const FRIEREN = { malId: 2, title: "Frieren: Beyond Journey's End", weight: 3 };
 const history = [{ state: "rated", feedback: "meh", recommendation: { title: "Previously Picked", anilistId: 999 } }];
@@ -36,6 +37,9 @@ const seedGroups = [{ seed: FRIEREN, recs: recs.map(([rating, media]) => ({ rati
 const quiet = aniListMedia(201, "Natsume's Book of Friends", { genres: ["Slice of Life"], averageScore: 70, tags: [{ name: "Iyashikei", rank: 90 }] });
 const plain = aniListMedia(202, "Plain Drama", { genres: ["Drama"], averageScore: 70 });
 const discovery = { mood: [toCandidate(quiet)], genre: [toCandidate(plain)], recent: [toCandidate(aniListMedia(203, "New This Year", { startDate: { year: 2026 } }))] };
+
+// AniList being down is remembered for a few minutes; each test starts fresh.
+beforeEach(() => resetAniListDown());
 
 describe("AniList media -> candidate", () => {
   it("keeps the fields the pool needs and drops spoiler / weak tags", () => {

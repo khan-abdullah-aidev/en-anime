@@ -1,4 +1,4 @@
-import { aniListRequest, resolveAnimeOnAniList } from "./anilist.js";
+import { aniListIsDown, aniListRequest, resolveAnimeOnAniList } from "./anilist.js";
 import { toCandidate } from "./discovery.js";
 import { featuresForEntry, featuresOf } from "./learning.js";
 import { animeTitleKeys } from "./titleUtils.js";
@@ -41,7 +41,11 @@ export async function backfillPastPicks({ history, list = null, lookups = MAX_LO
     }
     if (searches >= lookups) continue;
     searches += 1;
-    const resolved = await resolveAnimeOnAniList(rec.title).catch(() => null);
+    // AniList ids only: a MyAnimeList match (while AniList is down) has no
+    // features to learn from, and would mark the pick as done for good.
+    if (aniListIsDown()) break;
+    const resolved = await resolveAnimeOnAniList(rec.title, { anilistOnly: true }).catch(() => null);
+    if (aniListIsDown()) break;
     if (resolved?.anilistId) ids.set(entry.id, { anilistId: resolved.anilistId, malId: resolved.malId || null });
     else patch(entry.id, { features: { ...(featuresForEntry(entry) || {}), partial: true } });
     if (pause) await new Promise((resolve) => setTimeout(resolve, pause));
