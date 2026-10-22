@@ -106,8 +106,9 @@ async function buildFreshPool({ mood = "", passedOver = [], list, history = [], 
   const { constraints, discoveryMood, moodWanted, avoid } = buildRequestFilters({ mood, passedOver, reading: moodReading, standing });
   const queryExclude = withAvoided(exclude, avoid);
   let fetched = null;
+  let seeds = null;
   try {
-    const seeds = await selectSeeds({ list, history, muted: mutedSeeds });
+    seeds = await selectSeeds({ list, history, muted: mutedSeeds });
     const filters = {
       favorites: withoutExcluded(toAniListFilters(tasteProfile?.favoriteGenres || []), queryExclude),
       mood: moodWanted,
@@ -121,12 +122,24 @@ async function buildFreshPool({ mood = "", passedOver = [], list, history = [], 
     const watchedAnilistIds = seeds.by === "anilistId" ? seeds.seeds.map((seed) => seed.anilistId) : [];
     fetched = { seedGroups, discovery, context: buildUserContext({ list, history, memory, watchedAnilistIds }) };
   } catch (error) {
-    console.warn("[En] AniList discovery failed; using the curated catalog instead", error.message);
+    console.warn("[En] AniList discovery failed; trying MyAnimeList", error.message);
+    try {
+      seeds ||= await selectSeeds({ list, history, muted: mutedSeeds });
+      const data = await fetchMalPool(seeds.seeds);
+      const typedMalIds = seeds.typed ? seeds.seeds.map((seed) => seed.malId) : [];
+      fetched = {
+        ...malGroups(data, seeds.seeds, { tasteProfile, moodWanted }),
+        context: buildUserContext({ list, history, memory, watchedMalIds: typedMalIds }),
+        source: "myanimelist"
+      };
+    } catch (malError) {
+      console.warn("[En] MyAnimeList backup failed too; using the curated catalog", malError.message);
+    }
   }
 
   const assemble = (activeConstraints) => {
     const pool = fetched ? rankPool({ ...fetched, tasteProfile, moodWanted, avoid, constraints: activeConstraints, exclude, learned, limit }) : [];
-    if (pool.length >= MIN_POOL) return { candidates: pool, source: "anilist" };
+    if (pool.length >= MIN_POOL) return { candidates: pool, source: fetched.source || "anilist" };
 
     // AniList unreachable or the open pool came back thin: top up with the
     // curated catalog so a recommendation can still be made.
@@ -134,7 +147,7 @@ async function buildFreshPool({ mood = "", passedOver = [], list, history = [], 
       .filter((candidate) => meetsConstraints(candidate, activeConstraints) && !exclude.matches(candidate));
     const taken = new Set(pool.map((candidate) => normalizeTitleForCompare(candidate.title)));
     const merged = [...pool, ...catalog.filter((candidate) => !taken.has(normalizeTitleForCompare(candidate.title)))].slice(0, limit);
-    return { candidates: merged, source: pool.length ? "anilist+catalog" : "catalog" };
+    return { candidates: merged, source: pool.length ? `${fetched.source || "anilist"}+catalog` : "catalog" };
   };
 
   const result = assemble(constraints);
@@ -157,8 +170,10 @@ export async function buildTogetherPool({ mood = "", passedOver = [], you, partn
   const queryExclude = withAvoided(exclude, avoid);
   const tasteProfile = combineTasteProfiles(you.tasteProfile, partner.tasteProfile);
   let fetched = null;
+  let yourSeeds = null;
+  let theirSeeds = null;
   try {
-    const [yourSeeds, theirSeeds] = await Promise.all([
+    [yourSeeds, theirSeeds] = await Promise.all([
       selectSeeds({ list: you.list, history: you.history, muted: mutedSeeds }),
       selectSeeds({ list: partner.list, history: [] })
     ]);
@@ -186,19 +201,34 @@ export async function buildTogetherPool({ mood = "", passedOver = [], you, partn
       })
     };
   } catch (error) {
-    console.warn("[En] AniList discovery failed; using the curated catalog instead", error.message);
+    console.warn("[En] AniList discovery failed; trying MyAnimeList", error.message);
+    try {
+      yourSeeds ||= await selectSeeds({ list: you.list, history: you.history, muted: mutedSeeds });
+      theirSeeds ||= await selectSeeds({ list: partner.list, history: [] });
+      const mine = yourSeeds.seeds.slice(0, 5).map((seed) => ({ ...seed, owner: "you" }));
+      const theirs = theirSeeds.seeds.slice(0, 5).map((seed) => ({ ...seed, owner: "partner" }));
+      const data = await fetchMalPool([...mine, ...theirs]);
+      const typed = (seeds) => (seeds.typed ? seeds.seeds.map((seed) => seed.malId) : []);
+      fetched = {
+        ...malGroups(data, [...mine, ...theirs], { tasteProfile, moodWanted }),
+        context: buildTogetherContext({ you, partner, yourWatchedMalIds: typed(yourSeeds), theirWatchedMalIds: typed(theirSeeds) }),
+        source: "myanimelist"
+      };
+    } catch (malError) {
+      console.warn("[En] MyAnimeList backup failed too; using the curated catalog", malError.message);
+    }
   }
 
   const assemble = (activeConstraints) => {
     const pool = fetched ? rankPool({ ...fetched, tasteProfile, moodWanted, avoid, constraints: activeConstraints, exclude, learned, limit }) : [];
-    if (pool.length >= MIN_POOL) return { candidates: pool, source: "anilist" };
+    if (pool.length >= MIN_POOL) return { candidates: pool, source: fetched.source || "anilist" };
 
     const context = fetched?.context || buildTogetherContext({ you, partner });
     const catalog = buildCandidatePool({ mood: catalogMood(discoveryMood, moodWanted), tasteProfile, recentPatterns, memory: you.memory, limit: limit * 2 })
       .filter((candidate) => meetsConstraints(candidate, activeConstraints) && !seenByPartner(candidate, context) && !exclude.matches(candidate));
     const taken = new Set(pool.map((candidate) => normalizeTitleForCompare(candidate.title)));
     const merged = [...pool, ...catalog.filter((candidate) => !taken.has(normalizeTitleForCompare(candidate.title)))].slice(0, limit);
-    return { candidates: merged, source: pool.length ? "anilist+catalog" : "catalog" };
+    return { candidates: merged, source: pool.length ? `${fetched.source || "anilist"}+catalog` : "catalog" };
   };
 
   const result = assemble(constraints);
@@ -308,8 +338,8 @@ export function resumeCandidates({ list, history = [], now = Date.now() }) {
     }));
 }
 
-export function buildTogetherContext({ you, partner, yourWatchedAnilistIds = [], theirWatchedAnilistIds = [] }) {
-  const context = buildUserContext({ list: you.list, history: you.history, memory: you.memory, watchedAnilistIds: yourWatchedAnilistIds });
+export function buildTogetherContext({ you, partner, yourWatchedAnilistIds = [], theirWatchedAnilistIds = [], yourWatchedMalIds = [], theirWatchedMalIds = [] }) {
+  const context = buildUserContext({ list: you.list, history: you.history, memory: you.memory, watchedAnilistIds: yourWatchedAnilistIds, watchedMalIds: yourWatchedMalIds });
   const partnerSeenIds = new Set();
   const partnerPlanIds = new Set();
   const partnerSeenKeys = new Set();
@@ -330,6 +360,7 @@ export function buildTogetherContext({ you, partner, yourWatchedAnilistIds = [],
       .forEach((key) => partnerSeenKeys.add(key));
   }
   theirWatchedAnilistIds.forEach((id) => context.excludedAnilistIds.add(id));
+  theirWatchedMalIds.forEach((id) => partnerSeenIds.add(id));
 
   return { ...context, partnerSeenIds, partnerPlanIds, partnerSeenKeys, allowContinuations: false };
 }
@@ -588,6 +619,7 @@ export async function selectSeeds({ list, history = [], random = Math.random, mu
     const seeds = new Map();
     const add = (entry) => seeds.set(idOf(entry), {
       [by]: idOf(entry),
+      malId: entry.id || null,
       title: entry.alternative_titles?.en || entry.title,
       weight: weightOf(entry)
     });
@@ -606,28 +638,35 @@ export async function selectSeeds({ list, history = [], random = Math.random, mu
     for (const entry of likedPicks) {
       const id = by === "anilistId" ? entry.recommendation.anilistId : entry.recommendation.malId;
       if (id && !seeds.has(id) && seeds.size < SEED_LIMIT) {
-        seeds.set(id, { [by]: id, title: entry.recommendation.title, weight: 1.5 });
+        seeds.set(id, { [by]: id, malId: entry.recommendation.malId || null, title: entry.recommendation.title, weight: 1.5 });
       }
     }
     return { by, seeds: [...seeds.values()] };
   }
 
-  // Manual mode: resolve the typed titles on AniList (cached per title).
+  // Manual mode: resolve the typed titles on AniList (cached per title), or
+  // on MyAnimeList while AniList is down (those carry only a MAL id).
   const typed = parseManualTitles(list).slice(0, 8);
   const resolved = await Promise.all(typed.map((title) => resolveAnimeOnAniList(title)));
   const seeds = new Map();
   resolved.forEach((match, index) => {
-    if (match?.anilistId && !seeds.has(match.anilistId) && !isMuted({ anilistId: match.anilistId, title: match.title || typed[index] })) {
-      seeds.set(match.anilistId, { anilistId: match.anilistId, title: match.title || typed[index], weight: 1 });
+    const key = match?.anilistId || (match?.malId ? `mal:${match.malId}` : null);
+    if (key && !seeds.has(key) && !isMuted({ anilistId: match.anilistId, malId: match.malId, title: match.title || typed[index] })) {
+      seeds.set(key, { anilistId: match.anilistId || null, malId: match.malId || null, title: match.title || typed[index], weight: 1 });
     }
   });
   for (const entry of likedPicks) {
-    const anilistId = entry.recommendation.anilistId;
-    if (anilistId && !seeds.has(anilistId) && seeds.size < SEED_LIMIT) {
-      seeds.set(anilistId, { anilistId, title: entry.recommendation.title, weight: 1.5 });
+    const rec = entry.recommendation;
+    const key = rec.anilistId || (rec.malId ? `mal:${rec.malId}` : null);
+    if (key && !seeds.has(key) && seeds.size < SEED_LIMIT) {
+      seeds.set(key, { anilistId: rec.anilistId || null, malId: rec.malId || null, title: rec.title, weight: 1.5 });
     }
   }
-  return { by: "anilistId", seeds: [...seeds.values()] };
+  const all = [...seeds.values()];
+  // AniList recommendations need AniList ids; the MAL backup uses malId.
+  return all.some((seed) => seed.anilistId)
+    ? { by: "anilistId", seeds: all.filter((seed) => seed.anilistId) }
+    : { by: "malId", seeds: all.filter((seed) => seed.malId), typed: true };
 }
 
 // The favorites seeds are drawn from, best first: highly scored finishes,
@@ -718,6 +757,55 @@ async function fetchSeedRecommendations({ by, seeds }) {
   return seeds
     .filter((seed) => recsById.has(seed[by]))
     .map((seed) => ({ seed, recs: recsById.get(seed[by]) }));
+}
+
+// A candidate's id in a pool: AniList's, or MyAnimeList's for the backup.
+const poolKey = (candidate) => candidate.anilistId || (candidate.malId ? `mal:${candidate.malId}` : candidate.title);
+
+// ---------- backup: MyAnimeList ----------
+//
+// While AniList is down (src/anilist.js), the same pool is built from
+// MyAnimeList through /api/mal-discover: what MAL's users recommend from
+// each seed, and MAL's charts for the genre, mood and recent buckets.
+// MAL doesn't say where shows stream, so these carry no watch links.
+const MAL_POOL_TTL_MS = 6 * 60 * 60 * 1000;
+
+export async function fetchMalPool(seeds = [], { fetchImpl = fetch } = {}) {
+  const ids = [...new Set(seeds.map((seed) => seed.malId).filter(Boolean))].slice(0, 10);
+  const key = `mal:${hashString([...ids].sort((a, b) => a - b).join(","))}`;
+  const cached = readCache(key, MAL_POOL_TTL_MS);
+  if (cached) return cached;
+  const response = await fetchImpl(`/api/mal-discover?seeds=${ids.join(",")}`);
+  if (!response.ok) throw new Error(`MyAnimeList backup failed (${response.status}).`);
+  const data = await response.json();
+  writeCache(key, data);
+  return data;
+}
+
+// /api/mal-discover's answer -> rankPool's seedGroups and discovery buckets.
+export function malGroups(data, seeds = [], { tasteProfile = {}, moodWanted = null } = {}) {
+  const byId = new Map((data.candidates || []).map((candidate) => [candidate.malId, candidate]));
+  const seedFor = new Map(seeds.filter((seed) => seed.malId).map((seed) => [seed.malId, seed]));
+  const seedGroups = (data.seeds || [])
+    .filter((group) => seedFor.has(group.malId))
+    .map((group) => ({
+      seed: seedFor.get(group.malId),
+      recs: group.recs.map((rec) => ({ rating: rec.weight, candidate: byId.get(rec.malId) })).filter((rec) => rec.candidate)
+    }));
+  const of = (ids = []) => ids.map((id) => byId.get(id)).filter(Boolean);
+  const keysOf = (labels = []) => new Set(labels.map(normalizeTitleForCompare));
+  const has = (candidate, keys) => keys.size && candidate.genres.some((genre) => keys.has(normalizeTitleForCompare(genre)));
+  const favorite = keysOf(tasteProfile.favoriteGenres);
+  const wanted = keysOf([...(moodWanted?.genres || []), ...(moodWanted?.tags || [])]);
+  const charts = data.charts || {};
+  return {
+    seedGroups,
+    discovery: {
+      genre: of([...(charts.top || []), ...(charts.popular || [])]).filter((candidate) => has(candidate, favorite)),
+      mood: [...byId.values()].filter((candidate) => has(candidate, wanted)),
+      recent: of([...(charts.season || []), ...(charts.airing || [])])
+    }
+  };
 }
 
 // ---------- discovery ----------
@@ -814,9 +902,10 @@ export function toAniListFilters(labels) {
 
 // ---------- filtering + ranking (pure) ----------
 
-export function buildUserContext({ list, history = [], memory, watchedAnilistIds = [] }) {
-  const listIds = new Set();
-  const completedIds = new Set();
+export function buildUserContext({ list, history = [], memory, watchedAnilistIds = [], watchedMalIds = [] }) {
+  const listIds = new Set(watchedMalIds);
+  const completedIds = new Set(watchedMalIds);
+  const excludedMalIds = new Set();
   const excludedAnilistIds = new Set(watchedAnilistIds);
   const completedAnilistIds = new Set(watchedAnilistIds);
   if (Array.isArray(list)) {
@@ -837,6 +926,7 @@ export function buildUserContext({ list, history = [], memory, watchedAnilistIds
   for (const entry of history) {
     const rec = entry.recommendation || {};
     if (rec.anilistId && isStillExcluded(entry)) excludedAnilistIds.add(rec.anilistId);
+    if (rec.malId && isStillExcluded(entry)) excludedMalIds.add(rec.malId);
     if (entry.feedback === "good") {
       if (rec.malId) completedIds.add(rec.malId);
       if (rec.anilistId) completedAnilistIds.add(rec.anilistId);
@@ -845,21 +935,23 @@ export function buildUserContext({ list, history = [], memory, watchedAnilistIds
   const manualKeys = new Set(
     typeof list === "string" ? parseManualTitles(list).map(normalizeTitleForCompare).filter(Boolean) : []
   );
-  return { listIds, completedIds, completedAnilistIds, excludedAnilistIds, manualKeys, isExcludedTitle: createExclusionCheck(memory) };
+  return { listIds, completedIds, completedAnilistIds, excludedAnilistIds, excludedMalIds, manualKeys, isExcludedTitle: createExclusionCheck(memory) };
 }
 
 export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfile = {}, mood = "", moodWanted = null, avoid = { genres: [], tags: [] }, constraints = {}, exclude = NO_EXCLUSIONS, learned = null, limit = POOL_LIMIT }) {
   const merged = new Map();
   const add = (candidate, source, extra = {}) => {
-    if (!candidate?.anilistId || !isUsable(candidate)) return;
-    const entry = merged.get(candidate.anilistId) || { ...candidate, sources: new Set(), becauseWeights: new Map(), becauseOwners: new Map(), similarity: 0 };
+    // AniList's id, or MyAnimeList's for candidates from the backup (malPool).
+    const key = candidate?.anilistId || (candidate?.malId ? `mal:${candidate.malId}` : null);
+    if (!key || !isUsable(candidate)) return;
+    const entry = merged.get(key) || { ...candidate, sources: new Set(), becauseWeights: new Map(), becauseOwners: new Map(), similarity: 0 };
     entry.sources.add(source);
     if (extra.seed) {
       entry.similarity += extra.seed.weight * (1 + 2 * Math.max(0, extra.relative || 0));
       entry.becauseWeights.set(extra.seed.title, (entry.becauseWeights.get(extra.seed.title) || 0) + extra.rating);
       entry.becauseOwners.set(extra.seed.title, extra.seed.owner || "you");
     }
-    merged.set(candidate.anilistId, entry);
+    merged.set(key, entry);
   };
 
   for (const group of seedGroups) {
@@ -938,19 +1030,19 @@ export function rankPool({ seedGroups = [], discovery = {}, context, tasteProfil
     let taken = 0;
     for (const entry of ranked) {
       if (taken >= quota) break;
-      if (!entry.sources.includes(source) || picked.has(entry.anilistId)) continue;
+      if (!entry.sources.includes(source) || picked.has(poolKey(entry))) continue;
       if (source === "similar") {
         const seed = entry.because[0] || entry.becauseThem[0];
         if ((perSeed.get(seed) || 0) >= MAX_PER_SEED) continue;
         perSeed.set(seed, (perSeed.get(seed) || 0) + 1);
       }
-      picked.set(entry.anilistId, entry);
+      picked.set(poolKey(entry), entry);
       taken += 1;
     }
   }
   for (const entry of ranked) {
     if (picked.size >= limit) break;
-    picked.set(entry.anilistId, entry);
+    picked.set(poolKey(entry), entry);
   }
   return [...picked.values()].sort((a, b) => b.rankScore - a.rankScore).slice(0, limit);
 }
@@ -965,7 +1057,7 @@ function isUsable(candidate) {
 }
 
 function isExcludedCandidate(candidate, context) {
-  if (candidate.malId && context.listIds.has(candidate.malId)) return true;
+  if (candidate.malId && (context.listIds.has(candidate.malId) || context.excludedMalIds?.has(candidate.malId))) return true;
   if (context.excludedAnilistIds.has(candidate.anilistId)) return true;
   if (seenByPartner(candidate, context)) return true;
   return candidateTitles(candidate).some((title) => context.isExcludedTitle(title));

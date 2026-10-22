@@ -5,6 +5,58 @@ import { streamingLinks } from "./streaming.js";
 const ANILIST_URL = "https://graphql.anilist.co";
 const REQUEST_TIMEOUT_MS = 6000;
 
+// ---------- when AniList is down ----------
+//
+// The first request AniList refuses outright (disabled, overloaded, rate
+// limited, blocked or timed out) marks it down for a few minutes, in this
+// tab and for the rest of this visit, so nothing else waits on it: every
+// later request fails at once, and callers fall back (to MyAnimeList, via
+// /api/mal-*, or to the curated catalog).
+const DOWN_KEY = "en.anilistDownUntil";
+const DOWN_MS = 5 * 60 * 1000;
+let downUntil = 0;
+
+export class AniListDownError extends Error {
+  constructor(message = "AniList isn't answering right now.") {
+    super(message);
+    this.name = "AniListDownError";
+  }
+}
+
+export function isAniListDownError(error) {
+  return error instanceof AniListDownError || error?.name === "AniListDownError";
+}
+
+export function aniListIsDown(now = Date.now()) {
+  if (!downUntil) {
+    try {
+      downUntil = Number(sessionStorage.getItem(DOWN_KEY)) || 0;
+    } catch {
+      downUntil = 0;
+    }
+  }
+  return now < downUntil;
+}
+
+export function markAniListDown(now = Date.now()) {
+  downUntil = now + DOWN_MS;
+  try {
+    sessionStorage.setItem(DOWN_KEY, String(downUntil));
+  } catch {
+    // storage unavailable; this tab remembers it anyway
+  }
+}
+
+// For tests.
+export function resetAniListDown() {
+  downUntil = 0;
+  try {
+    sessionStorage.removeItem(DOWN_KEY);
+  } catch {
+    // nothing stored
+  }
+}
+
 // Page.media, not a single Media(search:) lookup: AniList's search-match ranking
 // can surface an unrelated SPECIAL/CM entry ahead of the real title when a
 // short promotional tie-in shares synonyms with it (e.g. searching "Kimi no
@@ -30,7 +82,10 @@ const SEARCH_QUERY = `query ($search: String) {
   }
 }`;
 
-export async function resolveAnimeOnAniList(title) {
+// A title, matched to its AniList entry (cached). While AniList is down the
+// match comes from MyAnimeList instead (anilistId null, never cached long),
+// unless anilistOnly asks for an AniList id or nothing.
+export async function resolveAnimeOnAniList(title, { anilistOnly = false } = {}) {
   const trimmed = String(title || "").trim();
   if (!trimmed) return null;
 
@@ -44,6 +99,7 @@ export async function resolveAnimeOnAniList(title) {
   try {
     resolved = await queryAniList(trimmed);
   } catch (error) {
+    if (!anilistOnly && isAniListDownError(error)) return resolveOnMal(trimmed);
     console.warn("[En debug] AniList lookup failed (not cached, will retry later)", {
       title: trimmed,
       error: error.message
@@ -55,6 +111,22 @@ export async function resolveAnimeOnAniList(title) {
   return resolved;
 }
 
+const malMatches = new Map();
+
+async function resolveOnMal(title) {
+  const key = normalizeTitleForCompare(title);
+  if (malMatches.has(key)) return malMatches.get(key);
+  let match = null;
+  try {
+    const response = await fetch(`/api/mal-search?q=${encodeURIComponent(title)}`);
+    if (response.ok) match = (await response.json()).match || null;
+  } catch {
+    match = null;
+  }
+  malMatches.set(key, match);
+  return match;
+}
+
 async function queryAniList(title) {
   const data = await aniListRequest(SEARCH_QUERY, { search: title });
   return pickBestMatch(title, data?.Page?.media || []);
@@ -64,20 +136,33 @@ async function queryAniList(title) {
 // browser: its rate limit (currently 30 requests/minute) then applies per
 // user rather than to one shared server IP.
 export async function aniListRequest(query, variables = {}, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+  if (aniListIsDown()) throw new AniListDownError();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(ANILIST_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ query, variables }),
-      signal: controller.signal
-    });
+    let response;
+    try {
+      response = await fetch(ANILIST_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ query, variables }),
+        signal: controller.signal
+      });
+    } catch {
+      // Blocked, offline or timed out: with AniList down, a refused
+      // request often shows up as a CORS failure rather than a status.
+      markAniListDown();
+      throw new AniListDownError();
+    }
 
     if (!response.ok) {
       // AniList explains errors in the body ("Private User", "User not found").
       const detail = (await response.json().catch(() => null))?.errors?.[0]?.message;
+      if (response.status >= 500 || response.status === 429 || (response.status === 403 && /disabled|stability|maintenance/i.test(detail || ""))) {
+        markAniListDown();
+        throw new AniListDownError(detail || undefined);
+      }
       throw new Error(`AniList request failed (${response.status})${detail ? `: ${detail}` : "."}`);
     }
 

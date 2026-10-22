@@ -525,3 +525,42 @@ test("never like this: a pass becomes a standing rule, and an unsure pick says s
   const passed = (await page.evaluate(() => JSON.parse(localStorage.getItem("en.recommendationHistory")))).find((entry) => entry.recommendation.title === first);
   expect(passed.pass_reason).toBe("never like this: drama");
 });
+
+test("with AniList down, En picks from MyAnimeList, quickly, and stops asking AniList", async ({ page }) => {
+  await stubServices(page);
+  // Registered after stubServices, so these win: AniList refuses everything.
+  let anilistCalls = 0;
+  await page.route("https://graphql.anilist.co/**", async (route) => {
+    anilistCalls += 1;
+    await route.fulfill({ status: 403, contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: JSON.stringify({ errors: [{ message: "The AniList API has been temporarily disabled due to severe stability issues." }] }) });
+  });
+  await page.route("**/api/mal-search**", (route) =>
+    route.fulfill({ json: { match: { anilistId: null, malId: 457, title: "Mushishi", title_jp: "蟲師", year: 2005, episodes: 26, genre: "Slice of Life", genres: ["Slice of Life"], image_url: "", watch_links: [] } } })
+  );
+  const malNode = (id, title) => ({
+    anilistId: null, malId: id, title, title_jp: title, alternative_titles: { en: title, synonyms: [] }, format: "TV", status: "FINISHED",
+    episodes: 12, duration: 24, year: 2016, genres: ["Slice of Life", "Drama"], genre: "Slice of Life, Drama", tags: [], filterTags: ["Slice of Life"],
+    score: 84, popularity: 90000, image_url: `https://img.example/${id}.png`, watchLinks: [], isAdult: false, isSideStory: false, prequels: [], source: "myanimelist"
+  });
+  await page.route("**/api/mal-discover**", (route) =>
+    route.fulfill({ json: {
+      seeds: [{ malId: 457, recs: Array.from({ length: 14 }, (_, i) => ({ malId: 7000 + i, weight: 50 - i })) }],
+      candidates: Array.from({ length: 14 }, (_, i) => malNode(7000 + i, `From MAL ${i}`)),
+      charts: { top: [], popular: [], airing: [], season: [] }
+    } })
+  );
+  await seed(page, { "en.manualList": "Mushishi", "en.activeMode": "manual" });
+  await page.goto("/tonight");
+  const started = Date.now();
+  await page.getByRole("button", { name: "surprise me" }).click();
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText(/From MAL \d+/, { timeout: 15000 });
+  expect(Date.now() - started).toBeLessThan(10000);
+  const firstRound = anilistCalls;
+  expect(firstRound).toBeLessThanOrEqual(3);
+
+  // Asking again doesn't wait on AniList.
+  await page.getByRole("button", { name: "not tonight" }).click();
+  await page.getByRole("button", { name: "just not it" }).click();
+  await expect(page.getByRole("button", { name: /back to/ })).toBeVisible({ timeout: 15000 });
+  expect(anilistCalls).toBe(firstRound);
+});

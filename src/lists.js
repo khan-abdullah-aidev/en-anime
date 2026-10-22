@@ -1,4 +1,4 @@
-import { aniListRequest } from "./anilist.js";
+import { aniListRequest, isAniListDownError } from "./anilist.js";
 import { fetchPartnerList } from "./mal.js";
 
 // Username sign-in: read someone's public list from MyAnimeList (through
@@ -50,6 +50,7 @@ export async function fetchAniListUserList(username) {
   } catch (error) {
     if (/private user/i.test(error.message)) throw new Error(`${username}'s AniList list is private, so En can't read it.`);
     if (/not found/i.test(error.message)) throw new Error(`There's no AniList user called ${username}.`);
+    if (isAniListDownError(error)) throw new Error("AniList is down right now, so En can't read AniList lists. Try your MyAnimeList username, or come back in a little while.");
     throw new Error("AniList didn't answer. Try again in a moment.");
   }
   return toMalShapedList(data?.MediaListCollection?.lists || []);

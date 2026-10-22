@@ -5,6 +5,9 @@
   "functions": {
     "api/en.js": {
       "maxDuration": 60
+    },
+    "api/mal-discover.js": {
+      "maxDuration": 30
     }
   },
   "rewrites": [
